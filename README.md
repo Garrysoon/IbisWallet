@@ -13,7 +13,6 @@ Designed for experienced users - no hand-holding, no training wheels.
 
 ## Key Features
 
-- **Built with** [BDK](https://bitcoindevkit.org/)
 - **Multi-Wallet** - Create, import, export, and switch between multiple wallets
 - **Multi-Seed** - Supports BIP39 or Electrum seed phrases for importing
 - **Watch-only Wallets** - Import xpub/zpub, output descriptors, or single address
@@ -30,7 +29,7 @@ Designed for experienced users - no hand-holding, no training wheels.
 - **Manual Broadcast Raw Transactions** - Broadcast any signed transaction directly to the Bitcoin network
 - **Multi-Recipient** - Batch multiple outputs in a single transaction
 - **Encrypted Backups** - AES-256 encryption with optional label and custom server backup, import/export via file
-
+- **Built with** [BDK](https://bitcoindevkit.org/)
 ## Building
 
 Requires Android Studio with JDK 17.
