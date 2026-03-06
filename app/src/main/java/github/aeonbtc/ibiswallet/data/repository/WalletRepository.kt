@@ -25,6 +25,7 @@ import github.aeonbtc.ibiswallet.data.model.WalletImportConfig
 import github.aeonbtc.ibiswallet.data.model.WalletNetwork
 import github.aeonbtc.ibiswallet.data.model.WalletResult
 import github.aeonbtc.ibiswallet.data.model.WalletState
+import github.aeonbtc.ibiswallet.util.BitcoinUtils
 import github.aeonbtc.ibiswallet.util.ElectrumSeedUtil
 import github.aeonbtc.ibiswallet.tor.CachingElectrumProxy
 import github.aeonbtc.ibiswallet.tor.ElectrumNotification
@@ -36,6 +37,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -204,9 +206,11 @@ class WalletRepository(context: Context) {
      * using sat/kWU for sub-sat/vB precision.
      * 1 sat/vB = 250 sat/kWU, so 0.8 sat/vB = 200 sat/kWU.
      */
-    private fun feeRateFromSatPerVb(satPerVb: Float): FeeRate {
-        val satPerKwu = kotlin.math.round(satPerVb.toDouble() * 250.0).toLong().coerceAtLeast(1L).toULong()
-        return FeeRate.fromSatPerKwu(satPerKwu)
+    /**
+     * Delegates to [BitcoinUtils.feeRateToSatPerKwu].
+     */
+    private fun feeRateFromSatPerVb(satPerVb: Double): FeeRate {
+        return FeeRate.fromSatPerKwu(BitcoinUtils.feeRateToSatPerKwu(satPerVb))
     }
 
     /**
@@ -361,37 +365,17 @@ class WalletRepository(context: Context) {
                     try {
                         val addr = wallet.revealNextAddress(KeychainKind.EXTERNAL)
                         val addrStr = addr.address.toString()
-                        when {
-                            addrStr.startsWith("bc1p") || addrStr.startsWith("tb1p") -> AddressType.TAPROOT
-                            addrStr.startsWith("bc1q") || addrStr.startsWith("tb1q") -> AddressType.SEGWIT
-                            addrStr.startsWith("3") || addrStr.startsWith("2") -> AddressType.NESTED_SEGWIT
-                            else -> AddressType.LEGACY
-                        }
+                        BitcoinUtils.detectAddressType(addrStr) ?: AddressType.SEGWIT
                     } catch (_: Exception) {
                         AddressType.SEGWIT
                     }
-                when (walletAddrType) {
-                    AddressType.LEGACY -> 592L
-                    AddressType.NESTED_SEGWIT -> 364L // P2SH-P2WPKH input weight
-                    AddressType.SEGWIT -> 272L
-                    AddressType.TAPROOT -> 230L
-                }
+                BitcoinUtils.inputWeightWU(walletAddrType)
             }
 
-        // Detect if segwit from input weight (segwit/taproot have witness discount)
-        val isSegwit = inputWU < 500L // Legacy P2PKH is ~592 WU, segwit types are <300
-        val overheadWU = if (isSegwit) 42L else 40L
-
         val numInputs = unsignedTx.input().size
+        val outputScriptLengths = unsignedTx.output().map { it.scriptPubkey.toBytes().size }
 
-        var totalOutputWU = 0L
-        for (output in unsignedTx.output()) {
-            val scriptLen = output.scriptPubkey.toBytes().size
-            totalOutputWU += (9L + scriptLen) * 4L
-        }
-
-        val totalWU = overheadWU + (numInputs.toLong() * inputWU) + totalOutputWU
-        return kotlin.math.ceil(totalWU.toDouble() / 4.0)
+        return BitcoinUtils.estimateVsizeFromComponents(numInputs, inputWU, outputScriptLengths)
     }
 
     /**
@@ -409,18 +393,130 @@ class WalletRepository(context: Context) {
      *
      * Returns null if the PSBT can't be signed (watch-only wallet).
      */
+    /**
+     * Two-pass fee correction: sign the pass-1 PSBT to measure ceiled vsize,
+     * then delegates arithmetic to [BitcoinUtils.computeExactFeeSats].
+     */
     private fun computeExactFee(
         psbt: Psbt,
         wallet: Wallet,
         unsignedTx: Transaction,
-        targetSatPerVb: Float,
+        targetSatPerVb: Double,
     ): ExactFeeResult? {
         val vsize = estimateSignedVBytes(psbt, wallet, unsignedTx)
-        if (vsize <= 0.0) return null
-        // round(rate * vsize) so the effective rate (fee/vsize) is centered on the target
-        // rather than always above it. Max error is ±0.5/vsize sat/vB (< 0.005 sat/vB).
-        val exactFee = kotlin.math.round(targetSatPerVb.toDouble() * vsize).toLong()
-        return if (exactFee > 0) ExactFeeResult(exactFee.toULong(), vsize) else null
+        val feeSats = BitcoinUtils.computeExactFeeSats(targetSatPerVb, vsize) ?: return null
+        return ExactFeeResult(feeSats, vsize)
+    }
+
+    /**
+     * Result of [signWithFeeCorrection]: the broadcast-ready [Transaction]
+     * whose effective fee rate matches the target as closely as possible.
+     */
+    private data class SignedTxResult(val tx: Transaction, val feeSats: ULong, val vsize: Double)
+
+    /**
+     * Sign a PSBT and iteratively correct the fee so the effective rate
+     * (fee / ceil(weight/4)) matches [targetSatPerVb] after ECDSA signature
+     * non-determinism is accounted for.
+     *
+     * Algorithm:
+     *  1. Sign [initialPsbt], measure actual weight -> vsize.
+     *  2. Compute targetFee = round(rate * vsize).
+     *  3. If targetFee == baked-in fee, return (done).
+     *  4. Otherwise rebuild an unsigned PSBT via [rebuildWithFee] using
+     *     targetFee, sign it, measure again.
+     *  5. If the second sign's vsize yields the same targetFee, return.
+     *  6. On oscillation (two different vsizes -> two different targetFees),
+     *     pick the candidate whose effective rate is closer to the target.
+     *
+     * @param initialPsbt  The unsigned PSBT from the two-pass pre-correction.
+     * @param wallet       The wallet used for signing.
+     * @param targetSatPerVb  The user-chosen fee rate.
+     * @param rebuildWithFee  Lambda that builds a NEW unsigned PSBT with the
+     *                        given absolute fee baked in. Returns null if the
+     *                        rebuild fails (e.g. insufficient funds).
+     */
+    private fun signWithFeeCorrection(
+        initialPsbt: Psbt,
+        wallet: Wallet,
+        targetSatPerVb: Double,
+        rebuildWithFee: (ULong) -> Psbt?,
+    ): SignedTxResult {
+        // --- attempt 1: sign the initial PSBT ---
+        wallet.sign(initialPsbt)
+        val tx = initialPsbt.extractTx()
+        val bakedFee = try { initialPsbt.fee() } catch (_: Exception) { 0UL }
+        val weight = tx.weight()
+        val vsize = kotlin.math.ceil(weight.toDouble() / 4.0)
+        val targetFee = BitcoinUtils.computeExactFeeSats(targetSatPerVb, vsize)
+
+        if (targetFee == null || targetFee == bakedFee) {
+            return SignedTxResult(tx, bakedFee, vsize)
+        }
+
+        // --- attempt 2: rebuild with corrected fee, re-sign ---
+        val correctedPsbt = try {
+            rebuildWithFee(targetFee)
+        } catch (_: Exception) {
+            null
+        }
+        if (correctedPsbt == null) {
+            return SignedTxResult(tx, bakedFee, vsize)
+        }
+
+        wallet.sign(correctedPsbt)
+        val tx2 = correctedPsbt.extractTx()
+        val bakedFee2 = try { correctedPsbt.fee() } catch (_: Exception) { 0UL }
+        val weight2 = tx2.weight()
+        val vsize2 = kotlin.math.ceil(weight2.toDouble() / 4.0)
+        val targetFee2 = BitcoinUtils.computeExactFeeSats(targetSatPerVb, vsize2)
+
+        // If the corrected fee still matches the baked fee for this vsize, we're done
+        if (targetFee2 == null || targetFee2 == bakedFee2) {
+            return SignedTxResult(tx2, bakedFee2, vsize2)
+        }
+
+        // --- attempt 3: one more rebuild to try to converge ---
+        val correctedPsbt3 = try {
+            rebuildWithFee(targetFee2)
+        } catch (_: Exception) {
+            null
+        }
+        if (correctedPsbt3 != null) {
+            try {
+                wallet.sign(correctedPsbt3)
+                val tx3 = correctedPsbt3.extractTx()
+                val bakedFee3 = try { correctedPsbt3.fee() } catch (_: Exception) { 0UL }
+                val weight3 = tx3.weight()
+                val vsize3 = kotlin.math.ceil(weight3.toDouble() / 4.0)
+                val targetFee3 = BitcoinUtils.computeExactFeeSats(targetSatPerVb, vsize3)
+
+                if (targetFee3 == null || targetFee3 == bakedFee3) {
+                    return SignedTxResult(tx3, bakedFee3, vsize3)
+                }
+
+                // Still oscillating — pick the best among all three candidates
+                val candidates = listOf(
+                    SignedTxResult(tx, bakedFee, vsize),
+                    SignedTxResult(tx2, bakedFee2, vsize2),
+                    SignedTxResult(tx3, bakedFee3, vsize3),
+                )
+                return candidates.minByOrNull {
+                    kotlin.math.abs(it.feeSats.toDouble() / it.vsize - targetSatPerVb)
+                } ?: SignedTxResult(tx2, bakedFee2, vsize2)
+            } catch (_: Exception) {
+                // Fall through to pick best of first two
+            }
+        }
+
+        // Oscillation between attempt 1 and 2 — pick the one closer to target
+        val err1 = kotlin.math.abs(bakedFee.toDouble() / vsize - targetSatPerVb)
+        val err2 = kotlin.math.abs(bakedFee2.toDouble() / vsize2 - targetSatPerVb)
+        return if (err2 <= err1) {
+            SignedTxResult(tx2, bakedFee2, vsize2)
+        } else {
+            SignedTxResult(tx, bakedFee, vsize)
+        }
     }
 
     private val _walletState = MutableStateFlow(WalletState())
@@ -718,6 +814,7 @@ class WalletRepository(context: Context) {
                             isWatchOnly = true,
                             network = config.network,
                             masterFingerprint = null,
+                            gapLimit = config.gapLimit,
                         )
                     secureStorage.saveWalletMetadata(storedWallet)
                     secureStorage.saveWatchAddress(walletId, trimmedKey)
@@ -816,6 +913,7 @@ class WalletRepository(context: Context) {
                         network = config.network,
                         masterFingerprint = resolvedFingerprint,
                         seedFormat = config.seedFormat,
+                        gapLimit = config.gapLimit,
                     )
                 secureStorage.saveWalletMetadata(storedWallet)
 
@@ -1123,28 +1221,12 @@ class WalletRepository(context: Context) {
      * - zpub: 0x04B24746 (mainnet BIP84)
      * - vpub: 0x045F1CF6 (testnet BIP84)
      */
-    private fun convertToXpub(extendedKey: String): String {
-        // If already xpub/tpub, return as-is
-        if (extendedKey.startsWith("xpub") || extendedKey.startsWith("tpub")) {
-            return extendedKey
-        }
-
-        // Decode Base58Check
-        val decoded = Base58.decodeChecked(extendedKey)
-
-        // Determine target version bytes based on network (mainnet vs testnet)
-        val isTestnet = extendedKey.startsWith("vpub") || extendedKey.startsWith("upub")
-        val targetVersion =
-            if (isTestnet) {
-                byteArrayOf(0x04, 0x35, 0x87.toByte(), 0xCF.toByte()) // tpub
-            } else {
-                byteArrayOf(0x04, 0x88.toByte(), 0xB2.toByte(), 0x1E) // xpub
-            }
-
-        // Replace version bytes (first 4 bytes) and re-encode
-        val newData = targetVersion + decoded.sliceArray(4 until decoded.size)
-        return Base58.encodeChecked(newData)
-    }
+    /**
+     * Convert zpub/ypub/vpub/upub to xpub/tpub.
+     * Delegates to [BitcoinUtils.convertToXpub].
+     */
+    private fun convertToXpub(extendedKey: String): String =
+        BitcoinUtils.convertToXpub(extendedKey)
 
     /**
      * Create watch-only descriptors from extended public key.
@@ -1186,8 +1268,7 @@ class WalletRepository(context: Context) {
         // Convert to xpub/tpub format for BDK compatibility
         val xpubKey = convertToXpub(bareKey)
 
-        // Build the key expression with origin info.
-        // Always include origin: [fingerprint/path]xpub/0/*
+        // Build the key expression with origin info (delegates to BitcoinUtils).
         // Uses 00000000 as fallback fingerprint when none is provided.
         // This is critical for hardware wallet compatibility:
         // - SeedSigner uses the fingerprint in BIP32 derivations to verify change outputs
@@ -1195,33 +1276,12 @@ class WalletRepository(context: Context) {
         //   the master seed fingerprint, causing SeedSigner to reject the PSBT
         // - 00000000 triggers SeedSigner's missing-fingerprint fallback which derives
         //   keys and compares pubkeys directly (see _fill_missing_fingerprints)
-        val effectiveFingerprint = fingerprint ?: "00000000"
-        val path = originPath ?: addressType.accountPath
-        val keyWithOrigin = "[$effectiveFingerprint/$path]$xpubKey"
+        val keyWithOrigin = BitcoinUtils.buildKeyWithOrigin(xpubKey, fingerprint, originPath, addressType)
+        val (externalStr, internalStr) = BitcoinUtils.buildDescriptorStrings(keyWithOrigin, addressType)
 
-        // Build descriptor based on the user's selected address type
-        return when (addressType) {
-            AddressType.LEGACY -> {
-                val external = Descriptor("pkh($keyWithOrigin/0/*)", network)
-                val internal = Descriptor("pkh($keyWithOrigin/1/*)", network)
-                Pair(external, internal)
-            }
-            AddressType.NESTED_SEGWIT -> {
-                val external = Descriptor("sh(wpkh($keyWithOrigin/0/*))", network)
-                val internal = Descriptor("sh(wpkh($keyWithOrigin/1/*))", network)
-                Pair(external, internal)
-            }
-            AddressType.SEGWIT -> {
-                val external = Descriptor("wpkh($keyWithOrigin/0/*)", network)
-                val internal = Descriptor("wpkh($keyWithOrigin/1/*)", network)
-                Pair(external, internal)
-            }
-            AddressType.TAPROOT -> {
-                val external = Descriptor("tr($keyWithOrigin/0/*)", network)
-                val internal = Descriptor("tr($keyWithOrigin/1/*)", network)
-                Pair(external, internal)
-            }
-        }
+        val external = Descriptor(externalStr, network)
+        val internal = Descriptor(internalStr, network)
+        return Pair(external, internal)
     }
 
     /**
@@ -1235,22 +1295,16 @@ class WalletRepository(context: Context) {
         descriptor: String,
         network: Network,
     ): Pair<Descriptor, Descriptor> {
-        // Strip descriptor checksum suffix if present (e.g., "#abcdef12")
-        val checksumSuffix = descriptor.substringAfterLast('#', "")
-        val trimmed =
-            descriptor.trim()
-                .removeSuffix("#$checksumSuffix")
-                .trim()
+        val trimmed = BitcoinUtils.stripDescriptorChecksum(descriptor)
 
         // BIP 389 multipath descriptor: contains <0;1> syntax for combined receive/change paths
         // e.g. "wpkh([73c5da0a/84'/0'/0']xpub6.../<0;1>/*)"
-        if (trimmed.contains("<0;1>") || trimmed.contains("<1;0>")) {
+        if (BitcoinUtils.isBip389Multipath(trimmed)) {
             val multipathDescriptor = Descriptor(trimmed, network)
             if (multipathDescriptor.isMultipath()) {
                 val singles = multipathDescriptor.toSingleDescriptors()
                 if (singles.size == 2) {
-                    // BIP 389 defines <0;1> as receive;change ordering
-                    val isReversed = trimmed.contains("<1;0>")
+                    val isReversed = BitcoinUtils.isBip389Reversed(trimmed)
                     val external = if (isReversed) singles[1] else singles[0]
                     val internal = if (isReversed) singles[0] else singles[1]
                     return Pair(external, internal)
@@ -1265,27 +1319,9 @@ class WalletRepository(context: Context) {
             }
         }
 
-        // If descriptor contains /0/* it's the external; derive internal by replacing with /1/*
-        val external: Descriptor
-        val internal: Descriptor
-
-        if (trimmed.contains("/0/*)")) {
-            external = Descriptor(trimmed, network)
-            internal = Descriptor(trimmed.replace("/0/*)", "/1/*)"), network)
-        } else if (trimmed.contains("/1/*)")) {
-            // User pasted the internal descriptor - derive external
-            internal = Descriptor(trimmed, network)
-            external = Descriptor(trimmed.replace("/1/*)", "/0/*)"), network)
-        } else {
-            // No child path specified - add /0/* and /1/*
-            // Remove trailing ) and add child paths
-            val base = trimmed.trimEnd(')')
-            val closingParens = ")".repeat(trimmed.length - trimmed.trimEnd(')').length)
-            external = Descriptor("$base/0/*$closingParens", network)
-            internal = Descriptor("$base/1/*$closingParens", network)
-        }
-
-        return Pair(external, internal)
+        // Delegate string derivation to BitcoinUtils
+        val (externalStr, internalStr) = BitcoinUtils.deriveDescriptorPair(descriptor)
+        return Pair(Descriptor(externalStr, network), Descriptor(internalStr, network))
     }
 
     /**
@@ -1299,117 +1335,40 @@ class WalletRepository(context: Context) {
 
     /**
      * Parse key origin info from "[fingerprint/path]xpub..." format.
-     * Returns the bare key and any origin info found.
-     *
-     * Handles both ' and h notation for hardened derivation (84' or 84h).
+     * Delegates to [BitcoinUtils.parseKeyOrigin].
      */
     private fun parseKeyOrigin(input: String): KeyOriginInfo {
-        // Pattern: [fingerprint/derivation/path]xpub...
-        val originPattern = """\[([a-fA-F0-9]{8})/([^]]+)](.+)""".toRegex()
-        val match = originPattern.find(input.trim())
-
-        return if (match != null) {
-            val fingerprint = match.groupValues[1].lowercase()
-            val path =
-                match.groupValues[2]
-                    .replace("H", "'") // Normalize uppercase hardened notation (some wallets use H)
-                    .replace("h", "'") // Normalize lowercase hardened notation
-            val bareKey = match.groupValues[3]
-            KeyOriginInfo(bareKey, fingerprint, path)
-        } else {
-            KeyOriginInfo(input.trim(), null, null)
-        }
+        val result = BitcoinUtils.parseKeyOrigin(input)
+        return KeyOriginInfo(result.bareKey, result.fingerprint, result.derivationPath)
     }
 
     /**
      * Extract master fingerprint from key material string.
-     * Parses "[fingerprint/...]xpub" and "wpkh([fingerprint/...]xpub/0/wildcard)" formats.
-     * Returns null if no fingerprint found.
+     * Delegates to [BitcoinUtils.extractFingerprint].
      */
-    fun extractFingerprint(keyMaterial: String): String? {
-        val pattern = """\[([a-fA-F0-9]{8})/""".toRegex()
-        return pattern.find(keyMaterial.trim())?.groupValues?.get(1)?.lowercase()
-    }
+    fun extractFingerprint(keyMaterial: String): String? =
+        BitcoinUtils.extractFingerprint(keyMaterial)
 
     /**
      * Check if input string represents a watch-only key material.
-     * Supports:
-     * - Bare xpub/zpub/ypub/tpub: "zpub6rFR7..."
-     * - Origin-prefixed: "[73c5da0a/84'/0'/0']zpub6rFR7..."
-     * - Full output descriptors: wpkh([73c5da0a/84'/0'/0']xpub6.../0/wildcard)
+     * Delegates to [BitcoinUtils.isWatchOnlyInput].
      */
-    fun isWatchOnlyInput(input: String): Boolean {
-        val trimmed = input.trim()
-
-        // Bare xpub/zpub/ypub/tpub/vpub/upub
-        if (trimmed.startsWith("xpub") || trimmed.startsWith("ypub") ||
-            trimmed.startsWith("zpub") || trimmed.startsWith("tpub") ||
-            trimmed.startsWith("vpub") || trimmed.startsWith("upub")
-        ) {
-            return true
-        }
-
-        // Origin-prefixed: [fingerprint/path]xpub
-        if (trimmed.startsWith("[") && trimmed.contains("]")) {
-            val afterBracket = trimmed.substringAfter("]")
-            if (afterBracket.startsWith("xpub") || afterBracket.startsWith("ypub") ||
-                afterBracket.startsWith("zpub") || afterBracket.startsWith("tpub") ||
-                afterBracket.startsWith("vpub") || afterBracket.startsWith("upub")
-            ) {
-                return true
-            }
-        }
-
-        // Full output descriptor with public key
-        val descriptorPrefixes = listOf("pkh(", "wpkh(", "tr(", "sh(wpkh(", "sh(")
-        if (descriptorPrefixes.any { trimmed.lowercase().startsWith(it) }) {
-            // Make sure it contains a public key (xpub/tpub/ypub/zpub/vpub/upub), not a private key
-            val hasPublicKey =
-                trimmed.contains("xpub") || trimmed.contains("tpub") ||
-                    trimmed.contains("ypub") || trimmed.contains("zpub") ||
-                    trimmed.contains("vpub") || trimmed.contains("upub")
-            val hasPrivateKey = trimmed.contains("xar") || trimmed.contains("tprv")
-            return hasPublicKey && !hasPrivateKey
-        }
-
-        return false
-    }
+    fun isWatchOnlyInput(input: String): Boolean =
+        BitcoinUtils.isWatchOnlyInput(input)
 
     /**
      * Check if input string is a WIF (Wallet Import Format) private key.
-     * Mainnet: starts with 'K' or 'L' (compressed, 52 chars) or '5' (uncompressed, 51 chars)
-     * Testnet: starts with 'c' (compressed) or '9' (uncompressed)
-     * Validates via Base58Check decode: version byte 0x80 (mainnet) or 0xEF (testnet).
+     * Delegates to [BitcoinUtils.isWifPrivateKey].
      */
-    fun isWifPrivateKey(input: String): Boolean {
-        val trimmed = input.trim()
-        // Quick prefix check before expensive Base58 decode
-        val couldBeWif =
-            (trimmed.length == 52 && (trimmed[0] == 'K' || trimmed[0] == 'L' || trimmed[0] == 'c')) ||
-                (trimmed.length == 51 && (trimmed[0] == '5' || trimmed[0] == '9'))
-        if (!couldBeWif) return false
-
-        return try {
-            val decoded = Base58.decodeChecked(trimmed)
-            val version = decoded[0].toInt() and 0xFF
-            // 0x80 = mainnet, 0xEF = testnet
-            val validVersion = version == 0x80 || version == 0xEF
-            // Compressed: 34 bytes (1 version + 32 key + 1 compression flag)
-            // Uncompressed: 33 bytes (1 version + 32 key)
-            val validLength = decoded.size == 34 || decoded.size == 33
-            validVersion && validLength
-        } catch (_: Exception) {
-            false
-        }
-    }
+    fun isWifPrivateKey(input: String): Boolean =
+        BitcoinUtils.isWifPrivateKey(input)
 
     /**
      * Check if a WIF key is compressed (K/L/c prefix, 52 chars).
+     * Delegates to [BitcoinUtils.isWifCompressed].
      */
-    private fun isWifCompressed(wif: String): Boolean {
-        val trimmed = wif.trim()
-        return trimmed.length == 52 && (trimmed[0] == 'K' || trimmed[0] == 'L' || trimmed[0] == 'c')
-    }
+    private fun isWifCompressed(wif: String): Boolean =
+        BitcoinUtils.isWifCompressed(wif)
 
     /**
      * Check if input string is a valid Bitcoin address.
@@ -1433,19 +1392,10 @@ class WalletRepository(context: Context) {
 
     /**
      * Detect the address type from a Bitcoin address string.
+     * Delegates to [BitcoinUtils.detectAddressType].
      */
-    fun detectAddressType(address: String): AddressType? {
-        val trimmed = address.trim()
-        return when {
-            trimmed.startsWith("1") -> AddressType.LEGACY
-            trimmed.startsWith("3") -> AddressType.NESTED_SEGWIT
-            trimmed.startsWith("bc1q") || trimmed.startsWith("tb1q") -> AddressType.SEGWIT
-            trimmed.startsWith("bc1p") || trimmed.startsWith("tb1p") -> AddressType.TAPROOT
-            trimmed.startsWith("m") || trimmed.startsWith("n") -> AddressType.LEGACY // testnet P2PKH
-            trimmed.startsWith("2") -> AddressType.NESTED_SEGWIT // testnet P2SH
-            else -> null
-        }
-    }
+    fun detectAddressType(address: String): AddressType? =
+        BitcoinUtils.detectAddressType(address)
 
     /**
      * Create a single descriptor from a WIF private key.
@@ -1466,90 +1416,6 @@ class WalletRepository(context: Context) {
                 AddressType.TAPROOT -> "tr($wif)"
             }
         return Descriptor(descriptorStr, network)
-    }
-
-    /**
-     * Base58 encoding/decoding utilities for extended key conversion
-     */
-    private object Base58 {
-        private const val ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
-        private val INDEXES =
-            IntArray(128) { -1 }.also { arr ->
-                ALPHABET.forEachIndexed { i, c -> arr[c.code] = i }
-            }
-
-        fun decodeChecked(input: String): ByteArray {
-            val decoded = decode(input)
-            // Verify checksum (last 4 bytes)
-            val data = decoded.sliceArray(0 until decoded.size - 4)
-            val checksum = decoded.sliceArray(decoded.size - 4 until decoded.size)
-            val hash = sha256(sha256(data))
-            val expectedChecksum = hash.sliceArray(0 until 4)
-            require(checksum.contentEquals(expectedChecksum)) { "Invalid checksum" }
-            return data
-        }
-
-        fun encodeChecked(data: ByteArray): String {
-            val hash = sha256(sha256(data))
-            val checksum = hash.sliceArray(0 until 4)
-            return encode(data + checksum)
-        }
-
-        private fun decode(input: String): ByteArray {
-            if (input.isEmpty()) return ByteArray(0)
-
-            // Convert base58 string to big integer
-            var bi = java.math.BigInteger.ZERO
-            for (c in input) {
-                val digit = INDEXES[c.code]
-                require(digit >= 0) { "Invalid Base58 character: $c" }
-                bi = bi.multiply(java.math.BigInteger.valueOf(58)).add(java.math.BigInteger.valueOf(digit.toLong()))
-            }
-
-            // Convert to bytes
-            val bytes = bi.toByteArray()
-            // Remove leading zero if present (BigInteger sign byte)
-            val stripSign = bytes.isNotEmpty() && bytes[0] == 0.toByte() && bytes.size > 1
-            val stripped = if (stripSign) bytes.sliceArray(1 until bytes.size) else bytes
-
-            // Count leading zeros in input
-            var leadingZeros = 0
-            for (c in input) {
-                if (c == '1') leadingZeros++ else break
-            }
-
-            // Add leading zero bytes
-            return ByteArray(leadingZeros) + stripped
-        }
-
-        private fun encode(input: ByteArray): String {
-            if (input.isEmpty()) return ""
-
-            // Count leading zeros
-            var leadingZeros = 0
-            for (b in input) {
-                if (b == 0.toByte()) leadingZeros++ else break
-            }
-
-            // Convert to big integer
-            var bi = java.math.BigInteger(1, input)
-            val sb = StringBuilder()
-
-            while (bi > java.math.BigInteger.ZERO) {
-                val (quotient, remainder) = bi.divideAndRemainder(java.math.BigInteger.valueOf(58))
-                sb.append(ALPHABET[remainder.toInt()])
-                bi = quotient
-            }
-
-            // Add leading '1's for zero bytes
-            repeat(leadingZeros) { sb.append('1') }
-
-            return sb.reverse().toString()
-        }
-
-        private fun sha256(data: ByteArray): ByteArray {
-            return java.security.MessageDigest.getInstance("SHA-256").digest(data)
-        }
     }
 
     /**
@@ -1678,6 +1544,12 @@ class WalletRepository(context: Context) {
 
                 // Subscribe to block headers for new-block detection
                 subscribeBlockHeaders(client)
+
+                // Bail out if this connection attempt was cancelled (e.g. user
+                // switched to a different server while blocking I/O was in-flight).
+                // Without this check the stale server ID would overwrite the one
+                // already persisted by the newer, successful connection.
+                coroutineContext.ensureActive()
 
                 // Save the server config with proper ID
                 val savedConfig = saveElectrumServer(config)
@@ -1817,6 +1689,9 @@ class WalletRepository(context: Context) {
 
                 // Subscribe to block headers for new-block detection
                 subscribeBlockHeaders(client)
+
+                // Bail out if cancelled (user switched servers during blocking I/O)
+                coroutineContext.ensureActive()
 
                 secureStorage.setActiveServerId(serverId)
 
@@ -2105,10 +1980,13 @@ class WalletRepository(context: Context) {
                     // After that they're persisted in the database; re-fetching them on every
                     // app-launch full scan adds extra cold Electrum queries for no benefit.
                     val needsPrevTxouts = secureStorage.needsFullSync(activeWalletId)
+                    val walletGapLimit =
+                        (secureStorage.getWalletMetadata(activeWalletId)?.gapLimit
+                            ?: StoredWallet.DEFAULT_GAP_LIMIT).toULong()
                     val update =
                         client.fullScan(
                             request = fullScanRequest,
-                            stopGap = 20UL,
+                            stopGap = walletGapLimit,
                             batchSize = FULL_SCAN_BATCH_SIZE,
                             fetchPrevTxouts = needsPrevTxouts,
                         )
@@ -2200,12 +2078,13 @@ class WalletRepository(context: Context) {
      * Compute the Electrum script hash from a BDK Script object.
      * Electrum uses reversed SHA256 of the scriptPubKey bytes as the "script hash".
      */
+    /**
+     * Delegates to [BitcoinUtils.computeScriptHash].
+     */
     private fun computeScriptHash(script: Script): String {
         @OptIn(ExperimentalUnsignedTypes::class)
         val scriptBytes = script.toBytes().toUByteArray().toByteArray()
-        val digest = java.security.MessageDigest.getInstance("SHA-256")
-        val hash = digest.digest(scriptBytes)
-        return hash.reversedArray().joinToString("") { "%02x".format(it) }
+        return BitcoinUtils.computeScriptHash(scriptBytes)
     }
 
     /**
@@ -2646,8 +2525,8 @@ class WalletRepository(context: Context) {
                 if (BuildConfig.DEBUG) Log.d(TAG, "Notification collector started")
 
                 // Debounce buffer: accumulate notifications for 1 second of quiet
+                @Suppress("RedundantExplicitInitializer")
                 var pendingNotifications = mutableListOf<ElectrumNotification>()
-
                 @Suppress("RedundantExplicitInitializer")
                 var lastNotificationTime = 0L
 
@@ -2979,6 +2858,65 @@ class WalletRepository(context: Context) {
         secureStorage.saveTransactionLabel(walletId, txid, label)
     }
 
+    // ==================== BIP 329 Labels ====================
+
+    /**
+     * Export all labels for a wallet in BIP 329 JSONL format.
+     */
+    fun exportBip329Labels(walletId: String): String {
+        val addressLabels = secureStorage.getAllAddressLabels(walletId)
+        val txLabels = secureStorage.getAllTransactionLabels(walletId)
+        val metadata = secureStorage.getWalletMetadata(walletId)
+        val origin = if (metadata != null) {
+            github.aeonbtc.ibiswallet.util.Bip329Labels.buildOrigin(
+                metadata.addressType,
+                metadata.masterFingerprint,
+            )
+        } else {
+            null
+        }
+        return github.aeonbtc.ibiswallet.util.Bip329Labels.export(addressLabels, txLabels, origin)
+    }
+
+    /**
+     * Import BIP 329 JSONL or Electrum CSV labels into a wallet.
+     * Merge semantics: imported labels overwrite matching refs, existing labels are preserved.
+     */
+    fun importBip329Labels(
+        walletId: String,
+        content: String,
+    ): github.aeonbtc.ibiswallet.util.Bip329Labels.ImportResult {
+        val result = github.aeonbtc.ibiswallet.util.Bip329Labels.import(content)
+
+        for ((address, label) in result.addressLabels) {
+            secureStorage.saveAddressLabel(walletId, address, label)
+        }
+
+        for ((txid, label) in result.transactionLabels) {
+            secureStorage.saveTransactionLabel(walletId, txid, label)
+        }
+
+        // Handle output spendable (frozen) state
+        for ((outpoint, spendable) in result.outputSpendable) {
+            if (!spendable) {
+                secureStorage.freezeUtxo(walletId, outpoint)
+            } else {
+                secureStorage.unfreezeUtxo(walletId, outpoint)
+            }
+        }
+
+        return result
+    }
+
+    /**
+     * Get label counts for a wallet (address labels, transaction labels).
+     */
+    fun getLabelCounts(walletId: String): Pair<Int, Int> {
+        val addressLabels = secureStorage.getAllAddressLabels(walletId)
+        val txLabels = secureStorage.getAllTransactionLabels(walletId)
+        return Pair(addressLabels.size, txLabels.size)
+    }
+
     /**
      * Get all addresses for the wallet (receive, change, used)
      */
@@ -3233,7 +3171,7 @@ class WalletRepository(context: Context) {
     suspend fun sendBitcoin(
         recipientAddress: String,
         amountSats: ULong,
-        feeRateSatPerVb: Float = 1.0f,
+        feeRateSatPerVb: Double = 1.0,
         selectedUtxos: List<UtxoInfo>? = null,
         label: String? = null,
         isMaxSend: Boolean = false,
@@ -3334,8 +3272,26 @@ class WalletRepository(context: Context) {
                     }
 
                 onProgress("Signing transaction...")
-                currentWallet.sign(psbt)
-                val tx = psbt.extractTx()
+                val tx = if (!isMaxSend) {
+                    signWithFeeCorrection(
+                        initialPsbt = psbt,
+                        wallet = currentWallet,
+                        targetSatPerVb = feeRateSatPerVb,
+                        rebuildWithFee = { fee ->
+                            try {
+                                buildTx(
+                                    TxBuilder().applyConfirmedOnlyFilter()
+                                        .feeAbsolute(Amount.fromSat(fee)),
+                                ).finish(currentWallet)
+                            } catch (_: Exception) {
+                                null
+                            }
+                        },
+                    ).tx
+                } else {
+                    currentWallet.sign(psbt)
+                    psbt.extractTx()
+                }
 
                 onProgress("Broadcasting to network...")
                 client.transactionBroadcast(tx)
@@ -3370,7 +3326,7 @@ class WalletRepository(context: Context) {
     suspend fun dryRunBuildTx(
         recipientAddress: String,
         amountSats: ULong,
-        feeRateSatPerVb: Float = 1.0f,
+        feeRateSatPerVb: Double = 1.0,
         selectedUtxos: List<UtxoInfo>? = null,
         isMaxSend: Boolean = false,
     ): DryRunResult? =
@@ -3457,7 +3413,7 @@ class WalletRepository(context: Context) {
                     if (txVBytes > 0.0) {
                         feeSats.toDouble() / txVBytes
                     } else {
-                        feeRateSatPerVb.toDouble()
+                        feeRateSatPerVb
                     }
 
                 DryRunResult(
@@ -3487,7 +3443,7 @@ class WalletRepository(context: Context) {
      */
     suspend fun dryRunBuildTx(
         recipients: List<Recipient>,
-        feeRateSatPerVb: Float = 1.0f,
+        feeRateSatPerVb: Double = 1.0,
         selectedUtxos: List<UtxoInfo>? = null,
     ): DryRunResult? =
         withContext(Dispatchers.IO) {
@@ -3573,7 +3529,7 @@ class WalletRepository(context: Context) {
                     if (txVBytes > 0.0) {
                         feeSats.toDouble() / txVBytes
                     } else {
-                        feeRateSatPerVb.toDouble()
+                        feeRateSatPerVb
                     }
 
                 DryRunResult(
@@ -3603,7 +3559,7 @@ class WalletRepository(context: Context) {
      */
     suspend fun sendBitcoin(
         recipients: List<Recipient>,
-        feeRateSatPerVb: Float = 1.0f,
+        feeRateSatPerVb: Double = 1.0,
         selectedUtxos: List<UtxoInfo>? = null,
         label: String? = null,
         precomputedFeeSats: ULong? = null,
@@ -3694,8 +3650,21 @@ class WalletRepository(context: Context) {
                     }
 
                 onProgress("Signing transaction...")
-                currentWallet.sign(psbt)
-                val tx = psbt.extractTx()
+                val tx = signWithFeeCorrection(
+                    initialPsbt = psbt,
+                    wallet = currentWallet,
+                    targetSatPerVb = feeRateSatPerVb,
+                    rebuildWithFee = { fee ->
+                        try {
+                            buildTx(
+                                TxBuilder().applyConfirmedOnlyFilter()
+                                    .feeAbsolute(Amount.fromSat(fee)),
+                            ).finish(currentWallet)
+                        } catch (_: Exception) {
+                            null
+                        }
+                    },
+                ).tx
 
                 onProgress("Broadcasting to network...")
                 client.transactionBroadcast(tx)
@@ -3720,7 +3689,7 @@ class WalletRepository(context: Context) {
      */
     suspend fun createPsbt(
         recipients: List<Recipient>,
-        feeRateSatPerVb: Float = 1.0f,
+        feeRateSatPerVb: Double = 1.0,
         selectedUtxos: List<UtxoInfo>? = null,
         label: String? = null,
         precomputedFeeSats: ULong? = null,
@@ -3859,7 +3828,7 @@ class WalletRepository(context: Context) {
     suspend fun createPsbt(
         recipientAddress: String,
         amountSats: ULong,
-        feeRateSatPerVb: Float = 1.0f,
+        feeRateSatPerVb: Double = 1.0,
         selectedUtxos: List<UtxoInfo>? = null,
         label: String? = null,
         isMaxSend: Boolean = false,
@@ -4367,7 +4336,7 @@ class WalletRepository(context: Context) {
     suspend fun sweepPrivateKey(
         wif: String,
         destinationAddress: String,
-        feeRateSatPerVb: Float,
+        feeRateSatPerVb: Double,
         onProgress: (String) -> Unit = {},
     ): WalletResult<List<String>> =
         withContext(Dispatchers.IO) {
@@ -4478,7 +4447,7 @@ class WalletRepository(context: Context) {
      */
     suspend fun bumpFee(
         txid: String,
-        newFeeRate: Float,
+        newFeeRate: Double,
     ): WalletResult<String> =
         withContext(Dispatchers.IO) {
             val currentWallet = wallet ?: return@withContext WalletResult.Error("Wallet not initialized")
@@ -4499,9 +4468,56 @@ class WalletRepository(context: Context) {
                 val bumpFeeTxBuilder = BumpFeeTxBuilder(Txid.fromString(txid), feeRate)
                 val psbt = bumpFeeTxBuilder.finish(currentWallet)
 
-                currentWallet.sign(psbt)
+                // BumpFeeTxBuilder only accepts FeeRate (no feeAbsolute),
+                // so we apply post-sign correction by re-invoking the builder.
+                // The ±1 WU ECDSA drift is small relative to typical RBF bumps,
+                // but we still correct for consistency.
+                val result = signWithFeeCorrection(
+                    initialPsbt = psbt,
+                    wallet = currentWallet,
+                    targetSatPerVb = newFeeRate,
+                    rebuildWithFee = { fee ->
+                        // Rebuild: extract the same inputs from the initial PSBT,
+                        // reconstruct with feeAbsolute via a regular TxBuilder.
+                        try {
+                            val unsignedTx = psbt.extractTx()
+                            val inputs = unsignedTx.input()
+                            val outputs = unsignedTx.output()
 
-                val tx = psbt.extractTx()
+                            // Identify change vs recipient outputs using isMine().
+                            // Recipient outputs get fixed amounts via addRecipient;
+                            // change output absorbs the remainder via drainTo.
+                            var b = TxBuilder()
+                                .feeAbsolute(Amount.fromSat(fee))
+
+                            for (inp in inputs) {
+                                b = b.addUtxo(inp.previousOutput)
+                            }
+                            b = b.manuallySelectedOnly()
+
+                            for (output in outputs) {
+                                val isChange = try {
+                                    currentWallet.isMine(output.scriptPubkey)
+                                } catch (_: Exception) { false }
+
+                                b = if (isChange) {
+                                    b.drainTo(output.scriptPubkey)
+                                } else {
+                                    b.addRecipient(
+                                        output.scriptPubkey,
+                                        Amount.fromSat(output.value.toSat()),
+                                    )
+                                }
+                            }
+
+                            b.finish(currentWallet)
+                        } catch (_: Exception) {
+                            null
+                        }
+                    },
+                )
+                val tx = result.tx
+
                 client.transactionBroadcast(tx)
 
                 val newTxid = tx.computeTxid().toString()
@@ -4551,7 +4567,7 @@ class WalletRepository(context: Context) {
      */
     suspend fun cpfp(
         parentTxid: String,
-        feeRate: Float,
+        feeRate: Double,
     ): WalletResult<String> =
         withContext(Dispatchers.IO) {
             val currentWallet = wallet ?: return@withContext WalletResult.Error("Wallet not initialized")
@@ -4589,7 +4605,7 @@ class WalletRepository(context: Context) {
                 // Estimate child tx vsize (~150 vB for 1-in-1-out P2WPKH/P2TR)
                 // Add buffer for potential additional inputs
                 val estimatedVsize = 150L + (parentUtxos.size - 1) * 68L // ~68 vB per additional input
-                val effectiveFeeRateCeil = kotlin.math.ceil(feeRate.toDouble()).toULong()
+                val effectiveFeeRateCeil = kotlin.math.ceil(feeRate).toULong()
                 val estimatedFee = effectiveFeeRateCeil * estimatedVsize.toULong()
 
                 // Check if parent output can cover fee AND leave dust-safe amount
@@ -4602,40 +4618,62 @@ class WalletRepository(context: Context) {
                     )
                 }
 
-                var txBuilder =
-                    TxBuilder()
-                        .feeRate(bdkFeeRate)
-
-                // Add all UTXOs from parent transaction as REQUIRED inputs
-                // This ensures these unconfirmed outputs are spent, pulling the parent tx
-                for (utxo in parentUtxos) {
-                    if (BuildConfig.DEBUG) {
-                        Log.d(
-                            TAG,
-                            "CPFP: Adding required UTXO: ${utxo.outpoint.txid}:${utxo.outpoint.vout}, value=${utxo.txout.value.toSat()}",
-                        )
+                // Local helper to build the CPFP transaction with given fee config
+                fun buildCpfpTx(builder: TxBuilder): TxBuilder {
+                    var b = builder
+                    for (utxo in parentUtxos) {
+                        if (BuildConfig.DEBUG) {
+                            Log.d(
+                                TAG,
+                                "CPFP: Adding required UTXO: ${utxo.outpoint.txid}:${utxo.outpoint.vout}, value=${utxo.txout.value.toSat()}",
+                            )
+                        }
+                        b = b.addUtxo(utxo.outpoint)
                     }
-                    txBuilder = txBuilder.addUtxo(utxo.outpoint)
-                }
-
-                txBuilder =
-                    if (canCoverFeeWithDust) {
-                        // Parent output is enough - just drain it to change address
-                        // BDK will calculate the exact fee and output amount
-                        txBuilder.drainTo(changeAddress.address.scriptPubkey())
+                    b = if (canCoverFeeWithDust) {
+                        b.drainTo(changeAddress.address.scriptPubkey())
                     } else {
-                        // Parent output is too small - need additional UTXOs
-                        // Use drainWallet to include all available UTXOs
-                        txBuilder
-                            .drainWallet()
+                        b.drainWallet()
                             .drainTo(changeAddress.address.scriptPubkey())
                     }
+                    return b
+                }
 
-                val psbt = txBuilder.finish(currentWallet)
+                // Two-pass fee correction: pass-1 with feeRate for coin selection,
+                // then sign to measure actual vsize, rebuild with feeAbsolute
+                val pass1Psbt = buildCpfpTx(TxBuilder().feeRate(bdkFeeRate)).finish(currentWallet)
+                val exactFeeResult = computeExactFee(
+                    pass1Psbt, currentWallet, pass1Psbt.extractTx(), feeRate,
+                )
+                val psbt = if (exactFeeResult != null) {
+                    try {
+                        buildCpfpTx(
+                            TxBuilder().feeAbsolute(Amount.fromSat(exactFeeResult.feeSats)),
+                        ).finish(currentWallet)
+                    } catch (_: Exception) {
+                        pass1Psbt
+                    }
+                } else {
+                    pass1Psbt
+                }
 
-                currentWallet.sign(psbt)
+                // Post-sign fee correction for ECDSA signature non-determinism
+                val result = signWithFeeCorrection(
+                    initialPsbt = psbt,
+                    wallet = currentWallet,
+                    targetSatPerVb = feeRate,
+                    rebuildWithFee = { fee ->
+                        try {
+                            buildCpfpTx(
+                                TxBuilder().feeAbsolute(Amount.fromSat(fee)),
+                            ).finish(currentWallet)
+                        } catch (_: Exception) {
+                            null
+                        }
+                    },
+                )
+                val tx = result.tx
 
-                val tx = psbt.extractTx()
                 client.transactionBroadcast(tx)
 
                 val childTxid = tx.computeTxid().toString()
@@ -4733,9 +4771,10 @@ class WalletRepository(context: Context) {
     fun editWallet(
         walletId: String,
         newName: String,
+        newGapLimit: Int,
         newFingerprint: String? = null,
     ) {
-        if (secureStorage.editWallet(walletId, newName, newFingerprint)) {
+        if (secureStorage.editWallet(walletId, newName, newGapLimit, newFingerprint)) {
             updateWalletState()
         }
     }
@@ -5105,6 +5144,12 @@ class WalletRepository(context: Context) {
         secureStorage.setAutoSwitchServerEnabled(enabled)
     }
 
+    // ==================== User Disconnect Intent ====================
+
+    fun isUserDisconnected(): Boolean = secureStorage.isUserDisconnected()
+
+    fun setUserDisconnected(disconnected: Boolean) = secureStorage.setUserDisconnected(disconnected)
+
     // ==================== Tor Settings ====================
 
     /**
@@ -5216,6 +5261,14 @@ class WalletRepository(context: Context) {
      */
     fun setSpendUnconfirmed(enabled: Boolean) {
         secureStorage.setSpendUnconfirmed(enabled)
+    }
+
+    fun isNfcEnabled(): Boolean {
+        return secureStorage.isNfcEnabled()
+    }
+
+    fun setNfcEnabled(enabled: Boolean) {
+        secureStorage.setNfcEnabled(enabled)
     }
 
     // ==================== Fee Estimation Settings ====================

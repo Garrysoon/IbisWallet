@@ -71,6 +71,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import github.aeonbtc.ibiswallet.data.model.AddressType
 import github.aeonbtc.ibiswallet.data.model.SeedFormat
+import github.aeonbtc.ibiswallet.data.model.StoredWallet
 import github.aeonbtc.ibiswallet.data.model.WalletImportConfig
 import github.aeonbtc.ibiswallet.data.model.WalletNetwork
 import github.aeonbtc.ibiswallet.ui.components.IbisButton
@@ -175,6 +176,8 @@ fun ImportWalletScreen(
     var customPath by remember { mutableStateOf("") }
     var useCustomFingerprint by remember { mutableStateOf(false) }
     var masterFingerprint by remember { mutableStateOf("") }
+    var useCustomGapLimit by remember { mutableStateOf(false) }
+    var gapLimitText by remember { mutableStateOf("") }
 
     // Determine if input is seed phrase, extended key, output descriptor, WIF key, or address
     val trimmedInput = keyMaterial.trim()
@@ -646,7 +649,12 @@ fun ImportWalletScreen(
                                 if (isKeyOrDescriptor || isWifInput || isAddressInput) {
                                     input // Preserve case for keys/descriptors/addresses (Base58/Bech32 encoded)
                                 } else {
-                                    input.lowercase() // Lowercase for seed phrases
+                                    // Lowercase for seed phrases, then expand abbreviated BIP39
+                                    // words (e.g. ColdCard exports first 4 letters of each word)
+                                    QrFormatParser.expandAbbreviatedMnemonic(
+                                        context,
+                                        input.lowercase(),
+                                    )
                                 }
                         },
                         modifier =
@@ -1137,6 +1145,81 @@ fun ImportWalletScreen(
                                 )
                             }
                         }
+
+                        // Set Custom Gap Limit
+                        Row(
+                            modifier =
+                                Modifier
+                                    .fillMaxWidth()
+                                    .height(36.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable { useCustomGapLimit = !useCustomGapLimit },
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Checkbox(
+                                checked = useCustomGapLimit,
+                                onCheckedChange = { useCustomGapLimit = it },
+                                colors =
+                                    CheckboxDefaults.colors(
+                                        checkedColor = BitcoinOrange,
+                                        uncheckedColor = TextSecondary,
+                                    ),
+                            )
+                            Text(
+                                text = "Set Custom Gap Limit",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onBackground,
+                            )
+                        }
+
+                        // Gap limit field
+                        AnimatedVisibility(
+                            visible = useCustomGapLimit,
+                            enter = expandVertically(),
+                            exit = shrinkVertically(),
+                        ) {
+                            Column {
+                                Spacer(modifier = Modifier.height(8.dp))
+                                val gapLimitInt = gapLimitText.toIntOrNull()
+                                val gapLimitValid = gapLimitText.isEmpty() || (gapLimitInt != null && gapLimitInt in 1..10000)
+                                OutlinedTextField(
+                                    value = gapLimitText,
+                                    onValueChange = { value ->
+                                        if (value.isEmpty() || value.all { it.isDigit() }) {
+                                            gapLimitText = value
+                                        }
+                                    },
+                                    modifier =
+                                        Modifier
+                                            .fillMaxWidth()
+                                            .padding(start = 12.dp),
+                                    placeholder = {
+                                        Text(
+                                            "${StoredWallet.DEFAULT_GAP_LIMIT}",
+                                            color = TextSecondary.copy(alpha = 0.5f),
+                                        )
+                                    },
+                                    singleLine = true,
+                                    isError = gapLimitText.isNotEmpty() && !gapLimitValid,
+                                    supportingText = {
+                                        Text(
+                                            "Default: ${StoredWallet.DEFAULT_GAP_LIMIT}. Scan limit for empty addresses (1–10000)",
+                                            color = TextSecondary.copy(alpha = 0.5f),
+                                        )
+                                    },
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                    shape = RoundedCornerShape(8.dp),
+                                    colors =
+                                        OutlinedTextFieldDefaults.colors(
+                                            focusedBorderColor = BitcoinOrange,
+                                            unfocusedBorderColor = BorderColor,
+                                            focusedTextColor = MaterialTheme.colorScheme.onBackground,
+                                            unfocusedTextColor = MaterialTheme.colorScheme.onBackground,
+                                            cursorColor = BitcoinOrange,
+                                        ),
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -1189,6 +1272,14 @@ fun ImportWalletScreen(
                     null -> SeedFormat.BIP39
                 }
 
+                val customGapLimit =
+                    if (useCustomGapLimit && gapLimitText.isNotBlank()) {
+                        gapLimitText.toIntOrNull()?.coerceIn(1, 10000)
+                            ?: StoredWallet.DEFAULT_GAP_LIMIT
+                    } else {
+                        StoredWallet.DEFAULT_GAP_LIMIT
+                    }
+
                 val config =
                     WalletImportConfig(
                         name = finalName,
@@ -1200,6 +1291,7 @@ fun ImportWalletScreen(
                         isWatchOnly = isWatchOnly || isBitcoinAddress,
                         masterFingerprint = fingerprintValue,
                         seedFormat = seedFormat,
+                        gapLimit = customGapLimit,
                     )
                 onImport(config)
             },

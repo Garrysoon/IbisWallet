@@ -3,6 +3,7 @@ package github.aeonbtc.ibiswallet.data
 import android.util.Log
 import github.aeonbtc.ibiswallet.BuildConfig
 import github.aeonbtc.ibiswallet.data.model.FeeEstimates
+import github.aeonbtc.ibiswallet.util.BitcoinUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.Dns
@@ -132,21 +133,17 @@ class FeeEstimationService {
         }
     }
 
+    /**
+     * Delegates JSON parsing to [BitcoinUtils.parseFeeEstimatesJson],
+     * then wraps in the app's [FeeEstimates] model.
+     */
     private fun parseResponse(jsonString: String): FeeEstimates {
-        val json = JSONObject(jsonString)
-
-        // Both endpoints return the same field names
-        // Precise returns decimals, recommended returns integers
-        val fastestFee = json.optDouble("fastestFee", 1.0)
-        val halfHourFee = json.optDouble("halfHourFee", 1.0)
-        val hourFee = json.optDouble("hourFee", 1.0)
-        val minimumFee = json.optDouble("minimumFee", 1.0)
-
+        val parsed = BitcoinUtils.parseFeeEstimatesJson(jsonString)
         return FeeEstimates(
-            fastestFee = fastestFee,
-            halfHourFee = halfHourFee,
-            hourFee = hourFee,
-            minimumFee = minimumFee,
+            fastestFee = parsed.fastestFee,
+            halfHourFee = parsed.halfHourFee,
+            hourFee = parsed.hourFee,
+            minimumFee = parsed.minimumFee,
         )
     }
 }

@@ -61,7 +61,12 @@ data class StoredWallet(
     val createdAt: Long = System.currentTimeMillis(),
     val masterFingerprint: String? = null, // Master key fingerprint (8 hex chars) for watch-only wallets
     val seedFormat: SeedFormat = SeedFormat.BIP39,
-)
+    val gapLimit: Int = DEFAULT_GAP_LIMIT,
+) {
+    companion object {
+        const val DEFAULT_GAP_LIMIT = 20
+    }
+}
 
 /**
  * Address with optional label for display
@@ -219,6 +224,7 @@ data class WalletImportConfig(
     val isWatchOnly: Boolean = false,
     val masterFingerprint: String? = null, // Master key fingerprint (8 hex chars) for hardware wallet PSBT signing
     val seedFormat: SeedFormat = SeedFormat.BIP39,
+    val gapLimit: Int = StoredWallet.DEFAULT_GAP_LIMIT,
 ) {
     /** Redact sensitive fields to prevent accidental logging of key material. */
     override fun toString(): String =

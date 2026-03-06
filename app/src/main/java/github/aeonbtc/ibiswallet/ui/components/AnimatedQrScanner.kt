@@ -492,6 +492,191 @@ private fun handleImportQrData(
 }
 
 /**
+ * QR scanner dialog for BIP 329 label import. Supports:
+ * 1. Multi-frame BC-UR animated QR (ur:bytes) — decoded to JSONL string
+ * 2. Single-frame plain text containing BIP 329 JSONL lines
+ *
+ * @param onLabelsScanned Called with the decoded JSONL content string
+ * @param onDismiss Called when the dialog is dismissed
+ */
+@Composable
+fun LabelsQrScannerDialog(
+    onLabelsScanned: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val context = LocalContext.current
+
+    @Suppress("DEPRECATION")
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var cameraPermission by remember {
+        mutableIntStateOf(
+            ContextCompat.checkSelfPermission(context, android.Manifest.permission.CAMERA),
+        )
+    }
+    val cameraPermissionLauncher =
+        androidx.activity.compose.rememberLauncherForActivityResult(
+            contract = androidx.activity.result.contract.ActivityResultContracts.RequestPermission(),
+        ) { isGranted ->
+            if (isGranted) {
+                cameraPermission = android.content.pm.PackageManager.PERMISSION_GRANTED
+            } else {
+                onDismiss()
+            }
+        }
+
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        if (cameraPermission != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            cameraPermissionLauncher.launch(android.Manifest.permission.CAMERA)
+        }
+    }
+
+    if (cameraPermission == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+        val urDecoder = remember { URDecoder() }
+        var scanProgress by remember { mutableFloatStateOf(0f) }
+        var isComplete by remember { mutableStateOf(false) }
+
+        Dialog(
+            onDismissRequest = onDismiss,
+            properties = DialogProperties(usePlatformDefaultWidth = false),
+        ) {
+            Surface(
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                shape = RoundedCornerShape(24.dp),
+                color = DarkSurface,
+            ) {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    // Header
+                    Row(
+                        modifier =
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(16.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = "Scan Labels QR",
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onBackground,
+                        )
+                        TextButton(onClick = onDismiss) {
+                            Text("Cancel", color = TextSecondary)
+                        }
+                    }
+
+                    // Camera preview
+                    QrCameraPreview(
+                        lifecycleOwner = lifecycleOwner,
+                        isComplete = isComplete,
+                        onFrameScanned = { scannedText ->
+                            handleLabelsQrData(
+                                scannedText = scannedText,
+                                urDecoder = urDecoder,
+                                onProgress = { progress ->
+                                    scanProgress = progress
+                                },
+                                onComplete = { decodedContent ->
+                                    isComplete = true
+                                    onLabelsScanned(decodedContent)
+                                },
+                            )
+                        },
+                        modifier =
+                            Modifier
+                                .fillMaxWidth()
+                                .height(300.dp)
+                                .padding(horizontal = 16.dp),
+                    )
+
+                    // Progress indicator for multi-frame scanning
+                    if (scanProgress > 0f && !isComplete) {
+                        Column(
+                            modifier =
+                                Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp)
+                                    .padding(top = 8.dp),
+                        ) {
+                            LinearProgressIndicator(
+                                progress = { scanProgress },
+                                modifier = Modifier.fillMaxWidth(),
+                                color = BitcoinOrange,
+                                trackColor = BitcoinOrange.copy(alpha = 0.15f),
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "Scanning: ${(scanProgress * 100).toInt()}%",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = TextSecondary,
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    Text(
+                        text = "Scan a BIP 329 labels QR code exported from another wallet",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextSecondary,
+                        modifier = Modifier.padding(horizontal = 16.dp),
+                    )
+
+                    Spacer(modifier = Modifier.height(16.dp))
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Process a scanned QR frame for BIP 329 label import. Handles:
+ * - BC-UR multi-frame (ur:bytes) containing JSONL bytes
+ * - Plain text containing BIP 329 JSONL lines
+ */
+private fun handleLabelsQrData(
+    scannedText: String,
+    urDecoder: URDecoder,
+    onProgress: (Float) -> Unit,
+    onComplete: (String) -> Unit,
+) {
+    val trimmed = scannedText.trim()
+
+    // Check if it's a BC-UR part (case-insensitive)
+    if (trimmed.lowercase().startsWith("ur:")) {
+        try {
+            urDecoder.receivePart(trimmed)
+            val progress = urDecoder.estimatedPercentComplete
+            onProgress(progress.toFloat())
+
+            if (urDecoder.result != null) {
+                val result = urDecoder.result
+                if (result.type == ResultType.SUCCESS) {
+                    val ur = result.ur
+                    // ur:bytes contains CBOR-encoded JSONL bytes
+                    val rawBytes = ur.toBytes()
+                    val content = String(rawBytes, Charsets.UTF_8)
+                    onComplete(content)
+                }
+            }
+        } catch (_: Exception) {
+            // Invalid UR part, ignore
+        }
+        return
+    }
+
+    // Not a UR — check if it looks like BIP 329 JSONL (starts with {)
+    if (trimmed.startsWith("{") && trimmed.contains("\"type\"")) {
+        onComplete(trimmed)
+    }
+}
+
+/**
  * Process a single scanned QR frame. Handles BC-UR multi-frame,
  * single-frame base64 PSBT, and raw hex transactions.
  */

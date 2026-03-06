@@ -3,6 +3,7 @@
 package github.aeonbtc.ibiswallet.ui.screens
 
 import android.graphics.Bitmap
+import android.nfc.NfcAdapter
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.core.graphics.createBitmap
@@ -21,6 +22,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -28,6 +30,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
@@ -36,6 +39,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -62,7 +66,9 @@ import github.aeonbtc.ibiswallet.ui.theme.BitcoinOrange
 import github.aeonbtc.ibiswallet.ui.theme.BorderColor
 import github.aeonbtc.ibiswallet.ui.theme.DarkCard
 import github.aeonbtc.ibiswallet.ui.theme.DarkSurface
+import github.aeonbtc.ibiswallet.ui.theme.SuccessGreen
 import github.aeonbtc.ibiswallet.ui.theme.TextSecondary
+import github.aeonbtc.ibiswallet.nfc.NdefHostApduService
 import github.aeonbtc.ibiswallet.util.SecureClipboard
 import java.util.Locale
 
@@ -127,6 +133,22 @@ fun ReceiveScreen(
     LaunchedEffect(qrContent) {
         qrContent?.let { content ->
             qrBitmap = generateQrCode(content)
+        }
+    }
+
+    // NFC broadcasting: set NDEF payload to current address/BIP21 URI while on this screen.
+    // Another phone tapping this device will receive the same data as scanning the QR code.
+    // Respects the NFC setting in Settings — user can disable broadcasting entirely.
+    val nfcAvailable = remember {
+        NfcAdapter.getDefaultAdapter(context) != null &&
+            SecureStorage(context).isNfcEnabled()
+    }
+    DisposableEffect(qrContent) {
+        if (nfcAvailable && qrContent != null) {
+            NdefHostApduService.setNdefPayload(qrContent)
+        }
+        onDispose {
+            NdefHostApduService.setNdefPayload(null)
         }
     }
 
@@ -208,6 +230,27 @@ fun ReceiveScreen(
                     color = MaterialTheme.colorScheme.onBackground,
                     modifier = Modifier.fillMaxWidth(),
                 )
+                if (nfcAvailable) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 2.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Sensors,
+                            contentDescription = "NFC broadcasting",
+                            tint = SuccessGreen,
+                            modifier = Modifier.size(14.dp),
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "NFC",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = SuccessGreen,
+                        )
+                    }
+                }
 
                 Spacer(modifier = Modifier.height(16.dp))
                 // QR Code - clickable to enlarge

@@ -82,7 +82,6 @@ fun WalletSelectorDropdown(
         verticalAlignment = Alignment.CenterVertically,
         modifier =
             modifier.clickable(
-                enabled = wallets.size > 1,
                 indication = null,
                 interactionSource = remember { MutableInteractionSource() },
                 onClick = onToggle,
@@ -95,18 +94,16 @@ fun WalletSelectorDropdown(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
-        if (wallets.size > 1) {
-            Spacer(modifier = Modifier.width(4.dp))
-            Icon(
-                imageVector = Icons.Default.KeyboardArrowDown,
-                contentDescription = "Select wallet",
-                tint = TextSecondary,
-                modifier =
-                    Modifier
-                        .size(18.dp)
-                        .rotate(chevronRotation),
-            )
-        }
+        Spacer(modifier = Modifier.width(4.dp))
+        Icon(
+            imageVector = Icons.Default.KeyboardArrowDown,
+            contentDescription = "Select wallet",
+            tint = TextSecondary,
+            modifier =
+                Modifier
+                    .size(18.dp)
+                    .rotate(chevronRotation),
+        )
     }
 }
 

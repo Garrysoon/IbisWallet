@@ -1,8 +1,20 @@
 package github.aeonbtc.ibiswallet
 
 import android.app.ActivityManager
+import android.app.PendingIntent
 import android.content.ComponentName
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.nfc.NdefMessage
+import android.nfc.NdefRecord
+import android.nfc.NfcAdapter
+import android.nfc.tech.IsoDep
+import android.nfc.tech.Ndef
+import android.nfc.tech.NfcA
+import android.nfc.tech.NfcB
+import android.nfc.tech.NfcF
+import android.nfc.tech.NfcV
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -43,6 +55,68 @@ class MainActivity : FragmentActivity() {
     private var wasInBackground = false
     private val biometricAutoCancelHandler = Handler(Looper.getMainLooper())
     private var isCloakActive = false
+
+    // NFC foreground dispatch — enabled when Send screen is active so NFC tag
+    // reads go directly to this activity instead of triggering the system chooser.
+    private var nfcAdapter: NfcAdapter? = null
+    private var nfcForegroundRequested = false
+    private var nfcForegroundActive = false
+
+    /**
+     * Enable NFC foreground dispatch so this activity receives NFC tag reads
+     * with priority over the manifest intent filter. Called when the Send screen
+     * becomes visible and NFC is enabled in settings.
+     */
+    fun enableNfcForegroundDispatch() {
+        nfcForegroundRequested = true
+        activateNfcForegroundDispatch()
+    }
+
+    /**
+     * Disable NFC foreground dispatch. Called when the Send screen is no longer visible.
+     */
+    fun disableNfcForegroundDispatch() {
+        nfcForegroundRequested = false
+        deactivateNfcForegroundDispatch()
+    }
+
+    private fun activateNfcForegroundDispatch() {
+        val adapter = nfcAdapter ?: return
+        if (nfcForegroundActive) return
+        if (!secureStorage.isNfcEnabled()) return
+        val intent = Intent(this, javaClass).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        val pendingIntent = PendingIntent.getActivity(
+            this, 0, intent,
+            PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        // Catch all NDEF tags, plus tech-discovered for non-NDEF NFC devices (HCE peers)
+        val ndefFilter = IntentFilter(NfcAdapter.ACTION_NDEF_DISCOVERED).apply {
+            try { addDataScheme("bitcoin") } catch (_: Exception) { }
+        }
+        val techFilter = IntentFilter(NfcAdapter.ACTION_TECH_DISCOVERED)
+        val tagFilter = IntentFilter(NfcAdapter.ACTION_TAG_DISCOVERED)
+        val filters = arrayOf(ndefFilter, techFilter, tagFilter)
+        val techLists = arrayOf(
+            arrayOf(Ndef::class.java.name),
+            arrayOf(IsoDep::class.java.name),
+            arrayOf(NfcA::class.java.name),
+            arrayOf(NfcB::class.java.name),
+            arrayOf(NfcF::class.java.name),
+            arrayOf(NfcV::class.java.name),
+        )
+        try {
+            adapter.enableForegroundDispatch(this, pendingIntent, filters, techLists)
+            nfcForegroundActive = true
+        } catch (_: Exception) { }
+    }
+
+    private fun deactivateNfcForegroundDispatch() {
+        if (!nfcForegroundActive) return
+        try {
+            nfcAdapter?.disableForegroundDispatch(this)
+        } catch (_: Exception) { }
+        nfcForegroundActive = false
+    }
 
     /**
      * Apply any pending launcher icon alias swap. Called early in onCreate
@@ -102,6 +176,7 @@ class MainActivity : FragmentActivity() {
 
         secureStorage = SecureStorage(this)
         walletViewModel = ViewModelProvider(this)[WalletViewModel::class.java]
+        nfcAdapter = NfcAdapter.getDefaultAdapter(this)
 
         // Apply pending icon swap before any UI
         applyPendingIconSwap()
@@ -125,6 +200,9 @@ class MainActivity : FragmentActivity() {
 
         // Setup biometric prompt
         setupBiometricPrompt()
+
+        // Check for incoming bitcoin: URI intent
+        handleBitcoinIntent(intent)
 
         setContent {
             IbisWalletTheme {
@@ -224,6 +302,12 @@ class MainActivity : FragmentActivity() {
     override fun onResume() {
         super.onResume()
 
+        // Re-enable NFC foreground dispatch if the Send screen requested it
+        // (Android requires disabling in onPause and re-enabling in onResume)
+        if (nfcForegroundRequested) {
+            activateNfcForegroundDispatch()
+        }
+
         val securityMethod = secureStorage.getSecurityMethod()
         if (securityMethod == SecureStorage.SecurityMethod.NONE && !isCloakActive) {
             isUnlocked = true
@@ -256,11 +340,21 @@ class MainActivity : FragmentActivity() {
             }
         }
 
-        // Trigger biometric if locked and biometric is enabled
-        // Skip auto-trigger in duress+biometric mode (the C button is the hidden trigger)
-        if (!isUnlocked && securityMethod == SecureStorage.SecurityMethod.BIOMETRIC && !secureStorage.isDuressEnabled()) {
+        // Trigger biometric if locked and biometric is enabled.
+        // Skip when cloak is active and not yet bypassed — calculator must be entered first.
+        // Skip auto-trigger in duress+biometric mode (the C button is the hidden trigger).
+        if (!isUnlocked &&
+            securityMethod == SecureStorage.SecurityMethod.BIOMETRIC &&
+            !secureStorage.isDuressEnabled() &&
+            !(isCloakActive && !cloakBypassed)
+        ) {
             showBiometricPrompt()
         }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        deactivateNfcForegroundDispatch()
     }
 
     override fun onStop() {
@@ -293,6 +387,97 @@ class MainActivity : FragmentActivity() {
                 // Record the time we went to background
                 secureStorage.setLastBackgroundTime(System.currentTimeMillis())
             }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleBitcoinIntent(intent)
+    }
+
+    /**
+     * Extract a bitcoin: URI from the intent and store it in the ViewModel.
+     * Handles regular VIEW intents (browser/app links) and NFC foreground dispatch
+     * intents (only active on the Send screen).
+     */
+    private fun handleBitcoinIntent(intent: Intent?) {
+        if (intent == null) return
+
+        // 1. Check intent data URI (covers ACTION_VIEW with bitcoin: scheme)
+        intent.data?.let { data ->
+            if (data.scheme?.lowercase() == "bitcoin") {
+                walletViewModel.setPendingBitcoinUri(data.toString())
+                return
+            }
+        }
+
+        // 2. NFC intents — only process when foreground dispatch is active (Send screen)
+        if (!nfcForegroundRequested) return
+        if (intent.action == NfcAdapter.ACTION_NDEF_DISCOVERED ||
+            intent.action == NfcAdapter.ACTION_TECH_DISCOVERED ||
+            intent.action == NfcAdapter.ACTION_TAG_DISCOVERED
+        ) {
+            val bitcoinUri = extractBitcoinFromNdef(intent)
+            if (bitcoinUri != null) {
+                walletViewModel.setPendingBitcoinUri(bitcoinUri)
+            }
+        }
+    }
+
+    /**
+     * Extract a bitcoin URI or address from NDEF message payloads.
+     * Handles NDEF Text records and URI records that may not have been auto-dispatched.
+     */
+    @Suppress("DEPRECATION")
+    private fun extractBitcoinFromNdef(intent: Intent): String? {
+        val messages = intent.getParcelableArrayExtra(NfcAdapter.EXTRA_NDEF_MESSAGES)
+            ?: return null
+
+        for (raw in messages) {
+            val message = raw as? NdefMessage ?: continue
+            for (record in message.records) {
+                val text = parseNdefRecord(record) ?: continue
+                val trimmed = text.trim()
+                // Accept bitcoin: URIs or bare addresses (common prefixes)
+                when {
+                    trimmed.lowercase().startsWith("bitcoin:") -> return trimmed
+                    trimmed.startsWith("bc1") -> return "bitcoin:$trimmed"
+                    trimmed.startsWith("1") && trimmed.length in 25..34 -> return "bitcoin:$trimmed"
+                    trimmed.startsWith("3") && trimmed.length in 25..34 -> return "bitcoin:$trimmed"
+                }
+            }
+        }
+        return null
+    }
+
+    /**
+     * Parse an NDEF record into a string, handling both URI and Text record types.
+     */
+    private fun parseNdefRecord(record: NdefRecord): String? {
+        return when (record.tnf) {
+            NdefRecord.TNF_WELL_KNOWN -> {
+                when {
+                    record.type.contentEquals(NdefRecord.RTD_URI) -> {
+                        // URI record: first byte is prefix code, rest is URI
+                        record.toUri()?.toString()
+                    }
+                    record.type.contentEquals(NdefRecord.RTD_TEXT) -> {
+                        // Text record: first byte = status (bit 7 = encoding, bits 5-0 = lang length)
+                        val payload = record.payload
+                        if (payload.isEmpty()) return null
+                        val status = payload[0].toInt() and 0xFF
+                        val langLength = status and 0x3F
+                        if (payload.size <= 1 + langLength) return null
+                        val encoding = if (status and 0x80 == 0) Charsets.UTF_8 else Charsets.UTF_16
+                        String(payload, 1 + langLength, payload.size - 1 - langLength, encoding)
+                    }
+                    else -> null
+                }
+            }
+            NdefRecord.TNF_ABSOLUTE_URI -> {
+                String(record.payload, Charsets.UTF_8)
+            }
+            else -> null
         }
     }
 

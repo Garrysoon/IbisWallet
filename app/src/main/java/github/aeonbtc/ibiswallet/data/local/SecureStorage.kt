@@ -138,6 +138,7 @@ class SecureStorage(private val context: Context) {
                 put("createdAt", wallet.createdAt)
                 wallet.masterFingerprint?.let { put("masterFingerprint", it) }
                 put("seedFormat", wallet.seedFormat.name)
+                put("gapLimit", wallet.gapLimit)
             }
 
         regularPrefs.edit { putString("${KEY_WALLET_PREFIX}${wallet.id}", walletJson.toString()) }
@@ -191,6 +192,7 @@ class SecureStorage(private val context: Context) {
                         if (it == "null" || it.isBlank()) null else it
                     },
                 seedFormat = seedFormat,
+                gapLimit = jsonObject.optInt("gapLimit", StoredWallet.DEFAULT_GAP_LIMIT),
             )
         } catch (_: Exception) {
             null
@@ -205,20 +207,19 @@ class SecureStorage(private val context: Context) {
     }
 
     /**
-     * Edit wallet metadata (name and optionally master fingerprint for watch-only wallets)
+     * Edit wallet metadata (name, gap limit, and optionally master fingerprint for watch-only wallets)
      */
     fun editWallet(
         walletId: String,
         newName: String,
+        newGapLimit: Int,
         newFingerprint: String? = null,
     ): Boolean {
         val wallet = getWalletMetadata(walletId) ?: return false
-        val updated =
-            if (wallet.isWatchOnly && newFingerprint != null) {
-                wallet.copy(name = newName, masterFingerprint = newFingerprint.ifBlank { null })
-            } else {
-                wallet.copy(name = newName)
-            }
+        var updated = wallet.copy(name = newName, gapLimit = newGapLimit)
+        if (wallet.isWatchOnly && newFingerprint != null) {
+            updated = updated.copy(masterFingerprint = newFingerprint.ifBlank { null })
+        }
         saveWalletMetadata(updated)
         return true
     }
@@ -591,6 +592,20 @@ class SecureStorage(private val context: Context) {
         regularPrefs.edit { putBoolean(KEY_AUTO_SWITCH_SERVER, enabled) }
     }
 
+    // ==================== User Disconnect Intent ====================
+
+    /**
+     * Returns true if the user explicitly disconnected and has not reconnected since.
+     * Used to suppress auto-connect on app restart.
+     */
+    fun isUserDisconnected(): Boolean {
+        return regularPrefs.getBoolean(KEY_USER_DISCONNECTED, false)
+    }
+
+    fun setUserDisconnected(disconnected: Boolean) {
+        regularPrefs.edit { putBoolean(KEY_USER_DISCONNECTED, disconnected) }
+    }
+
     // ==================== Last Sync Time (per wallet) ====================
 
     fun saveLastSyncTime(
@@ -853,6 +868,21 @@ class SecureStorage(private val context: Context) {
      */
     fun setSpendUnconfirmed(enabled: Boolean) {
         regularPrefs.edit { putBoolean(KEY_SPEND_UNCONFIRMED, enabled) }
+    }
+
+    /**
+     * Get whether NFC broadcasting is enabled on the Receive screen.
+     * Defaults to false — user must opt in via Settings.
+     */
+    fun isNfcEnabled(): Boolean {
+        return regularPrefs.getBoolean(KEY_NFC_ENABLED, false)
+    }
+
+    /**
+     * Set whether NFC broadcasting is enabled.
+     */
+    fun setNfcEnabled(enabled: Boolean) {
+        regularPrefs.edit { putBoolean(KEY_NFC_ENABLED, enabled) }
     }
 
     // ==================== BTC/USD Price Source ====================
@@ -1327,14 +1357,15 @@ class SecureStorage(private val context: Context) {
      * Enable or disable cloak mode
      */
     fun setCloakModeEnabled(enabled: Boolean) {
-        securePrefs.edit { putBoolean(KEY_CLOAK_MODE_ENABLED, enabled) }
+        securePrefs.edit(commit = true) { putBoolean(KEY_CLOAK_MODE_ENABLED, enabled) }
     }
 
     /**
-     * Save the secret calculator unlock code (stored in encrypted prefs)
+     * Save the secret calculator unlock code (stored in encrypted prefs).
+     * Uses commit() to survive an immediate process restart.
      */
     fun setCloakCode(code: String) {
-        securePrefs.edit { putString(KEY_CLOAK_CODE, code) }
+        securePrefs.edit(commit = true) { putString(KEY_CLOAK_CODE, code) }
     }
 
     /**
@@ -1345,10 +1376,11 @@ class SecureStorage(private val context: Context) {
     }
 
     /**
-     * Clear all cloak mode data
+     * Clear all cloak mode data. Uses commit() to ensure writes are flushed
+     * to disk before a potential process restart.
      */
     fun clearCloakData() {
-        securePrefs.edit {
+        securePrefs.edit(commit = true) {
             remove(KEY_CLOAK_MODE_ENABLED)
             remove(KEY_CLOAK_CODE)
         }
@@ -1357,10 +1389,11 @@ class SecureStorage(private val context: Context) {
     }
 
     /**
-     * Set a pending icon alias swap (applied on next cold start to avoid process kill)
+     * Set a pending icon alias swap (applied on next cold start to avoid process kill).
+     * Uses commit() to survive an immediate process restart.
      */
     fun setPendingIconAlias(alias: String) {
-        regularPrefs.edit { putString(KEY_CLOAK_PENDING_ALIAS, alias) }
+        regularPrefs.edit(commit = true) { putString(KEY_CLOAK_PENDING_ALIAS, alias) }
     }
 
     /**
@@ -1619,6 +1652,7 @@ class SecureStorage(private val context: Context) {
         private const val KEY_SERVER_CERT_PREFIX = "server_cert_"
         private const val KEY_DEFAULT_SERVERS_SEEDED = "default_servers_seeded"
         private const val KEY_AUTO_SWITCH_SERVER = "auto_switch_server"
+        private const val KEY_USER_DISCONNECTED = "user_disconnected"
 
         // Sync settings
         private const val KEY_SYNC_BATCH_SIZE = "sync_batch_size"
@@ -1669,6 +1703,9 @@ class SecureStorage(private val context: Context) {
 
         // Spend only confirmed UTXOs
         private const val KEY_SPEND_UNCONFIRMED = "spend_unconfirmed"
+
+        // NFC broadcasting
+        private const val KEY_NFC_ENABLED = "nfc_enabled"
 
         // Frozen UTXOs
         private const val KEY_FROZEN_UTXOS_PREFIX = "frozen_utxos_"

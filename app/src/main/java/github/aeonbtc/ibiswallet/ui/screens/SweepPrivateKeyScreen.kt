@@ -14,7 +14,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableDoubleStateOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -33,7 +33,7 @@ fun SweepPrivateKeyScreen(
     sweepState: SweepState,
     isConnected: Boolean,
     onScanBalances: (wif: String) -> Unit,
-    onSweep: (wif: String, destination: String, feeRate: Float) -> Unit,
+    onSweep: (wif: String, destination: String, feeRate: Double) -> Unit,
     onReset: () -> Unit,
     onBack: () -> Unit,
     isWifValid: (String) -> Boolean,
@@ -43,7 +43,7 @@ fun SweepPrivateKeyScreen(
 ) {
     var wifKey by remember { mutableStateOf("") }
     var destinationAddress by remember { mutableStateOf("") }
-    var feeRate by remember { mutableFloatStateOf(5f) }
+    var feeRate by remember { mutableDoubleStateOf(5.0) }
     var showWifQrScanner by remember { mutableStateOf(false) }
     var showDestQrScanner by remember { mutableStateOf(false) }
     var showReviewDialog by remember { mutableStateOf(false) }
@@ -56,7 +56,7 @@ fun SweepPrivateKeyScreen(
             wifKey.isNotBlank() && isWifValid(wifKey.trim())
         }
 
-    val isValidFeeRate = feeRate >= minFeeRate.toFloat()
+    val isValidFeeRate = feeRate >= minFeeRate
     val isValidDestination = destinationAddress.isNotBlank()
     val canScan = isValidWif && isConnected && !sweepState.isScanning
     val canSweep = sweepState.hasBalance && isValidDestination && isValidFeeRate && !sweepState.isSweeping

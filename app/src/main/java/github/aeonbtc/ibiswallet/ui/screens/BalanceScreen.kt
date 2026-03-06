@@ -4,6 +4,7 @@ package github.aeonbtc.ibiswallet.ui.screens
 
 import android.content.Intent
 import android.graphics.Bitmap
+import android.nfc.NfcAdapter
 import androidx.core.graphics.createBitmap
 import androidx.core.graphics.set
 import androidx.core.net.toUri
@@ -11,6 +12,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,8 +26,10 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.CallMade
 import androidx.compose.material.icons.automirrored.filled.CallReceived
@@ -62,6 +66,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -85,6 +90,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import github.aeonbtc.ibiswallet.MainActivity
 import github.aeonbtc.ibiswallet.data.local.SecureStorage
 import github.aeonbtc.ibiswallet.data.model.FeeEstimateSource
 import github.aeonbtc.ibiswallet.data.model.FeeEstimationResult
@@ -134,12 +140,13 @@ fun BalanceScreen(
     feeEstimationState: FeeEstimationResult = FeeEstimationResult.Disabled,
     canBumpFee: (String) -> Boolean = { false },
     canCpfp: (String) -> Boolean = { false },
-    onBumpFee: (String, Float) -> Unit = { _, _ -> },
-    onCpfp: (String, Float) -> Unit = { _, _ -> },
+    onBumpFee: (String, Double) -> Unit = { _, _ -> },
+    onCpfp: (String, Double) -> Unit = { _, _ -> },
     onSaveTransactionLabel: (String, String) -> Unit = { _, _ -> },
     onFetchTxVsize: suspend (String) -> Double? = { null },
     onRefreshFees: () -> Unit = {},
     onSync: () -> Unit = {},
+    onToggleDenomination: () -> Unit = {},
     onManageWallets: () -> Unit = {},
     onScanQrResult: (String) -> Unit = {},
 ) {
@@ -160,6 +167,22 @@ fun BalanceScreen(
     var displayLimit by remember { mutableIntStateOf(25) }
 
     val useSats = denomination == SecureStorage.DENOMINATION_SATS
+
+    // NFC passive read: enable foreground dispatch so tapping an NFC tag
+    // with a bitcoin address routes through pendingBitcoinUri -> Send screen.
+    val context = LocalContext.current
+    val nfcAvailable = remember {
+        NfcAdapter.getDefaultAdapter(context) != null &&
+            SecureStorage(context).isNfcEnabled()
+    }
+    DisposableEffect(nfcAvailable) {
+        if (nfcAvailable) {
+            (context as? MainActivity)?.enableNfcForegroundDispatch()
+        }
+        onDispose {
+            (context as? MainActivity)?.disableNfcForegroundDispatch()
+        }
+    }
 
     // Show transaction detail dialog when a transaction is selected
     selectedTransaction?.let { tx ->
@@ -319,7 +342,7 @@ fun BalanceScreen(
                                     .align(Alignment.Center),
                             horizontalAlignment = Alignment.CenterHorizontally,
                         ) {
-                            // Main balance with inline denomination
+                            // Main balance with inline denomination — tap to toggle BTC/sats
                             Text(
                                 text =
                                     if (privacyMode) {
@@ -332,6 +355,11 @@ fun BalanceScreen(
                                 style = MaterialTheme.typography.displaySmall,
                                 fontWeight = FontWeight.Bold,
                                 color = MaterialTheme.colorScheme.onBackground,
+                                modifier = Modifier.clickable(
+                                    interactionSource = remember { MutableInteractionSource() },
+                                    indication = null,
+                                    onClick = onToggleDenomination,
+                                ),
                             )
 
                             // USD value
@@ -968,12 +996,13 @@ fun TransactionDetailDialog(
     feeEstimationState: FeeEstimationResult = FeeEstimationResult.Disabled,
     onFetchVsize: suspend (String) -> Double? = { null },
     onRefreshFees: () -> Unit = {},
-    onSpeedUp: ((SpeedUpMethod, Float) -> Unit)? = null,
+    onSpeedUp: ((SpeedUpMethod, Double) -> Unit)? = null,
     onSaveLabel: (String) -> Unit = {},
     onDismiss: () -> Unit,
 ) {
     val context = LocalContext.current
     val isReceived = transaction.amountSats > 0
+    val scrollState = rememberScrollState()
 
     // State for showing copy confirmation
     var showCopiedTxid by remember { mutableStateOf(false) }
@@ -1097,7 +1126,8 @@ fun TransactionDetailDialog(
                 modifier =
                     Modifier
                         .fillMaxWidth()
-                        .padding(16.dp),
+                        .padding(16.dp)
+                        .verticalScroll(scrollState),
             ) {
                 // Header with close button
                 Row(
@@ -1815,13 +1845,13 @@ private fun SpeedUpDialog(
     useSats: Boolean = true,
     privacyMode: Boolean = false,
     onRefreshFees: () -> Unit = {},
-    onConfirm: (Float) -> Unit,
+    onConfirm: (Double) -> Unit,
     onDismiss: () -> Unit,
 ) {
     // Start with empty field - user enters their desired fee rate
     var feeRateInput by remember { mutableStateOf("") }
-    val feeRate = feeRateInput.toFloatOrNull() ?: 0f
-    val isValidFeeRate = feeRate >= 1f && (currentFeeRate == null || feeRate > currentFeeRate)
+    val feeRate = feeRateInput.toDoubleOrNull() ?: 0.0
+    val isValidFeeRate = feeRate >= 1.0 && (currentFeeRate == null || feeRate > currentFeeRate)
 
     // Track selected fee estimate option (null = custom/manual input)
     var selectedFeeOption by remember { mutableStateOf<String?>(null) }
@@ -1839,7 +1869,7 @@ private fun SpeedUpDialog(
         when (method) {
             SpeedUpMethod.RBF -> {
                 // RBF: Pay the difference between new total fee and old fee
-                if (vsize != null && feeRate > 0f && currentFee != null) {
+                if (vsize != null && feeRate > 0.0 && currentFee != null) {
                     val newTotalFee = (feeRate * vsize).toLong()
                     (newTotalFee - currentFee.toLong()).coerceAtLeast(0)
                 } else {
@@ -1848,8 +1878,8 @@ private fun SpeedUpDialog(
             }
             SpeedUpMethod.CPFP -> {
                 // CPFP: Child tx fee = ceil(fee_rate) × child_vsize
-                if (feeRate > 0f) {
-                    val effectiveFeeRate = kotlin.math.ceil(feeRate.toDouble()).toLong()
+                if (feeRate > 0.0) {
+                    val effectiveFeeRate = kotlin.math.ceil(feeRate).toLong()
                     (effectiveFeeRate * estimatedChildVsize)
                 } else {
                     null
@@ -2021,7 +2051,7 @@ private fun SpeedUpDialog(
                 )
 
                 // Validation message
-                if (currentFeeRate != null && feeRate > 0f && feeRate <= currentFeeRate) {
+                if (currentFeeRate != null && feeRate > 0.0 && feeRate <= currentFeeRate) {
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
                         text = "New fee rate must be higher than current (${formatFeeRate(currentFeeRate)} sat/vB)",
@@ -2033,7 +2063,7 @@ private fun SpeedUpDialog(
                 Spacer(modifier = Modifier.height(12.dp))
 
                 // New Transaction card (shows estimated fee info)
-                if (feeRate > 0f && isValidFeeRate) {
+                if (feeRate > 0.0 && isValidFeeRate) {
                     Card(
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(12.dp),

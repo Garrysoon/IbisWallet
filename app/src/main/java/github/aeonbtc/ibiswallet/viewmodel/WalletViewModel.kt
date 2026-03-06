@@ -4,37 +4,52 @@ import android.app.Application
 import android.net.Uri
 import android.util.Base64
 import androidx.lifecycle.AndroidViewModel
-import github.aeonbtc.ibiswallet.BuildConfig
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.lifecycle.viewModelScope
+import github.aeonbtc.ibiswallet.BuildConfig
 import github.aeonbtc.ibiswallet.data.BtcPriceService
 import github.aeonbtc.ibiswallet.data.FeeEstimationService
 import github.aeonbtc.ibiswallet.data.local.SecureStorage
-import github.aeonbtc.ibiswallet.data.model.*
+import github.aeonbtc.ibiswallet.data.model.AddressType
+import github.aeonbtc.ibiswallet.data.model.DryRunResult
+import github.aeonbtc.ibiswallet.data.model.ElectrumConfig
+import github.aeonbtc.ibiswallet.data.model.FeeEstimationResult
+import github.aeonbtc.ibiswallet.data.model.Recipient
+import github.aeonbtc.ibiswallet.data.model.SeedFormat
+import github.aeonbtc.ibiswallet.data.model.UtxoInfo
+import github.aeonbtc.ibiswallet.data.model.WalletAddress
+import github.aeonbtc.ibiswallet.data.model.WalletImportConfig
+import github.aeonbtc.ibiswallet.data.model.WalletNetwork
+import github.aeonbtc.ibiswallet.data.model.WalletResult
+import github.aeonbtc.ibiswallet.data.model.WalletState
 import github.aeonbtc.ibiswallet.data.repository.WalletRepository
 import github.aeonbtc.ibiswallet.tor.TorManager
 import github.aeonbtc.ibiswallet.tor.TorState
 import github.aeonbtc.ibiswallet.tor.TorStatus
+import github.aeonbtc.ibiswallet.util.BitcoinUtils
 import github.aeonbtc.ibiswallet.util.CertificateFirstUseException
 import github.aeonbtc.ibiswallet.util.CertificateInfo
 import github.aeonbtc.ibiswallet.util.CertificateMismatchException
+import github.aeonbtc.ibiswallet.util.CryptoUtils
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
-import java.security.SecureRandom
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import javax.crypto.Cipher
-import javax.crypto.SecretKeyFactory
-import javax.crypto.spec.GCMParameterSpec
-import javax.crypto.spec.PBEKeySpec
-import javax.crypto.spec.SecretKeySpec
 
 /**
  * ViewModel for managing wallet state across the app
@@ -109,6 +124,10 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
     private val _sendScreenDraft = MutableStateFlow(SendScreenDraft())
     val sendScreenDraft: StateFlow<SendScreenDraft> = _sendScreenDraft.asStateFlow()
 
+    // Pending bitcoin: URI from external intent (consumed by IbisWalletApp after unlock)
+    private val _pendingBitcoinUri = MutableStateFlow<String?>(null)
+    val pendingBitcoinUri: StateFlow<String?> = _pendingBitcoinUri.asStateFlow()
+
     // PSBT state for watch-only wallet signing flow
     private val _psbtState = MutableStateFlow(PsbtState())
     val psbtState: StateFlow<PsbtState> = _psbtState.asStateFlow()
@@ -134,7 +153,24 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
     private val _isDuressMode = MutableStateFlow(false)
     val isDuressMode: StateFlow<Boolean> = _isDuressMode.asStateFlow()
 
+    // App lifecycle tracking for graceful background/foreground handling
+    private var wasConnectedBeforeBackground = false
+    private var isInBackground = false
+
     init {
+        // Register app lifecycle observer for background/foreground handling
+        ProcessLifecycleOwner.get().lifecycle.addObserver(
+            object : DefaultLifecycleObserver {
+                override fun onStart(owner: LifecycleOwner) {
+                    onAppForegrounded()
+                }
+
+                override fun onStop(owner: LifecycleOwner) {
+                    onAppBackgrounded()
+                }
+            }
+        )
+
         // Initialize servers state
         refreshServersState()
 
@@ -161,9 +197,94 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
             }
 
             // Auto-connect to saved Electrum server if available,
-            // regardless of whether a wallet is imported
-            repository.getElectrumConfig()?.let { config ->
-                connectToElectrum(config)
+            // unless the user explicitly disconnected last session.
+            if (!repository.isUserDisconnected()) {
+                repository.getElectrumConfig()?.let { config ->
+                    connectToElectrum(config)
+                }
+            }
+        }
+    }
+
+    // ==================== App Lifecycle Handling ====================
+
+    /**
+     * Called when app goes to background (ProcessLifecycleOwner.ON_STOP).
+     * Stops periodic tasks to conserve resources. The sockets will likely
+     * be killed by Android anyway.
+     */
+    private fun onAppBackgrounded() {
+        if (isInBackground) return
+        isInBackground = true
+        wasConnectedBeforeBackground = _uiState.value.isConnected
+
+        if (wasConnectedBeforeBackground) {
+            stopHeartbeat()
+            stopBackgroundSync()
+        }
+    }
+
+    /**
+     * Called when app returns to foreground (ProcessLifecycleOwner.ON_START).
+     * Checks if the connection survived and reconnects if needed.
+     */
+    private fun onAppForegrounded() {
+        if (!isInBackground) return
+        isInBackground = false
+
+        if (wasConnectedBeforeBackground) {
+            viewModelScope.launch {
+                val stillAlive = withContext(Dispatchers.IO) { repository.pingServer() }
+
+                if (stillAlive) {
+                    startBackgroundSync()
+                    startHeartbeat()
+                    launchSubscriptions()
+                } else {
+                    reconnectOnForeground()
+                }
+                wasConnectedBeforeBackground = false
+            }
+        }
+    }
+
+    /**
+     * Silent reconnect after returning from background with a dead connection.
+     * Shows "Connecting" status in UI.
+     */
+    private suspend fun reconnectOnForeground() {
+        if (repository.isUserDisconnected()) return
+        val config = repository.getElectrumConfig() ?: return
+
+        _uiState.value = _uiState.value.copy(isConnecting = true, isConnected = false)
+
+        val needsTor = config.isOnionAddress()
+
+        if (needsTor && !torManager.isReady()) {
+            torManager.start()
+            if (!torManager.awaitReady(TOR_BOOTSTRAP_TIMEOUT_MS)) {
+                _uiState.value = _uiState.value.copy(isConnecting = false, isConnected = false)
+                _events.emit(WalletEvent.Error("Connection lost"))
+                return
+            }
+        }
+
+        val timeoutMs = if (needsTor) CONNECTION_TIMEOUT_TOR_MS else CONNECTION_TIMEOUT_CLEARNET_MS
+        val result = withTimeoutOrNull(timeoutMs) {
+            repository.connectToElectrum(config)
+        }
+
+        when (result) {
+            is WalletResult.Success -> {
+                _uiState.value = _uiState.value.copy(isConnecting = false, isConnected = true)
+                startBackgroundSync()
+                startHeartbeat()
+                launchSubscriptions()
+                repository.sync()
+            }
+            else -> {
+                _uiState.value = _uiState.value.copy(isConnecting = false, isConnected = false)
+                _events.emit(WalletEvent.Error("Connection lost"))
             }
         }
     }
@@ -224,6 +345,7 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
         connectionJob?.cancel()
         stopBackgroundSync()
         stopHeartbeat()
+        repository.setUserDisconnected(false)
         connectionJob =
             viewModelScope.launch {
                 _uiState.value = _uiState.value.copy(isConnecting = true, isConnected = false, error = null, serverVersion = null)
@@ -247,29 +369,14 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
                     if (needsTor && !torManager.isReady()) {
                         torManager.start()
 
-                        var attempts = 0
-                        while (!torManager.isReady() && attempts < 120) {
-                            delay(500)
-                            attempts++
-
-                            if (torState.value.status == TorStatus.ERROR) {
-                                _uiState.value =
-                                    _uiState.value.copy(
-                                        isConnecting = false,
-                                        error = "Tor failed to start: ${torState.value.statusMessage}",
-                                    )
-                                _events.emit(WalletEvent.Error("Tor failed to start"))
-                                return@launch
+                        if (!torManager.awaitReady(TOR_BOOTSTRAP_TIMEOUT_MS)) {
+                            val msg = if (torState.value.status == TorStatus.ERROR) {
+                                "Tor failed to start: ${torState.value.statusMessage}"
+                            } else {
+                                "Tor connection timed out"
                             }
-                        }
-
-                        if (!torManager.isReady()) {
-                            _uiState.value =
-                                _uiState.value.copy(
-                                    isConnecting = false,
-                                    error = "Tor connection timed out",
-                                )
-                            _events.emit(WalletEvent.Error("Tor connection timed out"))
+                            _uiState.value = _uiState.value.copy(isConnecting = false, error = msg)
+                            _events.emit(WalletEvent.Error(msg))
                             return@launch
                         }
                     }
@@ -382,7 +489,11 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
                     _events.emit(WalletEvent.SyncCompleted)
                 }
                 is WalletResult.Error -> {
-                    _events.emit(WalletEvent.Error(result.message))
+                    // Mutex skip is not a real error — another sync is already
+                    // running and will deliver the result. Silently ignore it.
+                    if (!result.message.contains("already in progress")) {
+                        _events.emit(WalletEvent.Error(result.message))
+                    }
                 }
             }
         }
@@ -528,8 +639,11 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
                     when (val syncResult = repository.sync()) {
                         is WalletResult.Success ->
                             _events.emit(WalletEvent.SyncCompleted)
-                        is WalletResult.Error ->
-                            _events.emit(WalletEvent.Error(syncResult.message))
+                        is WalletResult.Error -> {
+                            if (!syncResult.message.contains("already in progress")) {
+                                _events.emit(WalletEvent.Error(syncResult.message))
+                            }
+                        }
                     }
                 }
             }
@@ -661,6 +775,91 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
         repository.setUtxoFrozen(outpoint, frozen)
     }
 
+    // ==================== BIP 329 Labels ====================
+
+    /**
+     * Export labels in BIP 329 JSONL format to a file.
+     */
+    fun exportBip329Labels(
+        walletId: String,
+        uri: Uri,
+    ) {
+        viewModelScope.launch {
+            try {
+                val content = repository.exportBip329Labels(walletId)
+                if (content.isBlank()) {
+                    _events.emit(WalletEvent.Error("No labels to export"))
+                    return@launch
+                }
+
+                withContext(Dispatchers.IO) {
+                    getApplication<Application>().contentResolver.openOutputStream(uri)?.use { stream ->
+                        stream.write(content.toByteArray(Charsets.UTF_8))
+                    } ?: throw IllegalStateException("Could not open output stream")
+                }
+
+                val lineCount = content.lines().count { it.isNotBlank() }
+                _events.emit(WalletEvent.Bip329LabelsExported(lineCount))
+            } catch (e: Exception) {
+                _events.emit(WalletEvent.Error("Export failed: ${e.message}"))
+            }
+        }
+    }
+
+    /**
+     * Import labels from a BIP 329 JSONL or Electrum CSV file.
+     */
+    fun importBip329Labels(
+        walletId: String,
+        uri: Uri,
+    ) {
+        viewModelScope.launch {
+            try {
+                val content = withContext(Dispatchers.IO) {
+                    getApplication<Application>().contentResolver.openInputStream(uri)?.use {
+                        it.readBytes().toString(Charsets.UTF_8)
+                    } ?: throw IllegalStateException("Could not read file")
+                }
+
+                val result = repository.importBip329Labels(walletId, content)
+                _events.emit(WalletEvent.Bip329LabelsImported(result.totalLabelsImported))
+            } catch (e: Exception) {
+                _events.emit(WalletEvent.Error("Import failed: ${e.message}"))
+            }
+        }
+    }
+
+    /**
+     * Import labels from BIP 329 JSONL content string (from QR scan).
+     */
+    fun importBip329LabelsFromContent(
+        walletId: String,
+        content: String,
+    ) {
+        viewModelScope.launch {
+            try {
+                val result = repository.importBip329Labels(walletId, content)
+                _events.emit(WalletEvent.Bip329LabelsImported(result.totalLabelsImported))
+            } catch (e: Exception) {
+                _events.emit(WalletEvent.Error("Import failed: ${e.message}"))
+            }
+        }
+    }
+
+    /**
+     * Get BIP 329 JSONL content for QR display.
+     */
+    fun getBip329LabelsContent(walletId: String): String {
+        return repository.exportBip329Labels(walletId)
+    }
+
+    /**
+     * Get label counts (address, transaction) for a wallet.
+     */
+    fun getLabelCounts(walletId: String): Pair<Int, Int> {
+        return repository.getLabelCounts(walletId)
+    }
+
     /**
      * Set a pre-selected UTXO for the Send screen (from AllUtxosScreen)
      */
@@ -683,6 +882,21 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     /**
+     * Set a pending bitcoin: URI from an external intent.
+     * IbisWalletApp will consume it after unlock and navigate to Send.
+     */
+    fun setPendingBitcoinUri(uri: String?) {
+        _pendingBitcoinUri.value = uri
+    }
+
+    /**
+     * Consume the pending bitcoin: URI (called after navigation to Send).
+     */
+    fun consumePendingBitcoinUri() {
+        _pendingBitcoinUri.value = null
+    }
+
+    /**
      * Clear send screen draft (called on successful send or app close)
      */
     private fun clearSendScreenDraft() {
@@ -698,7 +912,7 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
     fun sendBitcoin(
         recipientAddress: String,
         amountSats: ULong,
-        feeRate: Float = 1.0f,
+        feeRate: Double = 1.0,
         selectedUtxos: List<UtxoInfo>? = null,
         label: String? = null,
         isMaxSend: Boolean = false,
@@ -750,7 +964,7 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
     fun estimateFee(
         recipientAddress: String,
         amountSats: ULong,
-        feeRate: Float,
+        feeRate: Double,
         selectedUtxos: List<UtxoInfo>? = null,
         isMaxSend: Boolean = false,
     ) {
@@ -777,7 +991,7 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
     /** Estimate fee for a multi-recipient transaction. */
     fun estimateFeeMulti(
         recipients: List<Recipient>,
-        feeRate: Float,
+        feeRate: Double,
         selectedUtxos: List<UtxoInfo>? = null,
     ) {
         dryRunJob?.cancel()
@@ -790,7 +1004,7 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
     /** Send to multiple recipients in a single transaction. */
     fun sendBitcoinMulti(
         recipients: List<Recipient>,
-        feeRate: Float = 1.0f,
+        feeRate: Double = 1.0,
         selectedUtxos: List<UtxoInfo>? = null,
         label: String? = null,
         precomputedFeeSats: Long? = null,
@@ -828,7 +1042,7 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
     /** Create PSBT with multiple recipients for watch-only wallets. */
     fun createPsbtMulti(
         recipients: List<Recipient>,
-        feeRate: Float = 1.0f,
+        feeRate: Double = 1.0,
         selectedUtxos: List<UtxoInfo>? = null,
         label: String? = null,
         precomputedFeeSats: Long? = null,
@@ -876,7 +1090,7 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
     fun createPsbt(
         recipientAddress: String,
         amountSats: ULong,
-        feeRate: Float = 1.0f,
+        feeRate: Double = 1.0,
         selectedUtxos: List<UtxoInfo>? = null,
         label: String? = null,
         isMaxSend: Boolean = false,
@@ -1030,7 +1244,7 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
      */
     fun bumpFee(
         txid: String,
-        newFeeRate: Float,
+        newFeeRate: Double,
     ) {
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isSending = true, error = null)
@@ -1059,7 +1273,7 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
      */
     fun cpfp(
         parentTxid: String,
-        feeRate: Float,
+        feeRate: Double,
     ) {
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isSending = true, error = null)
@@ -1135,9 +1349,10 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
     fun editWallet(
         walletId: String,
         newName: String,
+        newGapLimit: Int,
         newFingerprint: String? = null,
     ) {
-        repository.editWallet(walletId, newName, newFingerprint)
+        repository.editWallet(walletId, newName, newGapLimit, newFingerprint)
     }
 
     /**
@@ -1222,6 +1437,7 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
         connectionJob?.cancel()
         stopBackgroundSync()
         stopHeartbeat()
+        repository.setUserDisconnected(false)
         // Update active server immediately so the UI shows the new server while connecting
         _serversState.value = _serversState.value.copy(activeServerId = serverId)
         connectionJob =
@@ -1250,29 +1466,14 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
                     if (isOnion && !torManager.isReady()) {
                         torManager.start()
 
-                        var attempts = 0
-                        while (!torManager.isReady() && attempts < 120) {
-                            delay(500)
-                            attempts++
-
-                            if (torState.value.status == TorStatus.ERROR) {
-                                _uiState.value =
-                                    _uiState.value.copy(
-                                        isConnecting = false,
-                                        error = "Tor failed to start: ${torState.value.statusMessage}",
-                                    )
-                                _events.emit(WalletEvent.Error("Tor failed to start"))
-                                return@launch
+                        if (!torManager.awaitReady(TOR_BOOTSTRAP_TIMEOUT_MS)) {
+                            val msg = if (torState.value.status == TorStatus.ERROR) {
+                                "Tor failed to start: ${torState.value.statusMessage}"
+                            } else {
+                                "Tor connection timed out"
                             }
-                        }
-
-                        if (!torManager.isReady()) {
-                            _uiState.value =
-                                _uiState.value.copy(
-                                    isConnecting = false,
-                                    error = "Tor connection timed out",
-                                )
-                            _events.emit(WalletEvent.Error("Tor connection timed out"))
+                            _uiState.value = _uiState.value.copy(isConnecting = false, error = msg)
+                            _events.emit(WalletEvent.Error(msg))
                             return@launch
                         }
                     }
@@ -1568,53 +1769,31 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
         val walletObj = backupJson.getJSONObject("wallet")
         val keyMaterialObj = backupJson.getJSONObject("keyMaterial")
 
-        val addressType =
-            try {
-                AddressType.valueOf(walletObj.getString("addressType"))
-            } catch (_: Exception) {
-                AddressType.SEGWIT
-            }
+        // Delegate JSON field extraction to testable pure function
+        val parsed = BitcoinUtils.parseBackupJson(walletObj, keyMaterialObj)
 
         val network =
             try {
-                WalletNetwork.valueOf(walletObj.optString("network", "BITCOIN"))
+                WalletNetwork.valueOf(parsed.network)
             } catch (_: Exception) {
                 WalletNetwork.BITCOIN
             }
 
         val seedFormat =
             try {
-                SeedFormat.valueOf(walletObj.optString("seedFormat", SeedFormat.BIP39.name))
+                SeedFormat.valueOf(parsed.seedFormat)
             } catch (_: Exception) {
                 SeedFormat.BIP39
             }
 
-        val mnemonic =
-            keyMaterialObj.optString("mnemonic", null.toString()).let {
-                if (it == "null" || it.isBlank()) null else it
-            }
-        val xpub =
-            keyMaterialObj.optString("extendedPublicKey", null.toString()).let {
-                if (it == "null" || it.isBlank()) null else it
-            }
-
-        val keyMaterial =
-            mnemonic ?: xpub
-                ?: throw IllegalStateException("No key material found in backup")
-
-        val isWatchOnly = mnemonic == null
-
         val config =
             WalletImportConfig(
-                name = walletObj.optString("name", "Restored Wallet"),
-                keyMaterial = keyMaterial,
-                addressType = addressType,
-                customDerivationPath =
-                    walletObj.optString("derivationPath", null.toString()).let {
-                        if (it == "null" || it.isBlank()) null else it
-                    },
+                name = parsed.name,
+                keyMaterial = parsed.keyMaterial,
+                addressType = parsed.addressType,
+                customDerivationPath = parsed.customDerivationPath,
                 network = network,
-                isWatchOnly = isWatchOnly,
+                isWatchOnly = parsed.isWatchOnly,
                 seedFormat = seedFormat,
             )
 
@@ -1753,6 +1932,7 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     // ==================== Encryption Helpers ====================
+    // Delegates to CryptoUtils for testability.
 
     private data class EncryptedPayload(
         val salt: ByteArray,
@@ -1773,55 +1953,23 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
             result = 31 * result + ciphertext.contentHashCode()
             return result
         }
+
+        fun toCryptoPayload() = CryptoUtils.EncryptedPayload(salt, iv, ciphertext)
     }
 
     private fun encryptData(
         plaintext: ByteArray,
         password: String,
     ): EncryptedPayload {
-        val salt = ByteArray(16).also { SecureRandom().nextBytes(it) }
-        val iv = ByteArray(12).also { SecureRandom().nextBytes(it) }
-
-        val passwordChars = password.toCharArray()
-        try {
-            val keySpec = PBEKeySpec(passwordChars, salt, PBKDF2_ITERATIONS, 256)
-            val secretKey =
-                SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
-                    .generateSecret(keySpec)
-            val keyBytes = secretKey.encoded
-            val aesKey = SecretKeySpec(keyBytes, "AES")
-
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.ENCRYPT_MODE, aesKey, GCMParameterSpec(128, iv))
-            val ciphertext = cipher.doFinal(plaintext)
-
-            return EncryptedPayload(salt, iv, ciphertext)
-        } finally {
-            // Zero out sensitive data
-            passwordChars.fill('\u0000')
-        }
+        val result = CryptoUtils.encrypt(plaintext, password, PBKDF2_ITERATIONS)
+        return EncryptedPayload(result.salt, result.iv, result.ciphertext)
     }
 
     private fun decryptData(
         payload: EncryptedPayload,
         password: String,
     ): ByteArray {
-        val passwordChars = password.toCharArray()
-        try {
-            val keySpec = PBEKeySpec(passwordChars, payload.salt, PBKDF2_ITERATIONS, 256)
-            val secretKey =
-                SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
-                    .generateSecret(keySpec)
-            val keyBytes = secretKey.encoded
-            val aesKey = SecretKeySpec(keyBytes, "AES")
-
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.DECRYPT_MODE, aesKey, GCMParameterSpec(128, payload.iv))
-            return cipher.doFinal(payload.ciphertext)
-        } finally {
-            // Zero out sensitive data
-            passwordChars.fill('\u0000')
-        }
+        return CryptoUtils.decrypt(payload.toCryptoPayload(), password, PBKDF2_ITERATIONS)
     }
 
     // ==================== Auto-Switch Server ====================
@@ -1927,7 +2075,10 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
         stopBackgroundSync()
         stopHeartbeat()
         _uiState.value = _uiState.value.copy(isConnected = false, serverVersion = null)
-        viewModelScope.launch(Dispatchers.IO) { repository.disconnect() }
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.setUserDisconnected(true)
+            repository.disconnect()
+        }
     }
 
     /**
@@ -1939,7 +2090,10 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
         connectionJob?.cancel()
         connectionJob = null
         _uiState.value = _uiState.value.copy(isConnecting = false, isConnected = false, serverVersion = null, error = null)
-        viewModelScope.launch(Dispatchers.IO) { repository.disconnect() }
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.setUserDisconnected(true)
+            repository.disconnect()
+        }
     }
 
     // ==================== Display Settings ====================
@@ -2044,6 +2198,12 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
         repository.setSpendUnconfirmed(enabled)
     }
 
+    fun isNfcEnabled(): Boolean = repository.isNfcEnabled()
+
+    fun setNfcEnabled(enabled: Boolean) {
+        repository.setNfcEnabled(enabled)
+    }
+
     // ==================== Fee Estimation Settings ====================
 
     /**
@@ -2106,22 +2266,16 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
             if (useTorProxy) {
                 if (!torManager.isReady()) {
                     torManager.start()
-                    var torAttempts = 0
-                    while (!torManager.isReady() && torAttempts < 120) {
-                        delay(500)
-                        torAttempts++
-                        if (torState.value.status == TorStatus.ERROR) {
-                            _feeEstimationState.value = FeeEstimationResult.Error("Tor failed to start")
-                            return@launch
+                    if (!torManager.awaitReady(TOR_BOOTSTRAP_TIMEOUT_MS)) {
+                        val msg = if (torState.value.status == TorStatus.ERROR) {
+                            "Tor failed to start"
+                        } else {
+                            "Tor connection timed out"
                         }
-                    }
-                    if (!torManager.isReady()) {
-                        _feeEstimationState.value = FeeEstimationResult.Error("Tor connection timed out")
+                        _feeEstimationState.value = FeeEstimationResult.Error(msg)
                         return@launch
                     }
                 }
-                // Wait for the SOCKS proxy to be ready to accept connections
-                delay(500)
             }
 
             // Only use precise fees if the connected server supports sub-sat fee rates
@@ -2170,21 +2324,13 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
             if (source == SecureStorage.PRICE_SOURCE_MEMPOOL_ONION) {
                 if (!torManager.isReady()) {
                     torManager.start()
-                    var torAttempts = 0
-                    while (!torManager.isReady() && torAttempts < 120) {
-                        delay(500)
-                        torAttempts++
-                        if (torState.value.status == TorStatus.ERROR) {
-                            if (BuildConfig.DEBUG) android.util.Log.e("WalletViewModel", "Tor failed to start for price fetch")
-                            return@launch
+                    if (!torManager.awaitReady(TOR_BOOTSTRAP_TIMEOUT_MS)) {
+                        if (BuildConfig.DEBUG) {
+                            android.util.Log.e("WalletViewModel", "Tor not ready for price fetch")
                         }
-                    }
-                    if (!torManager.isReady()) {
-                        if (BuildConfig.DEBUG) android.util.Log.e("WalletViewModel", "Tor timeout for price fetch")
                         return@launch
                     }
                 }
-                delay(500)
             }
 
             val price =
@@ -2450,7 +2596,7 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
     fun sweepPrivateKey(
         wif: String,
         destination: String,
-        feeRate: Float,
+        feeRate: Double,
     ) {
         viewModelScope.launch {
             _sweepState.value = _sweepState.value.copy(isSweeping = true, sweepProgress = "Building transactions...")
@@ -2494,6 +2640,7 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
     companion object {
         private const val CONNECTION_TIMEOUT_CLEARNET_MS = 15_000L
         private const val CONNECTION_TIMEOUT_TOR_MS = 30_000L
+        private const val TOR_BOOTSTRAP_TIMEOUT_MS = 60_000L
         private const val PBKDF2_ITERATIONS = 600_000
         private const val BACKGROUND_SYNC_INTERVAL_MS = 300_000L
         private const val HEARTBEAT_INTERVAL_MS = 60_000L
@@ -2545,6 +2692,10 @@ sealed class WalletEvent {
 
     data object LabelsRestored : WalletEvent()
 
+    data class Bip329LabelsExported(val count: Int) : WalletEvent()
+
+    data class Bip329LabelsImported(val count: Int) : WalletEvent()
+
     data class Error(val message: String) : WalletEvent()
 }
 
@@ -2580,7 +2731,7 @@ data class SendScreenDraft(
     val recipientAddress: String = "",
     val amountInput: String = "",
     val label: String = "",
-    val feeRate: Float = 1.0f,
+    val feeRate: Double = 1.0,
     val isMaxSend: Boolean = false,
     val selectedUtxoOutpoints: List<String> = emptyList(), // Store outpoints to restore selection
 )

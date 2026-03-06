@@ -2,18 +2,19 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
+    jacoco
 }
 
 android {
     namespace = "github.aeonbtc.ibiswallet"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "github.aeonbtc.ibiswallet"
         minSdk = 26
-        targetSdk = 35
-        versionCode = 4
-        versionName = "2.1-beta"
+        targetSdk = 36
+        versionCode = 5
+        versionName = "2.2-beta"
 
         vectorDrawables {
             useSupportLibrary = true
@@ -22,6 +23,7 @@ android {
         // BDK native library only works reliably on ARM architectures
         // x86/x86_64 emulators have compatibility issues
         ndk {
+            //noinspection ChromeOsAbiSupport
             abiFilters += listOf("armeabi-v7a", "arm64-v8a")
         }
     }
@@ -40,9 +42,6 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions {
-        jvmTarget = "17"
-    }
     buildFeatures {
         compose = true
         buildConfig = true
@@ -52,12 +51,58 @@ android {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
+    testOptions {
+        unitTests.all {
+            it.useJUnitPlatform()
+            it.extensions.configure(JacocoTaskExtension::class) {
+                isIncludeNoLocationClasses = true
+                excludes = listOf("jdk.internal.*")
+            }
+        }
+    }
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+    }
+}
+
+tasks.register<JacocoReport>("jacocoUnitTestReport") {
+    dependsOn("testDebugUnitTest")
+
+    reports {
+        xml.required.set(true)
+        html.required.set(true)
+    }
+
+    sourceDirectories.setFrom(files("${projectDir}/src/main/java"))
+
+    val excludes = listOf(
+        "**/R.class", "**/R$*.class",
+        "**/BuildConfig.*",
+        "**/Manifest*.*",
+        "**/*Test*.*",
+        "android/**/*.*",
+        "**/databinding/**",
+        "**/ui/**",
+        "**/theme/**",
+    )
+    classDirectories.setFrom(
+        fileTree("${layout.buildDirectory.get().asFile}/intermediates/javac/debug/classes") { exclude(excludes) },
+        fileTree("${layout.buildDirectory.get().asFile}/tmp/kotlin-classes/debug") { exclude(excludes) },
+    )
+
+    executionData.setFrom(
+        fileTree(layout.buildDirectory) { include("jacoco/testDebugUnitTest.exec") },
+    )
 }
 
 dependencies {
     // Core Android
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
+    implementation(libs.androidx.lifecycle.process)
     implementation(libs.androidx.activity.compose)
 
     // Compose
@@ -100,5 +145,11 @@ dependencies {
     // BC-UR (Uniform Resources) for animated QR codes (PSBT exchange with hardware wallets)
     implementation(libs.hummingbird)
 
-
+    // Testing
+    testImplementation(libs.kotest.runner.junit5)
+    testImplementation(libs.kotest.assertions.core)
+    testImplementation(libs.kotest.property)
+    testImplementation(libs.mockk)
+    testImplementation(libs.kotlinx.coroutines.test)
+    testImplementation(libs.org.json)
 }

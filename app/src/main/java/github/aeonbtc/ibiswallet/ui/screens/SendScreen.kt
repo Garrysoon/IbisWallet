@@ -2,6 +2,7 @@
 
 package github.aeonbtc.ibiswallet.ui.screens
 
+import android.nfc.NfcAdapter
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -28,6 +29,7 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
+import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -44,9 +46,11 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableDoubleStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -54,6 +58,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -62,6 +67,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import github.aeonbtc.ibiswallet.MainActivity
 import github.aeonbtc.ibiswallet.data.local.SecureStorage
 import github.aeonbtc.ibiswallet.data.model.DryRunResult
 import github.aeonbtc.ibiswallet.data.model.FeeEstimationResult
@@ -108,20 +114,20 @@ fun SendScreen(
     onEstimateFee: (
         address: String,
         amountSats: ULong,
-        feeRate: Float,
+        feeRate: Double,
         selectedUtxos: List<UtxoInfo>?,
         isMaxSend: Boolean,
     ) -> Unit = { _, _, _, _, _ -> },
     onEstimateFeeMulti: (
         recipients: List<Recipient>,
-        feeRate: Float,
+        feeRate: Double,
         selectedUtxos: List<UtxoInfo>?,
     ) -> Unit = { _, _, _ -> },
     onClearDryRun: () -> Unit = {},
     onSend: (
         address: String,
         amountSats: ULong,
-        feeRate: Float,
+        feeRate: Double,
         selectedUtxos: List<UtxoInfo>?,
         label: String?,
         isMaxSend: Boolean,
@@ -129,7 +135,7 @@ fun SendScreen(
     ) -> Unit = { _, _, _, _, _, _, _ -> },
     onSendMulti: (
         recipients: List<Recipient>,
-        feeRate: Float,
+        feeRate: Double,
         selectedUtxos: List<UtxoInfo>?,
         label: String?,
         precomputedFeeSats: Long?,
@@ -137,7 +143,7 @@ fun SendScreen(
     onCreatePsbt: (
         address: String,
         amountSats: ULong,
-        feeRate: Float,
+        feeRate: Double,
         selectedUtxos: List<UtxoInfo>?,
         label: String?,
         isMaxSend: Boolean,
@@ -145,7 +151,7 @@ fun SendScreen(
     ) -> Unit = { _, _, _, _, _, _, _ -> },
     onCreatePsbtMulti: (
         recipients: List<Recipient>,
-        feeRate: Float,
+        feeRate: Double,
         selectedUtxos: List<UtxoInfo>?,
         label: String?,
         precomputedFeeSats: Long?,
@@ -155,7 +161,7 @@ fun SendScreen(
     // Initialize state from draft
     var recipientAddress by remember { mutableStateOf(draft.recipientAddress) }
     var amountInput by remember { mutableStateOf(draft.amountInput) }
-    var feeRate by remember { mutableFloatStateOf(draft.feeRate) }
+    var feeRate by remember { mutableDoubleStateOf(draft.feeRate) }
 
     // USD input mode state (only available when btcPrice is available)
     var isUsdMode by remember { mutableStateOf(false) }
@@ -173,6 +179,23 @@ fun SendScreen(
             selectedUtxos.clear()
             selectedUtxos.add(preSelectedUtxo)
             onClearPreSelectedUtxo()
+        }
+    }
+
+    // NFC foreground dispatch: enable reading NFC tags while on the Send screen.
+    // When another device broadcasts a bitcoin: URI via NFC (e.g. from another
+    // wallet's Receive screen), tapping fills the address and amount fields.
+    val context = LocalContext.current
+    val nfcAvailable = remember {
+        NfcAdapter.getDefaultAdapter(context) != null &&
+            SecureStorage(context).isNfcEnabled()
+    }
+    DisposableEffect(nfcAvailable) {
+        if (nfcAvailable) {
+            (context as? MainActivity)?.enableNfcForegroundDispatch()
+        }
+        onDispose {
+            (context as? MainActivity)?.disableNfcForegroundDispatch()
         }
     }
 
@@ -205,7 +228,7 @@ fun SendScreen(
             // Draft was cleared, reset local state
             recipientAddress = ""
             amountInput = ""
-            feeRate = 1.0f
+            feeRate = 1.0
             isUsdMode = false
             isMaxMode = false
             showLabelField = false
@@ -452,6 +475,7 @@ fun SendScreen(
             recipients = multiRecipients,
             useSats = useSats,
             isUsdMode = isUsdMode,
+            btcPrice = btcPrice,
             privacyMode = privacyMode,
             availableSats = availableSats,
             estimatedFeeSats = estimatedFeeSats,
@@ -630,6 +654,24 @@ fun SendScreen(
                             style = MaterialTheme.typography.labelMedium,
                             color = if (isActive) BitcoinOrange else if (hasUtxos) TextSecondary else TextSecondary.copy(alpha = 0.5f),
                             modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        )
+                    }
+                }
+                if (nfcAvailable) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Sensors,
+                            contentDescription = "NFC reading",
+                            tint = SuccessGreen,
+                            modifier = Modifier.size(14.dp),
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "NFC",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = SuccessGreen,
                         )
                     }
                 }
@@ -891,7 +933,30 @@ fun SendScreen(
                     // Single recipient
                     OutlinedTextField(
                         value = recipientAddress,
-                        onValueChange = { recipientAddress = it },
+                        onValueChange = { input ->
+                            if (input.trim().lowercase().startsWith("bitcoin:")) {
+                                val bip21 = parseBip21Uri(input.trim())
+                                recipientAddress = bip21.address
+                                bip21.amount?.let { btcAmount ->
+                                    isMaxMode = false
+                                    amountInput = when {
+                                        isUsdMode && btcPrice != null && btcPrice > 0 ->
+                                            String.format(Locale.US, "%.2f", btcAmount * btcPrice)
+                                        useSats ->
+                                            (btcAmount * 100_000_000).toLong().toString()
+                                        else ->
+                                            String.format(Locale.US, "%.8f", btcAmount)
+                                                .trimEnd('0').trimEnd('.')
+                                    }
+                                }
+                                bip21.label?.let { label ->
+                                    labelText = label
+                                    showLabelField = true
+                                }
+                            } else {
+                                recipientAddress = input
+                            }
+                        },
                         modifier = Modifier.fillMaxWidth(),
                         placeholder = {
                             Text(
@@ -1701,7 +1766,7 @@ private fun CoinControlDialog(
 private fun SendConfirmationDialog(
     recipientAddress: String,
     amountSats: ULong,
-    feeRate: Float,
+    feeRate: Double,
     selectedUtxos: List<UtxoInfo>?,
     useSats: Boolean,
     privacyMode: Boolean = false,
@@ -2292,6 +2357,7 @@ private fun MultiRecipientDialog(
     recipients: MutableList<Pair<String, String>>,
     useSats: Boolean,
     isUsdMode: Boolean,
+    btcPrice: Double? = null,
     privacyMode: Boolean = false,
     availableSats: Long = 0L,
     estimatedFeeSats: Long? = null,
@@ -2301,6 +2367,37 @@ private fun MultiRecipientDialog(
     onDone: () -> Unit,
     onDismiss: () -> Unit,
 ) {
+    // QR scanner state: index of recipient being scanned, -1 = none
+    var qrScanRecipientIndex by remember { mutableIntStateOf(-1) }
+
+    if (qrScanRecipientIndex >= 0) {
+        QrScannerDialog(
+            onCodeScanned = { code ->
+                val bip21 = parseBip21Uri(code)
+                val index = qrScanRecipientIndex
+                if (index in recipients.indices) {
+                    val currentAmt = recipients[index].second
+                    recipients[index] = Pair(bip21.address, currentAmt)
+
+                    // Set amount if present in URI
+                    bip21.amount?.let { btcAmount ->
+                        val amountStr = when {
+                            isUsdMode && btcPrice != null && btcPrice > 0 -> {
+                                val usdAmount = btcAmount * btcPrice
+                                String.format(Locale.US, "%.2f", usdAmount)
+                            }
+                            useSats -> (btcAmount * 100_000_000).toLong().toString()
+                            else -> String.format(Locale.US, "%.8f", btcAmount).trimEnd('0').trimEnd('.')
+                        }
+                        recipients[index] = Pair(bip21.address, amountStr)
+                    }
+                }
+                qrScanRecipientIndex = -1
+            },
+            onDismiss = { qrScanRecipientIndex = -1 },
+        )
+    }
+
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false),
@@ -2389,6 +2486,16 @@ private fun MultiRecipientDialog(
                                     onValueChange = { recipients[index] = Pair(it, amt) },
                                     modifier = Modifier.fillMaxWidth(),
                                     placeholder = { Text("Bitcoin address", color = TextSecondary.copy(alpha = 0.5f)) },
+                                    trailingIcon = {
+                                        IconButton(onClick = { qrScanRecipientIndex = index }) {
+                                            Icon(
+                                                imageVector = Icons.Default.QrCodeScanner,
+                                                contentDescription = "Scan QR Code",
+                                                tint = BitcoinOrange,
+                                                modifier = Modifier.size(20.dp),
+                                            )
+                                        }
+                                    },
                                     singleLine = true,
                                     shape = RoundedCornerShape(8.dp),
                                     textStyle = MaterialTheme.typography.bodySmall,
@@ -2609,7 +2716,7 @@ private fun MultiRecipientDialog(
 @Composable
 private fun MultiRecipientConfirmationDialog(
     recipients: List<Recipient>,
-    feeRate: Float,
+    feeRate: Double,
     useSats: Boolean,
     selectedUtxos: List<UtxoInfo>?,
     privacyMode: Boolean = false,

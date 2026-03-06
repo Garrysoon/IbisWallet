@@ -18,6 +18,7 @@ import androidx.compose.material.icons.filled.AttachMoney
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CurrencyBitcoin
 import androidx.compose.material.icons.filled.Language
+import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material3.*
@@ -42,6 +43,9 @@ fun SettingsScreen(
     onDenominationChange: (String) -> Unit = {},
     spendUnconfirmed: Boolean = true,
     onSpendUnconfirmedChange: (Boolean) -> Unit = {},
+    nfcEnabled: Boolean = true,
+    onNfcEnabledChange: (Boolean) -> Unit = {},
+    hasNfcHardware: Boolean = false,
     currentFeeSource: String = SecureStorage.FEE_SOURCE_OFF,
     onFeeSourceChange: (String) -> Unit = {},
     customFeeSourceUrl: String = "",
@@ -227,6 +231,61 @@ fun SettingsScreen(
                     SquareToggle(
                         checked = spendUnconfirmed,
                         onCheckedChange = onSpendUnconfirmedChange,
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Row(
+                    modifier =
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .then(
+                                if (hasNfcHardware) {
+                                    Modifier.clickable { onNfcEnabledChange(!nfcEnabled) }
+                                } else {
+                                    Modifier
+                                },
+                            ),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Sensors,
+                            contentDescription = null,
+                            tint = if (hasNfcHardware) BitcoinOrange else TextSecondary.copy(alpha = 0.4f),
+                            modifier = Modifier.size(24.dp),
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column {
+                            Text(
+                                text = "NFC",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = if (hasNfcHardware) {
+                                    MaterialTheme.colorScheme.onBackground
+                                } else {
+                                    TextSecondary.copy(alpha = 0.4f)
+                                },
+                            )
+                            Text(
+                                text = if (hasNfcHardware) {
+                                    "Enable NFC functionality"
+                                } else {
+                                    "Not available on this device"
+                                },
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = if (hasNfcHardware) TextSecondary else TextSecondary.copy(alpha = 0.4f),
+                            )
+                        }
+                    }
+                    SquareToggle(
+                        checked = if (hasNfcHardware) nfcEnabled else false,
+                        onCheckedChange = if (hasNfcHardware) onNfcEnabledChange else { _ -> },
                     )
                 }
             }

@@ -10,9 +10,13 @@ import android.os.IBinder
 import android.util.Log
 import androidx.core.content.ContextCompat
 import github.aeonbtc.ibiswallet.BuildConfig
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.torproject.jni.TorService
 
 /**
@@ -21,6 +25,10 @@ import org.torproject.jni.TorService
 class TorManager(private val context: Context) {
     companion object {
         private const val TAG = "TorManager"
+        private const val SOCKS_PORT = 9050
+        private const val SOCKS_PROBE_RETRIES = 4
+        private const val SOCKS_PROBE_TIMEOUT_MS = 500
+        private const val SOCKS_PROBE_INTERVAL_MS = 250L
     }
 
     private val _torState = MutableStateFlow(TorState())
@@ -98,8 +106,11 @@ class TorManager(private val context: Context) {
         }
 
     /**
-     * Start the Tor service
+     * Start the Tor service. Synchronized to prevent concurrent bindService()
+     * calls which cause the native tor_run_main to be invoked twice, crashing
+     * with SIGABRT in hs_circuitmap_init.
      */
+    @Synchronized
     fun start() {
         if (_torState.value.status == TorStatus.CONNECTED ||
             _torState.value.status == TorStatus.CONNECTING ||
@@ -133,8 +144,9 @@ class TorManager(private val context: Context) {
     }
 
     /**
-     * Stop the Tor service
+     * Stop the Tor service. Synchronized to prevent races with start().
      */
+    @Synchronized
     fun stop() {
         if (BuildConfig.DEBUG) Log.d(TAG, "Stopping Tor service")
 
@@ -168,6 +180,62 @@ class TorManager(private val context: Context) {
      * Check if Tor is ready for use
      */
     fun isReady(): Boolean = _torState.value.status == TorStatus.CONNECTED
+
+    /**
+     * Suspend until Tor reaches CONNECTED state, or return false on
+     * timeout / ERROR. Uses StateFlow.first() so it reacts immediately
+     * to state changes (no polling). After Tor reports CONNECTED, probes
+     * the SOCKS proxy port to confirm it is accepting connections — this
+     * closes the race window where the control port signals "ready" but
+     * the SOCKS listener hasn't started yet.
+     *
+     * @param timeoutMs Maximum time to wait for bootstrap + proxy readiness.
+     * @return true if Tor is ready and the SOCKS proxy is accepting connections.
+     */
+    suspend fun awaitReady(timeoutMs: Long = 60_000): Boolean {
+        // Already bootstrapped — just verify the SOCKS proxy.
+        if (isReady()) return probeSocksProxy()
+
+        val result = withTimeoutOrNull(timeoutMs) {
+            _torState.first { state ->
+                state.status == TorStatus.CONNECTED || state.status == TorStatus.ERROR
+            }
+        }
+
+        if (result == null || result.status != TorStatus.CONNECTED) return false
+
+        // SOCKS proxy may take a moment to start listening after the
+        // control port reports "Bootstrapped 100%". Probe with retries.
+        return probeSocksProxy()
+    }
+
+    /**
+     * Try to open + immediately close a TCP connection to the local SOCKS
+     * proxy. Retries up to 4 times with 250 ms between attempts (≤ 1 s).
+     * Runs on [Dispatchers.IO] to avoid blocking the main thread.
+     */
+    private suspend fun probeSocksProxy(): Boolean = withContext(Dispatchers.IO) {
+        repeat(SOCKS_PROBE_RETRIES) { attempt ->
+            try {
+                java.net.Socket().use { socket ->
+                    socket.connect(
+                        java.net.InetSocketAddress("127.0.0.1", SOCKS_PORT),
+                        SOCKS_PROBE_TIMEOUT_MS,
+                    )
+                }
+                return@withContext true
+            } catch (_: Exception) {
+                if (BuildConfig.DEBUG) {
+                    Log.d(TAG, "SOCKS probe attempt ${attempt + 1}/$SOCKS_PROBE_RETRIES failed")
+                }
+                if (attempt < SOCKS_PROBE_RETRIES - 1) {
+                    Thread.sleep(SOCKS_PROBE_INTERVAL_MS)
+                }
+            }
+        }
+        if (BuildConfig.DEBUG) Log.w(TAG, "SOCKS proxy not reachable after $SOCKS_PROBE_RETRIES probes")
+        false
+    }
 
     /**
      * Wipe all Tor data from disk (relay descriptors, circuit state, cached

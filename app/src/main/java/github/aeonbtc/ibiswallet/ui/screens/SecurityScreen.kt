@@ -77,6 +77,7 @@ fun SecurityScreen(
     onAutoWipeThresholdChange: (SecureStorage.AutoWipeThreshold) -> Unit = {},
     onEnableCloakMode: (code: String) -> Unit = {},
     onDisableCloakMode: () -> Unit = {},
+    onRestartApp: () -> Unit = {},
     onPinSetupActiveChange: (Boolean) -> Unit = {},
     onBack: () -> Unit = {},
 ) {
@@ -93,12 +94,14 @@ fun SecurityScreen(
     var showDisableDuressDialog by remember { mutableStateOf(false) }
     var showAutoWipeConfirmDialog by remember { mutableStateOf(false) }
     var showDisableCloakDialog by remember { mutableStateOf(false) }
+    var showCloakRestartDialog by remember { mutableStateOf(false) }
 
     if (showCloakSetup) {
         CloakCodeSetupScreen(
             onCodeSet = { code ->
                 onEnableCloakMode(code)
                 showCloakSetup = false
+                showCloakRestartDialog = true
             },
             onBack = { showCloakSetup = false },
         )
@@ -734,14 +737,53 @@ fun SecurityScreen(
                         onClick = {
                             onDisableCloakMode()
                             showDisableCloakDialog = false
+                            onRestartApp()
                         },
                     ) {
-                        Text("Disable", color = ErrorRed)
+                        Text("Disable & Restart", color = ErrorRed)
                     }
                 },
                 dismissButton = {
                     TextButton(onClick = { showDisableCloakDialog = false }) {
                         Text("Cancel", color = TextSecondary)
+                    }
+                },
+                containerColor = DarkSurface,
+                shape = RoundedCornerShape(12.dp),
+            )
+        }
+
+        // Cloak Mode Restart Prompt
+        if (showCloakRestartDialog) {
+            AlertDialog(
+                onDismissRequest = { showCloakRestartDialog = false },
+                title = {
+                    Text(
+                        text = "Restart Required",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onBackground,
+                    )
+                },
+                text = {
+                    Text(
+                        text = "Restart the app to activate cloak mode.\n\nEnter your cloak pin in the calculator app and press the '=' key to unlock.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = TextSecondary,
+                    )
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            showCloakRestartDialog = false
+                            onRestartApp()
+                        },
+                    ) {
+                        Text("Restart", color = BitcoinOrange)
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showCloakRestartDialog = false }) {
+                        Text("Later", color = TextSecondary)
                     }
                 },
                 containerColor = DarkSurface,

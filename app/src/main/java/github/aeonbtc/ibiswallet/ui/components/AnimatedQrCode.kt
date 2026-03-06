@@ -238,6 +238,179 @@ fun AnimatedQrCode(
 }
 
 /**
+ * Animated QR code component for generic byte data, encoded as ur:bytes.
+ * Used for exporting BIP 329 labels via animated QR codes.
+ *
+ * For small data that fits in a single QR frame, displays a static QR code.
+ * For larger data, creates fountain-coded UR parts and cycles through them.
+ */
+@Composable
+fun AnimatedQrCodeBytes(
+    data: ByteArray,
+    modifier: Modifier = Modifier,
+    qrSize: Dp = 280.dp,
+    frameDelayMs: Long = 250L,
+) {
+    val context = LocalContext.current
+    var showEnlarged by remember { mutableStateOf(false) }
+
+    // CBOR-encode the bytes and create a ur:bytes UR
+    val encoder =
+        remember(data) {
+            val cborBytes = github.aeonbtc.ibiswallet.util.Bip329Labels.cborEncodeByteString(data)
+            val ur = com.sparrowwallet.hummingbird.UR("bytes", cborBytes)
+            UREncoder(ur, 120, 10, 0)
+        }
+
+    val totalParts =
+        remember(encoder) {
+            encoder.seqLen
+        }
+
+    var currentPart by remember { mutableStateOf(encoder.nextPart()) }
+    var partIndex by remember { mutableIntStateOf(1) }
+
+    val isAnimated = totalParts > 1
+
+    if (isAnimated) {
+        LaunchedEffect(encoder) {
+            while (true) {
+                delay(frameDelayMs)
+                currentPart = encoder.nextPart()
+                partIndex = ((partIndex) % totalParts) + 1
+            }
+        }
+    }
+
+    val qrBitmap =
+        remember(currentPart) {
+            generateQrBitmap(currentPart.uppercase())
+        }
+
+    // Boost screen brightness while QR is displayed
+    DisposableEffect(Unit) {
+        val activity = context as? ComponentActivity
+        val window = activity?.window
+        val originalBrightness = window?.attributes?.screenBrightness ?: -1f
+
+        window?.let {
+            val params = it.attributes
+            params.screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_FULL
+            it.attributes = params
+            it.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+
+        onDispose {
+            window?.let {
+                val params = it.attributes
+                params.screenBrightness = originalBrightness
+                it.attributes = params
+                it.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            }
+        }
+    }
+
+    val enlargeQr = { showEnlarged = true }
+    val dismissEnlarged = { showEnlarged = false }
+    if (showEnlarged) {
+        Dialog(
+            onDismissRequest = dismissEnlarged,
+            properties = DialogProperties(usePlatformDefaultWidth = false),
+        ) {
+            Box(
+                modifier =
+                    Modifier
+                        .fillMaxSize()
+                        .background(Color.Black)
+                        .clickable(onClick = dismissEnlarged),
+                contentAlignment = Alignment.Center,
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Box(
+                        modifier =
+                            Modifier
+                                .size(360.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Color.White)
+                                .padding(20.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        qrBitmap?.let { bitmap ->
+                            Image(
+                                bitmap = bitmap.asImageBitmap(),
+                                contentDescription = "Enlarged Labels QR Code",
+                                modifier = Modifier.fillMaxSize(),
+                                contentScale = ContentScale.Fit,
+                            )
+                        }
+                    }
+
+                    if (isAnimated) {
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            text = "Part $partIndex of $totalParts",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = TextSecondary,
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    Text(
+                        text = "Tap anywhere to close",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextSecondary,
+                    )
+                }
+            }
+        }
+    }
+
+    Column(
+        modifier = modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Box(
+            modifier =
+                Modifier
+                    .size(qrSize + 32.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color.White)
+                    .clickable(onClick = enlargeQr)
+                    .padding(16.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            qrBitmap?.let { bitmap ->
+                Image(
+                    bitmap = bitmap.asImageBitmap(),
+                    contentDescription = "Labels QR Code - Tap to enlarge",
+                    modifier = Modifier.size(qrSize),
+                    contentScale = ContentScale.Fit,
+                )
+            }
+        }
+
+        if (isAnimated) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = "Part $partIndex of $totalParts",
+                style = MaterialTheme.typography.bodySmall,
+                color = TextSecondary,
+            )
+        }
+
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            text = "Tap QR to enlarge",
+            style = MaterialTheme.typography.bodySmall,
+            color = TextSecondary,
+        )
+    }
+}
+
+/**
  * Generate a QR code bitmap for the given string content.
  * Uses Error Correction Level L — fountain coding in BC-UR handles redundancy,
  * so lower EC keeps module count down for easier scanning.

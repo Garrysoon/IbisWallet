@@ -2,6 +2,7 @@
 
 package github.aeonbtc.ibiswallet.ui
 
+import android.content.Intent
 import android.widget.Toast
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -151,6 +152,7 @@ fun IbisWalletApp(
     val certDialogState by viewModel.certDialogState.collectAsState()
     val dryRunResult by viewModel.dryRunResult.collectAsState()
     val isDuressMode by viewModel.isDuressMode.collectAsState()
+    val pendingBitcoinUri by viewModel.pendingBitcoinUri.collectAsState()
 
     // Global labels version counter - bumped when labels may have changed
     // (wallet imported with backup labels, wallet switched, sync completed)
@@ -164,6 +166,33 @@ fun IbisWalletApp(
 
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentDestination = navBackStackEntry?.destination
+
+    // Handle incoming bitcoin: URI from external intent
+    LaunchedEffect(pendingBitcoinUri) {
+        val uri = pendingBitcoinUri ?: return@LaunchedEffect
+        viewModel.consumePendingBitcoinUri()
+        val bip21 = parseBip21Uri(uri)
+        val useSats = denomination == SecureStorage.DENOMINATION_SATS
+        val amountStr = bip21.amount?.let { btcAmount ->
+            when {
+                useSats -> (btcAmount * 100_000_000).toLong().toString()
+                else -> String.format(java.util.Locale.US, "%.8f", btcAmount)
+                    .trimEnd('0').trimEnd('.')
+            }
+        } ?: ""
+        viewModel.updateSendScreenDraft(
+            SendScreenDraft(
+                recipientAddress = bip21.address,
+                amountInput = amountStr,
+                label = bip21.label ?: "",
+            ),
+        )
+        navController.navigate(Screen.Send.route) {
+            popUpTo(navController.graph.findStartDestination().id) {
+                inclusive = false
+            }
+        }
+    }
 
     // Close wallet picker and reset PIN setup state when navigating to a different screen
     LaunchedEffect(currentDestination?.route) {
@@ -282,6 +311,7 @@ fun IbisWalletApp(
                 isPrivateKey = isPrivateKey,
                 lastFullSyncTime = viewModel.getLastFullSyncTime(storedWallet.id),
                 masterFingerprint = storedWallet.masterFingerprint,
+                gapLimit = storedWallet.gapLimit,
             )
         }
 
@@ -319,6 +349,13 @@ fun IbisWalletApp(
                 }
                 is WalletEvent.WalletExported -> {
                     Toast.makeText(context, "Wallet \"${event.walletName}\" exported", Toast.LENGTH_SHORT).show()
+                }
+                is WalletEvent.Bip329LabelsExported -> {
+                    Toast.makeText(context, "Exported ${event.count} labels (BIP 329)", Toast.LENGTH_SHORT).show()
+                }
+                is WalletEvent.Bip329LabelsImported -> {
+                    labelsVersion++
+                    Toast.makeText(context, "Imported ${event.count} labels", Toast.LENGTH_SHORT).show()
                 }
                 is WalletEvent.SyncCompleted,
                 is WalletEvent.WalletSwitched,
@@ -550,6 +587,14 @@ fun IbisWalletApp(
                             btcPrice = btcPrice,
                             privacyMode = privacyMode,
                             onTogglePrivacy = { viewModel.togglePrivacyMode() },
+                            onToggleDenomination = {
+                                val next = if (denomination == SecureStorage.DENOMINATION_SATS) {
+                                    SecureStorage.DENOMINATION_BTC
+                                } else {
+                                    SecureStorage.DENOMINATION_SATS
+                                }
+                                viewModel.setDenomination(next)
+                            },
                             addressLabels = addressLabels,
                             transactionLabels = transactionLabels,
                             feeEstimationState = feeEstimationState,
@@ -567,9 +612,19 @@ fun IbisWalletApp(
                             onManageWallets = { navController.navigate(Screen.ManageWallets.route) },
                             onScanQrResult = { code ->
                                 val bip21 = parseBip21Uri(code)
+                                val useSats = denomination == SecureStorage.DENOMINATION_SATS
+                                val amountStr = bip21.amount?.let { btcAmount ->
+                                    if (useSats) {
+                                        (btcAmount * 100_000_000).toLong().toString()
+                                    } else {
+                                        String.format(java.util.Locale.US, "%.8f", btcAmount)
+                                            .trimEnd('0').trimEnd('.')
+                                    }
+                                } ?: ""
                                 viewModel.updateSendScreenDraft(
                                     SendScreenDraft(
                                         recipientAddress = bip21.address,
+                                        amountInput = amountStr,
                                         label = bip21.label ?: "",
                                     ),
                                 )
@@ -713,12 +768,33 @@ fun IbisWalletApp(
                             },
                             onSelectWallet = { wallet ->
                                 viewModel.switchWallet(wallet.id)
+                                navController.navigate(Screen.Balance.route) {
+                                    popUpTo(navController.graph.findStartDestination().id) {
+                                        inclusive = false
+                                    }
+                                    launchSingleTop = true
+                                }
                             },
                             onExportWallet = { walletId, uri, includeLabels, includeServerSettings, password ->
                                 viewModel.exportWallet(walletId, uri, includeLabels, includeServerSettings, password)
                             },
-                            onEditWallet = { walletId, newName, newFingerprint ->
-                                viewModel.editWallet(walletId, newName, newFingerprint)
+                            onExportBip329Labels = { walletId, uri ->
+                                viewModel.exportBip329Labels(walletId, uri)
+                            },
+                            onImportBip329Labels = { walletId, uri ->
+                                viewModel.importBip329Labels(walletId, uri)
+                            },
+                            onImportBip329LabelsFromContent = { walletId, content ->
+                                viewModel.importBip329LabelsFromContent(walletId, content)
+                            },
+                            onGetBip329LabelsContent = { walletId ->
+                                viewModel.getBip329LabelsContent(walletId)
+                            },
+                            onGetLabelCounts = { walletId ->
+                                viewModel.getLabelCounts(walletId)
+                            },
+                            onEditWallet = { walletId, newName, newGapLimit, newFingerprint ->
+                                viewModel.editWallet(walletId, newName, newGapLimit, newFingerprint)
                             },
                             onReorderWallets = { orderedIds ->
                                 viewModel.reorderWallets(orderedIds)
@@ -880,6 +956,8 @@ fun IbisWalletApp(
                         var customMempoolUrl by remember { mutableStateOf(viewModel.getCustomMempoolUrl()) }
                         var customFeeSourceUrl by remember { mutableStateOf(viewModel.getCustomFeeSourceUrl()) }
                         var spendUnconfirmed by remember { mutableStateOf(viewModel.getSpendUnconfirmed()) }
+                        var nfcEnabled by remember { mutableStateOf(viewModel.isNfcEnabled()) }
+                        val hasNfcHardware = remember { android.nfc.NfcAdapter.getDefaultAdapter(context) != null }
 
                         SettingsScreen(
                             currentDenomination = denomination,
@@ -891,6 +969,12 @@ fun IbisWalletApp(
                                 viewModel.setSpendUnconfirmed(enabled)
                                 spendUnconfirmed = enabled
                             },
+                            nfcEnabled = nfcEnabled,
+                            onNfcEnabledChange = { enabled ->
+                                viewModel.setNfcEnabled(enabled)
+                                nfcEnabled = enabled
+                            },
+                            hasNfcHardware = hasNfcHardware,
                             currentFeeSource = feeSource,
                             onFeeSourceChange = { newSource ->
                                 val wasOnion = viewModel.isFeeSourceOnion()
@@ -1066,6 +1150,19 @@ fun IbisWalletApp(
                             onDisableCloakMode = {
                                 viewModel.disableCloakMode()
                                 cloakModeEnabled = false
+                            },
+                            onRestartApp = {
+                                viewModel.stopTor()
+                                val ctx = navController.context
+                                val restartIntent = Intent(
+                                    ctx,
+                                    github.aeonbtc.ibiswallet.MainActivity::class.java,
+                                ).addFlags(
+                                    Intent.FLAG_ACTIVITY_NEW_TASK or
+                                        Intent.FLAG_ACTIVITY_CLEAR_TASK,
+                                )
+                                ctx.startActivity(restartIntent)
+                                kotlin.system.exitProcess(0)
                             },
                             onPinSetupActiveChange = { active -> isPinSetupActive = active },
                             onBack = { navController.popBackStack() },
@@ -1509,13 +1606,10 @@ private fun ConnectionStatusDialog(
                                     Box(
                                         modifier =
                                             Modifier
-                                                .size(6.dp)
-                                                .clip(CircleShape)
                                                 .background(
                                                     if (isTorActive) TorPurple else TextSecondary.copy(alpha = 0.5f),
                                                 ),
                                     )
-                                    Spacer(modifier = Modifier.width(4.dp))
                                     Text(
                                         text = "Tor",
                                         style = MaterialTheme.typography.labelSmall,

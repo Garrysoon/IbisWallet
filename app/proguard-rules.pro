@@ -35,10 +35,17 @@
 -keepclassmembers enum github.aeonbtc.ibiswallet.data.local.SecureStorage$LockTiming { *; }
 
 # ==================== BDK (Bitcoin Dev Kit) ====================
-# Keep BDK JNI classes and native methods
--keep class org.bitcoindevkit.** { *; }
+# BDK uses UniFFI (JNI) — Rust native code calls into Java/Kotlin classes
+# by reflection (FfiConverters, type mappers, etc.) that are never directly
+# referenced from Kotlin. A broad keep is required; scoping to specific
+# classes would break the UniFFI bridge at runtime.
+#noinspection ShrinkerKeepRule
+-keep class org.bitcoindevkit.** {
+    native <methods>;
+    *;
+}
+#noinspection ShrinkerKeepRule
 -keep class org.rustbitcoin.** { *; }
--keepclassmembers class org.bitcoindevkit.** { native <methods>; }
 
 # ==================== JNA (used by BDK via UniFFI) ====================
 # BDK's native code accesses JNA fields/classes via JNI reflection (e.g.
@@ -55,13 +62,12 @@
 -keep class com.sparrowwallet.hummingbird.** { *; }
 
 # ==================== OkHttp ====================
+# OkHttp ships its own consumer rules; just suppress platform warnings.
 -dontwarn okhttp3.**
 -dontwarn okio.**
--keep class okhttp3.** { *; }
--keep interface okhttp3.** { *; }
 
 # ==================== Compose ====================
--keep class androidx.compose.** { *; }
+# Compose ships its own consumer rules — no blanket keep needed.
 
 # ==================== Crypto ====================
 -keep class javax.crypto.** { *; }
@@ -69,8 +75,7 @@
 -keep class androidx.security.crypto.** { *; }
 
 # ==================== CameraX ====================
-# Defensive: CameraX ships consumer rules but has had R8 issues historically
--keep class androidx.camera.** { *; }
+# CameraX ships its own consumer rules — no blanket keep needed.
 
 # ==================== Biometric ====================
 # Defensive: BiometricFragment is instantiated via reflection internally
@@ -87,4 +92,15 @@
 -dontwarn com.google.errorprone.annotations.**
 
 # ==================== ZXing (QR) ====================
--keep class com.google.zxing.** { *; }
+# Only keep the classes we actually use for encoding/decoding QR codes.
+-keep class com.google.zxing.MultiFormatReader { *; }
+-keep class com.google.zxing.BinaryBitmap { *; }
+-keep class com.google.zxing.RGBLuminanceSource { *; }
+-keep class com.google.zxing.common.GlobalHistogramBinarizer { *; }
+-keep class com.google.zxing.qrcode.QRCodeWriter { *; }
+-keep class com.google.zxing.qrcode.decoder.ErrorCorrectionLevel { *; }
+-keep class com.google.zxing.BarcodeFormat { *; }
+-keep class com.google.zxing.EncodeHintType { *; }
+# ZXing uses ServiceLoader to discover format readers/writers
+-keep class * implements com.google.zxing.Reader
+-keep class * implements com.google.zxing.Writer

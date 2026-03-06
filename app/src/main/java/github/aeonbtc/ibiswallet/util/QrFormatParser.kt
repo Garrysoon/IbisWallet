@@ -77,7 +77,12 @@ object QrFormatParser {
             if (parsed != null) return parsed
         }
 
-        // 4. Already a plain mnemonic, xpub, descriptor, or origin-prefixed key — pass through
+        // 4. Abbreviated mnemonic: ColdCard exports seed words truncated to first 4 letters.
+        //    BIP39 guarantees the first 4 chars uniquely identify each word.
+        val expanded = expandAbbreviatedMnemonic(context, trimmed)
+        if (expanded != trimmed) return expanded
+
+        // 5. Already a plain mnemonic, xpub, descriptor, or origin-prefixed key — pass through
         return trimmed
     }
 
@@ -325,6 +330,53 @@ object QrFormatParser {
         } else {
             "[${fingerprint.lowercase()}]$extPubKey"
         }
+    }
+
+    /**
+     * Expand abbreviated BIP39 mnemonic words to their full forms.
+     * ColdCard (and some other signers) export seed backups with each word
+     * truncated to its first 4 letters. BIP39 guarantees the first 4 characters
+     * uniquely identify each word in the English wordlist.
+     *
+     * Words that are already full BIP39 words are left unchanged.
+     * Words whose 4-char prefix uniquely matches a BIP39 word are expanded.
+     * Words that don't match any prefix are left unchanged (will fail validation later).
+     *
+     * @return the mnemonic with all expandable abbreviated words replaced by full words,
+     *   or the original string unchanged if it doesn't look like a mnemonic.
+     */
+    fun expandAbbreviatedMnemonic(
+        context: Context,
+        input: String,
+    ): String {
+        val trimmed = input.trim()
+        val tokens = trimmed.split("\\s+".toRegex()).filter { it.isNotBlank() }
+
+        // Only attempt expansion on plausible mnemonic word counts
+        if (tokens.size !in listOf(12, 15, 18, 21, 24)) return trimmed
+
+        val wordlist = getWordlist(context)
+
+        // Build prefix → full word map (BIP39 guarantees uniqueness for 4-char prefixes)
+        val prefixMap = wordlist.associateBy { it.take(4) }
+
+        // Check if any word actually needs expansion (is abbreviated but not already full)
+        val needsExpansion = tokens.any { token ->
+            token !in wordlist && token.length >= 4 && prefixMap.containsKey(token.take(4))
+        }
+        if (!needsExpansion) return trimmed
+
+        val expanded = tokens.map { token ->
+            if (token in wordlist) {
+                // Already a full valid word
+                token
+            } else {
+                // Try to expand via 4-char prefix lookup
+                prefixMap[token.take(4)] ?: token
+            }
+        }
+
+        return expanded.joinToString(" ")
     }
 
     data class ServerConfig(

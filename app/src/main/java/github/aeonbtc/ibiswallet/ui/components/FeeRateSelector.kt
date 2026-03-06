@@ -48,7 +48,7 @@ import java.util.Locale
 
 /** Safety cap for manual fee rate entry (sat/vB). Users can still type higher values
  *  but a warning is shown and the value is clamped when applied. */
-const val MAX_FEE_RATE_SAT_VB = 10_000f
+const val MAX_FEE_RATE_SAT_VB = 10_000.0
 
 enum class FeeRateOption {
     FASTEST,
@@ -62,14 +62,14 @@ fun formatFeeRate(rate: Double): String {
     return formatted.trimEnd('0').trimEnd('.')
 }
 
-fun formatFeeRate(rate: Float): String = formatFeeRate(rate.toDouble())
+// Float overload removed — all fee rates are now Double throughout the pipeline
 
 @Composable
 fun FeeRateSection(
     feeEstimationState: FeeEstimationResult,
-    currentFeeRate: Float,
+    currentFeeRate: Double,
     minFeeRate: Double,
-    onFeeRateChange: (Float) -> Unit,
+    onFeeRateChange: (Double) -> Unit,
     onRefreshFees: () -> Unit,
     enabled: Boolean,
     estimatedFeeSats: Long? = null,
@@ -85,20 +85,18 @@ fun FeeRateSection(
     var selectedOption by remember { mutableStateOf(FeeRateOption.HALF_HOUR) }
     var customFeeInput by remember { mutableStateOf<String?>(null) }
 
-    val minFeeFloat = minFeeRate.toFloat()
-
     val estimates = (feeEstimationState as? FeeEstimationResult.Success)?.estimates
 
     LaunchedEffect(estimates) {
         if (estimates != null && selectedOption != FeeRateOption.CUSTOM) {
             val newRate =
                 when (selectedOption) {
-                    FeeRateOption.FASTEST -> estimates.fastestFee.toFloat()
-                    FeeRateOption.HALF_HOUR -> estimates.halfHourFee.toFloat()
-                    FeeRateOption.HOUR -> estimates.hourFee.toFloat()
+                    FeeRateOption.FASTEST -> estimates.fastestFee
+                    FeeRateOption.HALF_HOUR -> estimates.halfHourFee
+                    FeeRateOption.HOUR -> estimates.hourFee
                     FeeRateOption.CUSTOM -> currentFeeRate
                 }
-            onFeeRateChange(newRate.coerceAtLeast(minFeeFloat))
+            onFeeRateChange(newRate.coerceAtLeast(minFeeRate))
         }
     }
 
@@ -177,8 +175,8 @@ fun FeeRateSection(
                 value = customFeeInput ?: "",
                 onValueChange = { input ->
                     customFeeInput = input
-                    input.toFloatOrNull()?.let {
-                        onFeeRateChange(it.coerceIn(minFeeFloat, MAX_FEE_RATE_SAT_VB))
+                    input.toDoubleOrNull()?.let {
+                        onFeeRateChange(it.coerceIn(minFeeRate, MAX_FEE_RATE_SAT_VB))
                     }
                 },
                 enabled = enabled,
@@ -231,7 +229,7 @@ fun FeeRateSection(
                         estimates?.let {
                             selectedOption = FeeRateOption.FASTEST
                             customFeeInput = null
-                            onFeeRateChange(it.fastestFee.toFloat().coerceAtLeast(minFeeFloat))
+                            onFeeRateChange(it.fastestFee.coerceAtLeast(minFeeRate))
                         }
                     },
                     enabled = enabled,
@@ -247,7 +245,7 @@ fun FeeRateSection(
                         estimates?.let {
                             selectedOption = FeeRateOption.HALF_HOUR
                             customFeeInput = null
-                            onFeeRateChange(it.halfHourFee.toFloat().coerceAtLeast(minFeeFloat))
+                            onFeeRateChange(it.halfHourFee.coerceAtLeast(minFeeRate))
                         }
                     },
                     enabled = enabled,
@@ -263,7 +261,7 @@ fun FeeRateSection(
                         estimates?.let {
                             selectedOption = FeeRateOption.HOUR
                             customFeeInput = null
-                            onFeeRateChange(it.hourFee.toFloat().coerceAtLeast(minFeeFloat))
+                            onFeeRateChange(it.hourFee.coerceAtLeast(minFeeRate))
                         }
                     },
                     enabled = enabled,
@@ -281,8 +279,8 @@ fun FeeRateSection(
                     value = customFeeInput ?: "",
                     onValueChange = { input ->
                         customFeeInput = input
-                        input.toFloatOrNull()?.let {
-                            onFeeRateChange(it.coerceIn(minFeeFloat, MAX_FEE_RATE_SAT_VB))
+                        input.toDoubleOrNull()?.let {
+                            onFeeRateChange(it.coerceIn(minFeeRate, MAX_FEE_RATE_SAT_VB))
                         }
                     },
                     enabled = enabled,
@@ -387,7 +385,7 @@ private fun ManualFeeInput(
     enabled: Boolean,
     minFeeRate: Double = 1.0,
 ) {
-    val parsedRate = value.toFloatOrNull()
+    val parsedRate = value.toDoubleOrNull()
     val isOverCap = parsedRate != null && parsedRate > MAX_FEE_RATE_SAT_VB
 
     OutlinedTextField(
