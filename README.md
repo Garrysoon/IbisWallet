@@ -4,10 +4,7 @@ A self-custody Bitcoin wallet for Android, inspired by [Sparrow Wallet](https://
 
 Designed for experienced users - no hand-holding, no training wheels.
 
-<img width="200" height="444" alt="Screenshot_20260209_000530" src="https://github.com/user-attachments/assets/7f122a48-7ff4-4670-bab9-275a91564013" />
-<img width="200" height="444" alt="Screenshot_20260209_002731" src="https://github.com/user-attachments/assets/a02f2867-e396-42c9-85b8-ce2dfc0438c7" />
-<img width="200" height="444" alt="Screenshot_20260209_000059" src="https://github.com/user-attachments/assets/da22755b-f86d-4923-b31d-669997a43e63" />
-<img width="200" height="444" alt="Screenshot_20260209_002804" src="https://github.com/user-attachments/assets/8b6ea96c-f569-473c-8b38-3ad7a08d47a4" />
+![screen](https://github.com/user-attachments/assets/9d0a5712-320b-45ca-9e75-1cef60dc0e7e)
 
 [<img src="https://user-images.githubusercontent.com/663460/26973090-f8fdc986-4d14-11e7-995a-e7c5e79ed925.png" alt="Get APK from GitHub" height="80">](https://github.com/aeonBTC/ibiswallet/releases)
 
