@@ -24,7 +24,8 @@ Designed for experienced users - no hand-holding, no training wheels.
 - **BIP329 Labels** - Industry-standard wallet labels for transactions and addresses
 - **Transaction Search** - Search transaction history by date, amount, or label
 
-### Layer 2 — Liquid Network (opt-in per wallet)
+### Layer 2 — Liquid Network (Ark coming soon)
+- **Modular Integration** - Enable or disable Liquid for each wallet
 - **Send & Receive L-BTC** - Full Liquid wallet with confidential transactions
 - **Lightning Payments** - Pay Bolt 11 and Bolt 12 invoices via Boltz submarine swaps
 - **Lightning Invoices** - Generate Bolt 11 invoices via Boltz reverse swaps
