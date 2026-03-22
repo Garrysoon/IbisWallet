@@ -49,7 +49,6 @@ Designed for experienced users - no hand-holding, no training wheels.
 ### Backup & Restore
 - **Full App Backup** - Backup and restore the entire app state including wallets, settings, and labels
 - **Encrypted Backups** - Back up wallets with AES-256 encryption 
-
 - **Built with** [BDK](https://bitcoindevkit.org/) and [LWK](https://github.com/Blockstream/lwk)
 ## Building
 
