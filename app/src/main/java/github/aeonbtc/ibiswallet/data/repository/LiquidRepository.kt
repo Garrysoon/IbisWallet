@@ -75,8 +75,11 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -203,6 +206,9 @@ class LiquidRepository(
 
     private val _loadedWalletId = MutableStateFlow<String?>(null)
     val loadedWalletId: StateFlow<String?> = _loadedWalletId
+
+    private val _connectionEvents = MutableSharedFlow<ConnectionEvent>(extraBufferCapacity = 1)
+    val connectionEvents: SharedFlow<ConnectionEvent> = _connectionEvents.asSharedFlow()
 
     private val connectionMutex = Mutex()
     private val syncMutex = Mutex()
@@ -1385,6 +1391,7 @@ class LiquidRepository(
                     if (!isActive) return@collect
                     if (notification is ElectrumNotification.ConnectionLost) {
                         Log.w(TAG, "Liquid subscription socket reported connection lost")
+                        _connectionEvents.tryEmit(ConnectionEvent.ConnectionLost)
                         return@collect
                     }
 
@@ -4652,6 +4659,10 @@ class LiquidRepository(
         NO_CHANGES,
         SYNCED,
         FAILED,
+    }
+
+    sealed interface ConnectionEvent {
+        data object ConnectionLost : ConnectionEvent
     }
 }
 

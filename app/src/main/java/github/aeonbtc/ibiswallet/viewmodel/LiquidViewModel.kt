@@ -74,6 +74,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.isActive
@@ -106,6 +107,9 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
         private const val MIN_LIQUID_SEND_FEE_RATE = 0.1
         private const val ACTIVE_LAYER_PERSIST_DELAY_MS = 250L
         private const val LIGHTNING_PENDING_WARNING_ATTEMPTS = 12
+        private const val HEARTBEAT_INTERVAL_MS = 60_000L
+        private const val HEARTBEAT_PING_TIMEOUT_MS = 10_000L
+        private const val HEARTBEAT_MAX_FAILURES = 3
     }
 
     private val secureStorage = SecureStorage.getInstance(application)
@@ -149,6 +153,9 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
 
     private val _allLiquidUtxos = MutableStateFlow<List<UtxoInfo>>(emptyList())
     val allLiquidUtxos: StateFlow<List<UtxoInfo>> = _allLiquidUtxos
+
+    private val _preSelectedLiquidUtxo = MutableStateFlow<UtxoInfo?>(null)
+    val preSelectedLiquidUtxo: StateFlow<UtxoInfo?> = _preSelectedLiquidUtxo.asStateFlow()
 
     private val _liquidTransactionLabels = MutableStateFlow<Map<String, String>>(emptyMap())
     val liquidTransactionLabels: StateFlow<Map<String, String>> = _liquidTransactionLabels
@@ -226,6 +233,7 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
     private var lastAutomaticBoltzPrewarmFailureAtMs = 0L
     private var liquidFullSyncJob: Job? = null
     private var backgroundSyncJob: Job? = null
+    private var heartbeatJob: Job? = null
     private var lightningInvoiceMonitorJob: Job? = null
     private var lightningPaymentMonitorJob: Job? = null
     private var activeLayerPersistJob: Job? = null
@@ -302,6 +310,16 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
                     }
                 }
         }
+
+        viewModelScope.launch {
+            repository.connectionEvents.collect { event ->
+                when (event) {
+                    LiquidRepository.ConnectionEvent.ConnectionLost -> {
+                        handleLiquidConnectionLost("Liquid server connection lost")
+                    }
+                }
+            }
+        }
     }
 
     private fun clearDerivedLiquidSnapshots() {
@@ -357,6 +375,7 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
     override fun onCleared() {
         lifecycleCoordinator.dispose()
         cancelActiveLayerPersistence()
+        stopHeartbeat()
         cancelManagedJobs()
         sideSwapMonitorJob?.cancel()
         synchronized(swapMonitorJobs) {
@@ -1209,6 +1228,50 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
         backgroundSyncJob = null
     }
 
+    private fun startHeartbeat() {
+        if (heartbeatJob?.isActive == true) return
+        heartbeatJob?.cancel()
+        var consecutiveFailures = 0
+        heartbeatJob = launchLiquidJob {
+            while (isActive) {
+                delay(HEARTBEAT_INTERVAL_MS)
+                if (!_isLayer2Enabled.value || !liquidContextActive || !isLiquidConnected.value) {
+                    break
+                }
+
+                val alive =
+                    withTimeoutOrNull(HEARTBEAT_PING_TIMEOUT_MS) {
+                        withContext(Dispatchers.IO) {
+                            repository.pingServer()
+                        }
+                    } ?: false
+
+                if (alive) {
+                    consecutiveFailures = 0
+                    continue
+                }
+
+                consecutiveFailures++
+                if (consecutiveFailures < HEARTBEAT_MAX_FAILURES) {
+                    continue
+                }
+
+                if (liquidState.value.isSyncing || liquidFullSyncJob?.isActive == true) {
+                    consecutiveFailures = 0
+                    continue
+                }
+
+                handleLiquidConnectionLost("Liquid server connection lost")
+                break
+            }
+        }
+    }
+
+    private fun stopHeartbeat() {
+        heartbeatJob?.cancel()
+        heartbeatJob = null
+    }
+
     /**
      * Silent reconnect after returning from background with a dead Liquid connection.
      */
@@ -1222,7 +1285,7 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    private fun launchRealtimeSubscriptions() {
+    private fun launchRealtimeSubscriptions(markInitialSyncComplete: Boolean = false) {
         launchLiquidJob {
             try {
                 when (repository.startRealTimeSubscriptions()) {
@@ -1242,8 +1305,29 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
                     repository.sync()
                     _liquidBlockHeight.value = repository.getServerBlockHeight()
                 }
+            } finally {
+                if (markInitialSyncComplete) {
+                    _initialLiquidSyncComplete.value = true
+                }
             }
         }
+    }
+
+    private suspend fun handleLiquidConnectionLost(message: String) {
+        if (repository.isUserDisconnected()) return
+        if (_isLiquidConnecting.value || connectionJob?.isActive == true) return
+        if (!isLiquidConnected.value) return
+        if (liquidState.value.isSyncing || liquidFullSyncJob?.isActive == true) return
+
+        val failedServerId = secureStorage.getActiveLiquidServerId()
+        stopHeartbeat()
+        stopBackgroundSync()
+        _initialLiquidSyncComplete.value = false
+        _liquidBlockHeight.value = null
+        repository.disconnect()
+        _liquidConnectionError.value = message
+        _events.emit(LiquidEvent.Error(message))
+        failedServerId?.let(::tryAutoSwitchFrom)
     }
 
     private fun requireLiquidAvailable() {
@@ -1268,6 +1352,7 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
                 repository.unloadWallet()
             }
             resetLiquidUiState()
+            stopHeartbeat()
             stopBackgroundSync()
             stopSideSwapMonitor()
         } else if (liquidContextActive) {
@@ -1289,7 +1374,8 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
                 refreshSideSwapWalletInfoMonitoring()
                 if (isLiquidConnected.value) {
                     startBackgroundSync()
-                    launchRealtimeSubscriptions()
+                    startHeartbeat()
+                    launchRealtimeSubscriptions(markInitialSyncComplete = true)
                     if (isBoltzEnabled()) {
                         scheduleAutomaticBoltzPrewarm("context_active")
                     }
@@ -1303,6 +1389,7 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
         _activeLayer.value = WalletLayer.LAYER1
         cancelManagedJobs()
         resetLiquidUiState()
+        stopHeartbeat()
         stopBackgroundSync()
         stopSideSwapMonitor()
         stopAllSwapMonitors()
@@ -1412,7 +1499,11 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
                         }
                     }
                 }
-            } else {
+            } else if (isLiquidConnected.value) {
+                startBackgroundSync()
+                startHeartbeat()
+                launchRealtimeSubscriptions(markInitialSyncComplete = true)
+            } else if (repository.isUserDisconnected()) {
                 _initialLiquidSyncComplete.value = true
             }
             return
@@ -1442,9 +1533,9 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
                         runRequestedLiquidFullSyncIfNeeded(loadedId)
                     }
                     startBackgroundSync()
+                    startHeartbeat()
                     _liquidBlockHeight.value = repository.getServerBlockHeight()
-                    launchRealtimeSubscriptions()
-                    _initialLiquidSyncComplete.value = true
+                    launchRealtimeSubscriptions(markInitialSyncComplete = true)
                     preparedSwapSession = null
                     resumePendingSwapIfNeeded()
                     resumePendingLightningWorkIfNeeded()
@@ -1567,6 +1658,8 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
     private fun connectToLiquidServerInternal(serverId: String, isAutoSwitch: Boolean) {
         val previousJob = connectionJob
         if (!isAutoSwitch) autoSwitchVisited.clear()
+        stopBackgroundSync()
+        stopHeartbeat()
         val config =
             secureStorage.getLiquidServer(serverId)
                 ?: run {
@@ -1624,6 +1717,7 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
             cancelLiquidConnection()
             return
         }
+        stopHeartbeat()
         stopBackgroundSync()
         _liquidConnectionError.value = null
         _liquidBlockHeight.value = null
@@ -1635,6 +1729,7 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
 
     /** Cancel an in-progress connection attempt */
     fun cancelLiquidConnection() {
+        stopHeartbeat()
         stopBackgroundSync()
         val jobToCancel = connectionJob
         connectionJob = null
@@ -1881,6 +1976,8 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
     private suspend fun connectToActiveServer() {
         connectionJob?.cancelAndJoin()
         connectionJob = null
+        stopBackgroundSync()
+        stopHeartbeat()
         if (!secureStorage.hasUserSelectedLiquidServer()) return
         val activeId = secureStorage.getActiveLiquidServerId() ?: return
         val config = secureStorage.getLiquidServer(activeId) ?: return
@@ -1993,9 +2090,9 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
             scheduleAutomaticBoltzPrewarm("after_connect")
         }
         startBackgroundSync()
+        startHeartbeat()
         _liquidBlockHeight.value = repository.getServerBlockHeight()
-        launchRealtimeSubscriptions()
-        _initialLiquidSyncComplete.value = true
+        launchRealtimeSubscriptions(markInitialSyncComplete = true)
         preparedSwapSession = null
         resumePendingSwapIfNeeded()
         resumePendingLightningWorkIfNeeded()
@@ -4796,6 +4893,14 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
         launchLiquidJob {
             runCatching { repository.discardPreparedLightningPaymentReview() }
         }
+    }
+
+    fun setPreSelectedLiquidUtxo(utxo: UtxoInfo) {
+        _preSelectedLiquidUtxo.value = utxo
+    }
+
+    fun clearPreSelectedLiquidUtxo() {
+        _preSelectedLiquidUtxo.value = null
     }
 
     fun updateSendDraft(draft: SendScreenDraft) {

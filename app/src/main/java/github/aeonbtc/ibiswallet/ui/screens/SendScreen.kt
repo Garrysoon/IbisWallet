@@ -229,12 +229,19 @@ fun SendScreen(
         onClearDryRun()
     }
 
+    // Filter out frozen UTXOs for coin control
+    val spendableUtxos = remember(utxos) { utxos.filter { !it.isFrozen } }
+
     // Restore selected UTXOs from draft
-    LaunchedEffect(draft.selectedUtxoOutpoints, utxos) {
+    LaunchedEffect(draft.selectedUtxoOutpoints, spendableUtxos) {
         if (draft.selectedUtxoOutpoints.isNotEmpty() && selectedUtxos.isEmpty()) {
-            val restoredUtxos = utxos.filter { it.outpoint in draft.selectedUtxoOutpoints }
+            val restoredUtxos = selectCoinControlUtxos(draft.selectedUtxoOutpoints, spendableUtxos)
             selectedUtxos.addAll(restoredUtxos)
         }
+    }
+
+    LaunchedEffect(spendableUtxos) {
+        reconcileCoinControlSelection(selectedUtxos, spendableUtxos)
     }
 
     // Sync local state when draft changes (QR scan from balance screen, or reset after send)
@@ -295,9 +302,6 @@ fun SendScreen(
         )
     }
 
-    // Filter out frozen UTXOs for coin control
-    val spendableUtxos = remember(utxos) { utxos.filter { !it.isFrozen } }
-
     // Convert input to sats based on denomination or USD mode
     val amountSats =
         remember(amountInput, isUsdMode, btcPrice, useSats) {
@@ -331,11 +335,6 @@ fun SendScreen(
                 walletState.balanceSats.toLong()
             }
         }
-    val selectedUtxoOutpoints =
-        remember(selectedUtxos.toList()) {
-            selectedUtxos.mapTo(hashSetOf()) { it.outpoint }
-        }
-
     // Build multi-recipient list for fee estimation
     val multiRecipientList =
         remember(multiRecipients.toList(), useSats, isUsdMode, btcPrice) {
@@ -473,11 +472,7 @@ fun SendScreen(
             privacyMode = privacyMode,
             spendUnconfirmed = spendUnconfirmed,
             onUtxoToggle = { utxo ->
-                if (selectedUtxoOutpoints.contains(utxo.outpoint)) {
-                    selectedUtxos.remove(utxo)
-                } else {
-                    selectedUtxos.add(utxo)
-                }
+                toggleCoinControlSelection(selectedUtxos, utxo)
             },
             onSelectAll = {
                 selectedUtxos.clear()
@@ -1553,7 +1548,7 @@ private fun CoinControlDialog(
 ) {
     val totalSelected = selectedUtxos.sumOf { it.amountSats.toLong() }.toULong()
     val selectedOutpoints =
-        remember(selectedUtxos) {
+        remember(selectedUtxos.toList()) {
             selectedUtxos.mapTo(hashSetOf()) { it.outpoint }
         }
 

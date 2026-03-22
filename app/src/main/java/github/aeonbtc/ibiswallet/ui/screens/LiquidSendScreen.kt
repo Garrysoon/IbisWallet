@@ -161,6 +161,8 @@ fun LiquidSendScreen(
         selectedUtxos: List<UtxoInfo>?,
         label: String?,
     ) -> Unit = { _, _ -> },
+    preSelectedUtxo: UtxoInfo? = null,
+    onClearPreSelectedUtxo: () -> Unit = {},
     onClearDraft: () -> Unit = {},
     onResetSend: () -> Unit = {},
 ) {
@@ -175,6 +177,15 @@ fun LiquidSendScreen(
     var wasSending by remember { mutableStateOf(false) }
     var showCoinControl by remember { mutableStateOf(false) }
     val selectedUtxos = remember { mutableStateListOf<UtxoInfo>() }
+
+    LaunchedEffect(preSelectedUtxo) {
+        if (preSelectedUtxo != null) {
+            selectedUtxos.clear()
+            selectedUtxos.add(preSelectedUtxo)
+            onClearPreSelectedUtxo()
+        }
+    }
+
     var isMultiMode by remember { mutableStateOf(false) }
     var showMultiDialog by remember { mutableStateOf(false) }
     val multiRecipients = remember { mutableStateListOf<Pair<String, String>>() }
@@ -223,10 +234,6 @@ fun LiquidSendScreen(
     val isAddressValid = recipientAddress.isNotBlank() && addressValidationError == null
     val spendableUtxos = remember(liquidUtxos) { liquidUtxos.filter { !it.isFrozen } }
     val selectedUtxoSnapshot = selectedUtxos.toList()
-    val selectedUtxoOutpoints =
-        remember(selectedUtxoSnapshot) {
-            selectedUtxoSnapshot.mapTo(hashSetOf()) { it.outpoint }
-        }
     val availableSats =
         remember(selectedUtxoSnapshot, liquidState.balanceSats) {
             if (selectedUtxoSnapshot.isNotEmpty()) {
@@ -263,11 +270,15 @@ fun LiquidSendScreen(
             !isWatchOnly &&
             liquidSendState is LiquidSendState.ReviewReady
 
-    LaunchedEffect(draft.selectedUtxoOutpoints, liquidUtxos) {
+    LaunchedEffect(draft.selectedUtxoOutpoints, spendableUtxos) {
         if (draft.selectedUtxoOutpoints.isNotEmpty() && selectedUtxos.isEmpty()) {
-            val restored = liquidUtxos.filter { it.outpoint in draft.selectedUtxoOutpoints }
+            val restored = selectCoinControlUtxos(draft.selectedUtxoOutpoints, spendableUtxos)
             selectedUtxos.addAll(restored)
         }
+    }
+
+    LaunchedEffect(spendableUtxos) {
+        reconcileCoinControlSelection(selectedUtxos, spendableUtxos)
     }
 
     LaunchedEffect(draft) {
@@ -443,11 +454,7 @@ fun LiquidSendScreen(
             privacyMode = privacyMode,
             spendUnconfirmed = spendUnconfirmed,
             onUtxoToggle = { utxo ->
-                if (selectedUtxoOutpoints.contains(utxo.outpoint)) {
-                    selectedUtxos.remove(utxo)
-                } else {
-                    selectedUtxos.add(utxo)
-                }
+                toggleCoinControlSelection(selectedUtxos, utxo)
             },
             onSelectAll = {
                 selectedUtxos.clear()
@@ -2169,7 +2176,7 @@ private fun LiquidCoinControlDialog(
 ) {
     val totalSelected = selectedUtxos.sumOf { it.amountSats.toLong() }
     val selectedOutpoints =
-        remember(selectedUtxos) {
+        remember(selectedUtxos.toList()) {
             selectedUtxos.mapTo(hashSetOf()) { it.outpoint }
         }
 

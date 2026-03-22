@@ -269,10 +269,6 @@ fun SwapScreen(
     val spendableBitcoinUtxos = remember(btcUtxos) { btcUtxos.filter { !it.isFrozen } }
     val spendableLiquidUtxos = remember(liquidUtxos) { liquidUtxos.filter { !it.isFrozen } }
     val selectedFundingUtxos = if (isPegIn) selectedBitcoinUtxos else selectedLiquidUtxos
-    val selectedFundingOutpoints =
-        remember(direction, selectedFundingUtxos.toList()) {
-            selectedFundingUtxos.mapTo(hashSetOf()) { it.outpoint }
-        }
     val selectableFundingUtxos = if (isPegIn) spendableBitcoinUtxos else spendableLiquidUtxos
     val availableBalance =
         if (selectedFundingUtxos.isNotEmpty()) {
@@ -529,20 +525,27 @@ fun SwapScreen(
         }
     }
 
-    LaunchedEffect(preparedSwap?.swapId, preparedSwap?.selectedFundingOutpoints, btcUtxos, liquidUtxos) {
+    LaunchedEffect(preparedSwap?.swapId, preparedSwap?.selectedFundingOutpoints, spendableBitcoinUtxos, spendableLiquidUtxos) {
         val activeSwap = preparedSwap ?: return@LaunchedEffect
-        val selectedOutpoints = activeSwap.selectedFundingOutpoints.toSet()
         if (activeSwap.direction == SwapDirection.BTC_TO_LBTC) {
             selectedBitcoinUtxos.clear()
-            if (selectedOutpoints.isNotEmpty()) {
-                selectedBitcoinUtxos.addAll(btcUtxos.filter { it.outpoint in selectedOutpoints })
-            }
+            selectedBitcoinUtxos.addAll(
+                selectCoinControlUtxos(activeSwap.selectedFundingOutpoints, spendableBitcoinUtxos),
+            )
         } else {
             selectedLiquidUtxos.clear()
-            if (selectedOutpoints.isNotEmpty()) {
-                selectedLiquidUtxos.addAll(liquidUtxos.filter { it.outpoint in selectedOutpoints })
-            }
+            selectedLiquidUtxos.addAll(
+                selectCoinControlUtxos(activeSwap.selectedFundingOutpoints, spendableLiquidUtxos),
+            )
         }
+    }
+
+    LaunchedEffect(preparedSwap?.swapId, spendableBitcoinUtxos, spendableLiquidUtxos) {
+        if (preparedSwap != null) {
+            return@LaunchedEffect
+        }
+        reconcileCoinControlSelection(selectedBitcoinUtxos, spendableBitcoinUtxos)
+        reconcileCoinControlSelection(selectedLiquidUtxos, spendableLiquidUtxos)
     }
 
     if (showCoinControl) {
@@ -558,11 +561,7 @@ fun SwapScreen(
             isLiquid = !isPegIn,
             onDismiss = { showCoinControlState.value = false },
             onUtxoToggle = { utxo ->
-                if (selectedFundingOutpoints.contains(utxo.outpoint)) {
-                    selectedFundingUtxos.remove(utxo)
-                } else {
-                    selectedFundingUtxos.add(utxo)
-                }
+                toggleCoinControlSelection(selectedFundingUtxos, utxo)
                 onResetSwap()
             },
             onSelectAll = {
@@ -2370,21 +2369,25 @@ private fun resolveSwapFundingSelection(
         } else {
             selectedLiquidUtxos
         }
-    if (currentSelection.isNotEmpty()) {
-        return currentSelection
-    }
-    if (pendingSwap.selectedFundingOutpoints.isEmpty()) {
-        return null
-    }
     val candidateUtxos =
         if (pendingSwap.direction == SwapDirection.BTC_TO_LBTC) {
             btcUtxos
         } else {
             liquidUtxos
         }
-    return candidateUtxos
-        .filter { it.outpoint in pendingSwap.selectedFundingOutpoints }
-        .takeIf { it.isNotEmpty() }
+    if (currentSelection.isNotEmpty()) {
+        return selectCoinControlUtxos(
+            outpoints = currentSelection.map { it.outpoint },
+            availableUtxos = candidateUtxos,
+        ).takeIf { it.isNotEmpty() }
+    }
+    if (pendingSwap.selectedFundingOutpoints.isEmpty()) {
+        return null
+    }
+    return selectCoinControlUtxos(
+        outpoints = pendingSwap.selectedFundingOutpoints,
+        availableUtxos = candidateUtxos,
+    ).takeIf { it.isNotEmpty() }
 }
 
 @Composable
@@ -2406,7 +2409,7 @@ private fun SwapCoinControlDialog(
     val totalSelected = selectedUtxos.sumOf { it.amountSats.toLong() }
     val hiddenAmount = "****"
     val selectedOutpoints =
-        remember(selectedUtxos) {
+        remember(selectedUtxos.toList()) {
             selectedUtxos.mapTo(hashSetOf()) { it.outpoint }
         }
 

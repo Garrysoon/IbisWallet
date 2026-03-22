@@ -1289,6 +1289,7 @@ fun IbisWalletApp(
                                 Row(
                                     modifier =
                                         Modifier
+                                            .padding(end = 8.dp)
                                             .clip(RoundedCornerShape(8.dp))
                                             .border(
                                                 width = 1.dp,
@@ -1804,6 +1805,7 @@ fun IbisWalletApp(
 
                         // Collect preSelectedUtxo directly here to ensure fresh value
                         val currentPreSelectedUtxo by viewModel.preSelectedUtxo.collectAsStateWithLifecycle()
+                        val currentPreSelectedLiquidUtxo by liquidViewModel.preSelectedLiquidUtxo.collectAsStateWithLifecycle()
 
                         // Fetch fee estimates and price when entering Send screen
                         LaunchedEffect(Unit) {
@@ -1919,6 +1921,8 @@ fun IbisWalletApp(
                                                         label = label,
                                                     )
                                                 },
+                                                preSelectedUtxo = currentPreSelectedLiquidUtxo,
+                                                onClearPreSelectedUtxo = { liquidViewModel.clearPreSelectedLiquidUtxo() },
                                                 onClearDraft = { liquidViewModel.clearSendDraft() },
                                                 onResetSend = { liquidViewModel.resetSendState() },
                                             )
@@ -2936,7 +2940,8 @@ fun IbisWalletApp(
                                 onFreezeUtxo = { outpoint, frozen ->
                                     liquidViewModel.setLiquidUtxoFrozen(outpoint, frozen)
                                 },
-                                onSendFromUtxo = {
+                                onSendFromUtxo = { utxo ->
+                                    liquidViewModel.setPreSelectedLiquidUtxo(utxo)
                                     navController.navigate(Screen.Send.route)
                                 },
                                 onSaveLabel = { address, label ->
