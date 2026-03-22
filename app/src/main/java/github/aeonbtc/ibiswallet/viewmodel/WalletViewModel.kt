@@ -2284,17 +2284,17 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
                     val keyMaterialObj = entry.getJSONObject("keyMaterial")
                     val mnemonic = keyMaterialObj.optString("mnemonic", "")
 
-                        if (mnemonic.isNotBlank() && mnemonic in existingMnemonics) {
-                            walletsSkipped++
-                            val existingId = findWalletIdByMnemonic(mnemonic)
-                            if (existingId != null) {
-                                restoreWalletSettings(existingId, entry)
-                                if (importLabels) {
-                                    restoreLabelsForWallet(existingId, entry)
-                                }
+                    if (mnemonic.isNotBlank() && mnemonic in existingMnemonics) {
+                        walletsSkipped++
+                        val existingId = findWalletIdByMnemonic(mnemonic)
+                        if (existingId != null) {
+                            restoreWalletSettings(existingId, entry)
+                            if (importLabels) {
+                                restoreLabelsForWallet(existingId, entry)
                             }
-                            continue
                         }
+                        continue
+                    }
 
                         if (importWallets) {
                             try {
