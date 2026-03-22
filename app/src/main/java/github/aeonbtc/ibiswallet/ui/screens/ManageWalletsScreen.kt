@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -80,7 +81,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
@@ -92,11 +92,10 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.zIndex
-import androidx.core.graphics.createBitmap
-import androidx.core.graphics.set
 import github.aeonbtc.ibiswallet.ui.components.IbisButton
 import github.aeonbtc.ibiswallet.ui.components.SquareToggle
 import github.aeonbtc.ibiswallet.ui.theme.BitcoinOrange
@@ -105,9 +104,13 @@ import github.aeonbtc.ibiswallet.ui.theme.BorderColor
 import github.aeonbtc.ibiswallet.ui.theme.DarkCard
 import github.aeonbtc.ibiswallet.ui.theme.DarkSurface
 import github.aeonbtc.ibiswallet.ui.theme.ErrorRed
+import github.aeonbtc.ibiswallet.ui.theme.LiquidTeal
 import github.aeonbtc.ibiswallet.ui.theme.SuccessGreen
 import github.aeonbtc.ibiswallet.ui.theme.TextSecondary
+import github.aeonbtc.ibiswallet.util.Bip329LabelCounts
+import github.aeonbtc.ibiswallet.util.Bip329LabelScope
 import github.aeonbtc.ibiswallet.util.SecureClipboard
+import github.aeonbtc.ibiswallet.util.generateQrBitmap
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -121,6 +124,7 @@ data class WalletInfo(
     val derivationPath: String,
     val isActive: Boolean = false,
     val isWatchOnly: Boolean = false,
+    val isLocked: Boolean = false,
     val isWatchAddress: Boolean = false,
     val isPrivateKey: Boolean = false,
     val lastFullSyncTime: Long? = null,
@@ -158,11 +162,17 @@ fun ManageWalletsScreen(
     onReorderWallets: (List<String>) -> Unit = {},
     onFullSync: (WalletInfo) -> Unit = {},
     syncingWalletId: String? = null,
-    onExportBip329Labels: (walletId: String, uri: Uri) -> Unit = { _, _ -> },
-    onImportBip329Labels: (walletId: String, uri: Uri) -> Unit = { _, _ -> },
-    onImportBip329LabelsFromContent: (walletId: String, content: String) -> Unit = { _, _ -> },
-    onGetBip329LabelsContent: (walletId: String) -> String = { "" },
-    onGetLabelCounts: (walletId: String) -> Pair<Int, Int> = { Pair(0, 0) },
+    onExportBip329Labels: (walletId: String, uri: Uri, scope: Bip329LabelScope) -> Unit = { _, _, _ -> },
+    onImportBip329Labels: (walletId: String, uri: Uri, scope: Bip329LabelScope) -> Unit = { _, _, _ -> },
+    onImportBip329LabelsFromContent: (walletId: String, content: String, scope: Bip329LabelScope) -> Unit = { _, _, _ -> },
+    onGetBip329LabelsContent: (walletId: String, scope: Bip329LabelScope) -> String = { _, _ -> "" },
+    onGetLabelCounts: (walletId: String) -> Bip329LabelCounts = { Bip329LabelCounts() },
+    // Layer 2 (Liquid)
+    layer2Enabled: Boolean = false,
+    isLiquidEnabledForWallet: (walletId: String) -> Boolean = { false },
+    onSetLiquidEnabledForWallet: (walletId: String, Boolean) -> Unit = { _, _ -> },
+    isWalletLockAvailable: Boolean = false,
+    onSetWalletLocked: (walletId: String, Boolean) -> Unit = { _, _ -> },
 ) {
     var walletToDelete by remember { mutableStateOf<WalletInfo?>(null) }
     var walletToView by remember { mutableStateOf<WalletInfo?>(null) }
@@ -377,6 +387,8 @@ fun ManageWalletsScreen(
                             modifier = Modifier.fillMaxWidth(),
                         )
                     }
+
+                    // (Liquid toggle moved to wallet card)
                 }
             },
             confirmButton = {
@@ -536,17 +548,20 @@ fun ManageWalletsScreen(
     if (walletForLabels != null) {
         Bip329LabelsDialog(
             wallet = walletForLabels!!,
+            walletSupportsLiquid = layer2Enabled &&
+                walletForLabels?.isWatchOnly == false &&
+                isLiquidEnabledForWallet(walletForLabels!!.id),
             onDismiss = { walletForLabels = null },
-            onExportToFile = { walletId, uri ->
-                onExportBip329Labels(walletId, uri)
+            onExportToFile = { walletId, uri, scope ->
+                onExportBip329Labels(walletId, uri, scope)
                 walletForLabels = null
             },
-            onImportFromFile = { walletId, uri ->
-                onImportBip329Labels(walletId, uri)
+            onImportFromFile = { walletId, uri, scope ->
+                onImportBip329Labels(walletId, uri, scope)
                 walletForLabels = null
             },
-            onImportFromQr = { walletId, content ->
-                onImportBip329LabelsFromContent(walletId, content)
+            onImportFromQr = { walletId, content, scope ->
+                onImportBip329LabelsFromContent(walletId, content, scope)
                 walletForLabels = null
             },
             getLabelsContent = onGetBip329LabelsContent,
@@ -656,64 +671,36 @@ fun ManageWalletsScreen(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                Button(
+                IbisButton(
                     onClick = onGenerateWallet,
-                    modifier =
-                        Modifier
-                            .weight(1f)
-                            .height(48.dp),
-                    shape = RoundedCornerShape(8.dp),
-                    colors =
-                        ButtonDefaults.buttonColors(
-                            containerColor = BitcoinOrange,
-                            disabledContainerColor = BitcoinOrange.copy(alpha = 0.3f),
-                        ),
-                    contentPadding = ButtonDefaults.TextButtonContentPadding,
+                    modifier = Modifier.weight(1f),
                 ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Key,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp),
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = "Generate",
-                            style = MaterialTheme.typography.titleMedium,
-                        )
-                    }
+                    Icon(
+                        imageVector = Icons.Default.Key,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Generate",
+                        style = MaterialTheme.typography.titleMedium,
+                    )
                 }
 
-                Button(
+                IbisButton(
                     onClick = onImportWallet,
-                    modifier =
-                        Modifier
-                            .weight(1f)
-                            .height(48.dp),
-                    shape = RoundedCornerShape(8.dp),
-                    colors =
-                        ButtonDefaults.buttonColors(
-                            containerColor = BitcoinOrange,
-                            disabledContainerColor = BitcoinOrange.copy(alpha = 0.3f),
-                        ),
-                    contentPadding = ButtonDefaults.TextButtonContentPadding,
+                    modifier = Modifier.weight(1f),
                 ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.FileDownload,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp),
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = "Import",
-                            style = MaterialTheme.typography.titleMedium,
-                        )
-                    }
+                    Icon(
+                        imageVector = Icons.Default.FileDownload,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Import",
+                        style = MaterialTheme.typography.titleMedium,
+                    )
                 }
             }
 
@@ -738,7 +725,7 @@ fun ManageWalletsScreen(
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "Generate or import a wallet to get started",
+                        text = "Add a wallet to get started",
                         style = MaterialTheme.typography.bodyMedium,
                         color = TextSecondary.copy(alpha = 0.7f),
                     )
@@ -822,64 +809,36 @@ fun ManageWalletsScreen(
                             },
                         horizontalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
-                        Button(
+                        IbisButton(
                             onClick = onGenerateWallet,
-                            modifier =
-                                Modifier
-                                    .weight(1f)
-                                    .height(48.dp),
-                            shape = RoundedCornerShape(8.dp),
-                            colors =
-                                ButtonDefaults.buttonColors(
-                                    containerColor = BitcoinOrange,
-                                    disabledContainerColor = BitcoinOrange.copy(alpha = 0.3f),
-                                ),
-                            contentPadding = ButtonDefaults.TextButtonContentPadding,
+                            modifier = Modifier.weight(1f),
                         ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Key,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(18.dp),
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text(
-                                    text = "Generate",
-                                    style = MaterialTheme.typography.titleMedium,
-                                )
-                            }
+                            Icon(
+                                imageVector = Icons.Default.Key,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Generate",
+                                style = MaterialTheme.typography.titleMedium,
+                            )
                         }
 
-                        Button(
+                        IbisButton(
                             onClick = onImportWallet,
-                            modifier =
-                                Modifier
-                                    .weight(1f)
-                                    .height(48.dp),
-                            shape = RoundedCornerShape(8.dp),
-                            colors =
-                                ButtonDefaults.buttonColors(
-                                    containerColor = BitcoinOrange,
-                                    disabledContainerColor = BitcoinOrange.copy(alpha = 0.3f),
-                                ),
-                            contentPadding = ButtonDefaults.TextButtonContentPadding,
+                            modifier = Modifier.weight(1f),
                         ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.FileDownload,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(18.dp),
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text(
-                                    text = "Import",
-                                    style = MaterialTheme.typography.titleMedium,
-                                )
-                            }
+                            Icon(
+                                imageVector = Icons.Default.FileDownload,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Import",
+                                style = MaterialTheme.typography.titleMedium,
+                            )
                         }
                     }
 
@@ -946,6 +905,15 @@ fun ManageWalletsScreen(
                                 onMeasured = { heightPx ->
                                     measuredHeights[index] = heightPx
                                 },
+                                layer2Enabled = layer2Enabled,
+                                isLiquidEnabled = isLiquidEnabledForWallet(wallet.id),
+                                onSetLiquidEnabled = { enabled ->
+                                    onSetLiquidEnabledForWallet(wallet.id, enabled)
+                                },
+                                isWalletLockAvailable = isWalletLockAvailable,
+                                onSetWalletLocked = { locked ->
+                                    onSetWalletLocked(wallet.id, locked)
+                                },
                             )
                         }
                         if (index < reorderableWallets.size - 1) {
@@ -977,13 +945,14 @@ private fun ExportWalletDialog(
 ) {
     val context = LocalContext.current
     var includeLabels by remember { mutableStateOf(true) }
-    var includeServerSettings by remember { mutableStateOf(false) }
-    var encryptBackup by remember { mutableStateOf(true) }
+    var includeServerSettings by remember { mutableStateOf(true) }
+    var encryptBackup by remember { mutableStateOf(false) }
     var password by remember { mutableStateOf("") }
     var confirmPassword by remember { mutableStateOf("") }
     var showPassword by remember { mutableStateOf(false) }
     var exportUri by remember { mutableStateOf<Uri?>(null) }
     var exportFileName by remember { mutableStateOf<String?>(null) }
+    var showExportConfirmation by remember { mutableStateOf(false) }
 
     val dateStr = SimpleDateFormat("yyyyMMdd", Locale.US).format(Date())
     val safeName = wallet.name.replace(Regex("[^a-zA-Z0-9_-]"), "_").lowercase()
@@ -1009,13 +978,191 @@ private fun ExportWalletDialog(
                     } catch (_: Exception) {
                         null
                     } ?: suggestedFileName
+                showExportConfirmation = true
             }
         }
 
     val passwordsMatch = password == confirmPassword
     val passwordLongEnough = password.length >= 8
     val encryptionValid = !encryptBackup || (passwordLongEnough && passwordsMatch)
-    val canExport = exportUri != null && encryptionValid
+    val canCompleteExport = exportUri != null && encryptionValid
+    val canChooseLocation = !encryptBackup || encryptionValid
+
+    if (showExportConfirmation && exportUri != null) {
+        Dialog(
+            onDismissRequest = {
+                showExportConfirmation = false
+                exportUri = null
+                exportFileName = null
+            },
+            properties = DialogProperties(usePlatformDefaultWidth = false),
+        ) {
+            Surface(
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 24.dp),
+                shape = RoundedCornerShape(20.dp),
+                color = DarkSurface,
+            ) {
+                Column(
+                    modifier =
+                        Modifier
+                            .fillMaxWidth()
+                            .verticalScroll(rememberScrollState())
+                            .padding(20.dp),
+                ) {
+                    Text(
+                        text = "Confirm Export",
+                        style = MaterialTheme.typography.headlineSmall,
+                        color = MaterialTheme.colorScheme.onBackground,
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "Review the backup details before exporting.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = TextSecondary,
+                    )
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    Card(
+                        shape = RoundedCornerShape(12.dp),
+                        colors = CardDefaults.cardColors(containerColor = BorderColor.copy(alpha = 0.18f)),
+                    ) {
+                        Row(
+                            modifier =
+                                Modifier
+                                    .fillMaxWidth()
+                                    .padding(14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.FolderOpen,
+                                contentDescription = null,
+                                tint = BitcoinOrange,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Save location",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = TextSecondary,
+                                )
+                                Text(
+                                    text = exportFileName ?: suggestedFileName,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    color = MaterialTheme.colorScheme.onBackground,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    Card(
+                        shape = RoundedCornerShape(12.dp),
+                        colors = CardDefaults.cardColors(containerColor = BorderColor.copy(alpha = 0.14f)),
+                    ) {
+                        Column(
+                            modifier =
+                                Modifier
+                                    .fillMaxWidth()
+                                    .padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            ExportConfirmationRow(
+                                label = "Wallet",
+                                value = wallet.name,
+                            )
+                            ExportConfirmationRow(
+                                label = "Labels",
+                                value = if (includeLabels) "Included" else "Excluded",
+                                valueColor = if (includeLabels) SuccessGreen else ErrorRed,
+                            )
+                            ExportConfirmationRow(
+                                label = "Server settings",
+                                value = if (includeServerSettings) "Included" else "Excluded",
+                                valueColor = if (includeServerSettings) SuccessGreen else ErrorRed,
+                            )
+                            ExportConfirmationRow(
+                                label = "Encryption",
+                                value = if (encryptBackup) "Enabled" else "Off",
+                                valueColor = if (encryptBackup) SuccessGreen else ErrorRed,
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    if (!encryptionValid) {
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            text = if (!passwordLongEnough) {
+                                "Password must be at least 8 characters."
+                            } else {
+                                "Passwords do not match."
+                            },
+                            color = ErrorRed,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(20.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        OutlinedButton(
+                            onClick = {
+                                showExportConfirmation = false
+                                exportUri = null
+                                exportFileName = null
+                            },
+                            modifier =
+                                Modifier
+                                    .weight(1f)
+                                    .heightIn(min = 48.dp),
+                            shape = RoundedCornerShape(10.dp),
+                            border = BorderStroke(1.dp, BorderColor),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = TextSecondary),
+                        ) {
+                            Text("Back")
+                        }
+                        Button(
+                            onClick = {
+                                exportUri?.let { uri ->
+                                    onExport(
+                                        uri,
+                                        includeLabels,
+                                        includeServerSettings,
+                                        if (encryptBackup) password else null,
+                                    )
+                                }
+                            },
+                            enabled = canCompleteExport,
+                            modifier =
+                                Modifier
+                                    .weight(1f)
+                                    .heightIn(min = 48.dp),
+                            shape = RoundedCornerShape(10.dp),
+                            colors =
+                                ButtonDefaults.buttonColors(
+                                    containerColor = BitcoinOrange,
+                                    disabledContainerColor = BitcoinOrange.copy(alpha = 0.3f),
+                                ),
+                        ) {
+                            Text("Export")
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -1068,39 +1215,10 @@ private fun ExportWalletDialog(
                 )
 
                 Spacer(modifier = Modifier.height(12.dp))
-
-                // Warning
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(8.dp),
-                    colors =
-                        CardDefaults.cardColors(
-                            containerColor = ErrorRed.copy(alpha = 0.1f),
-                        ),
-                ) {
-                    Row(
-                        modifier = Modifier.padding(12.dp),
-                        verticalAlignment = Alignment.Top,
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Warning,
-                            contentDescription = null,
-                            tint = ErrorRed,
-                            modifier = Modifier.size(18.dp),
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text =
-                                if (wallet.isWatchOnly) {
-                                    "This backup contains your extended public key. Store it securely."
-                                } else {
-                                    "This backup contains your seed phrase. Store it securely."
-                                },
-                            style = MaterialTheme.typography.bodySmall,
-                            color = ErrorRed,
-                        )
-                    }
-                }
+                androidx.compose.material3.HorizontalDivider(
+                    color = BorderColor,
+                    thickness = 1.dp,
+                )
 
                 Spacer(modifier = Modifier.height(16.dp))
 
@@ -1151,7 +1269,7 @@ private fun ExportWalletDialog(
                             color = MaterialTheme.colorScheme.onBackground,
                         )
                         Text(
-                            text = "Electrum servers, block explorer, fee source",
+                            text = "Electrum servers and custom URLs",
                             style = MaterialTheme.typography.bodySmall,
                             color = TextSecondary,
                         )
@@ -1199,6 +1317,41 @@ private fun ExportWalletDialog(
                         checked = encryptBackup,
                         onCheckedChange = { encryptBackup = it },
                     )
+                }
+
+                if (!encryptBackup) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(8.dp),
+                        colors =
+                            CardDefaults.cardColors(
+                                containerColor = ErrorRed.copy(alpha = 0.1f),
+                            ),
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.Top,
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Warning,
+                                contentDescription = null,
+                                tint = ErrorRed,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text =
+                                    if (wallet.isWatchOnly) {
+                                        "This backup is not encrypted."
+                                    } else {
+                                        "This backup is not encrypted."
+                                    },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = ErrorRed,
+                            )
+                        }
+                    }
                 }
 
                 // Password fields (animated)
@@ -1316,6 +1469,7 @@ private fun ExportWalletDialog(
                         Modifier
                             .fillMaxWidth()
                             .height(48.dp),
+                    enabled = canChooseLocation,
                     shape = RoundedCornerShape(8.dp),
                     border =
                         BorderStroke(
@@ -1325,6 +1479,7 @@ private fun ExportWalletDialog(
                     colors =
                         ButtonDefaults.outlinedButtonColors(
                             contentColor = if (exportUri != null) SuccessGreen else TextSecondary,
+                            disabledContentColor = TextSecondary.copy(alpha = 0.5f),
                         ),
                 ) {
                     Icon(
@@ -1334,69 +1489,37 @@ private fun ExportWalletDialog(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = exportFileName ?: "Choose location",
+                        text = exportFileName ?: "Choose Location",
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
-
-                Spacer(modifier = Modifier.height(20.dp))
-
-                // Action buttons
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    OutlinedButton(
-                        onClick = onDismiss,
-                        modifier =
-                            Modifier
-                                .weight(1f)
-                                .height(48.dp),
-                        shape = RoundedCornerShape(8.dp),
-                        border = BorderStroke(1.dp, BorderColor),
-                        colors =
-                            ButtonDefaults.outlinedButtonColors(
-                                contentColor = TextSecondary,
-                            ),
-                    ) {
-                        Text("Cancel")
-                    }
-
-                    Button(
-                        onClick = {
-                            exportUri?.let { uri ->
-                                onExport(
-                                    uri,
-                                    includeLabels,
-                                    includeServerSettings,
-                                    if (encryptBackup) password else null,
-                                )
-                            }
-                        },
-                        modifier =
-                            Modifier
-                                .weight(1f)
-                                .height(48.dp),
-                        shape = RoundedCornerShape(8.dp),
-                        enabled = canExport,
-                        colors =
-                            ButtonDefaults.buttonColors(
-                                containerColor = BitcoinOrange,
-                                disabledContainerColor = BitcoinOrange.copy(alpha = 0.3f),
-                            ),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Download,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp),
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Export")
-                    }
-                }
             }
         }
+    }
+}
+
+@Composable
+private fun ExportConfirmationRow(
+    label: String,
+    value: String,
+    valueColor: Color = MaterialTheme.colorScheme.onBackground,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodySmall,
+            color = TextSecondary,
+        )
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodyMedium,
+            color = valueColor,
+        )
     }
 }
 
@@ -1405,16 +1528,21 @@ private fun ExportWalletDialog(
 @Composable
 private fun Bip329LabelsDialog(
     wallet: WalletInfo,
+    walletSupportsLiquid: Boolean,
     onDismiss: () -> Unit,
-    onExportToFile: (walletId: String, uri: Uri) -> Unit,
-    onImportFromFile: (walletId: String, uri: Uri) -> Unit,
-    onImportFromQr: (walletId: String, content: String) -> Unit,
-    getLabelsContent: (walletId: String) -> String,
-    getLabelCounts: (walletId: String) -> Pair<Int, Int>,
+    onExportToFile: (walletId: String, uri: Uri, scope: Bip329LabelScope) -> Unit,
+    onImportFromFile: (walletId: String, uri: Uri, scope: Bip329LabelScope) -> Unit,
+    onImportFromQr: (walletId: String, content: String, scope: Bip329LabelScope) -> Unit,
+    getLabelsContent: (walletId: String, scope: Bip329LabelScope) -> String,
+    getLabelCounts: (walletId: String) -> Bip329LabelCounts,
 ) {
-    val context = LocalContext.current
-    val (addrCount, txCount) = remember(wallet.id) { getLabelCounts(wallet.id) }
-    val totalCount = addrCount + txCount
+    val counts = remember(wallet.id) { getLabelCounts(wallet.id) }
+    var selectedScope by remember(wallet.id, walletSupportsLiquid) {
+        mutableStateOf(Bip329LabelScope.BITCOIN)
+    }
+    val addrCount = counts.addressCount(selectedScope)
+    val txCount = counts.transactionCount(selectedScope)
+    val totalCount = counts.totalCount(selectedScope)
 
     // QR display state
     var showQrExport by remember { mutableStateOf(false) }
@@ -1429,7 +1557,7 @@ private fun Bip329LabelsDialog(
             contract = ActivityResultContracts.CreateDocument("application/jsonl"),
         ) { uri ->
             if (uri != null) {
-                onExportToFile(wallet.id, uri)
+                onExportToFile(wallet.id, uri, selectedScope)
             }
         }
 
@@ -1439,7 +1567,7 @@ private fun Bip329LabelsDialog(
             contract = ActivityResultContracts.OpenDocument(),
         ) { uri ->
             if (uri != null) {
-                onImportFromFile(wallet.id, uri)
+                onImportFromFile(wallet.id, uri, selectedScope)
             }
         }
 
@@ -1448,7 +1576,7 @@ private fun Bip329LabelsDialog(
         github.aeonbtc.ibiswallet.ui.components.LabelsQrScannerDialog(
             onLabelsScanned = { content ->
                 showQrScanner = false
-                onImportFromQr(wallet.id, content)
+                onImportFromQr(wallet.id, content, selectedScope)
             },
             onDismiss = { showQrScanner = false },
         )
@@ -1507,6 +1635,62 @@ private fun Bip329LabelsDialog(
 
                 Spacer(modifier = Modifier.height(12.dp))
 
+                if (walletSupportsLiquid) {
+                    Text(
+                        text = "Scope",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = TextSecondary,
+                    )
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        listOf(
+                            Bip329LabelScope.BITCOIN to "Bitcoin",
+                            Bip329LabelScope.LIQUID to "Liquid",
+                            Bip329LabelScope.BOTH to "Both",
+                        ).forEach { (scope, label) ->
+                            val isSelected = selectedScope == scope
+                            OutlinedButton(
+                                onClick = { selectedScope = scope },
+                                modifier =
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(min = 44.dp),
+                                shape = RoundedCornerShape(8.dp),
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (isSelected) {
+                                        when (scope) {
+                                            Bip329LabelScope.BITCOIN -> BitcoinOrange
+                                            Bip329LabelScope.LIQUID, Bip329LabelScope.BOTH -> LiquidTeal
+                                        }
+                                    } else {
+                                        BorderColor
+                                    },
+                                ),
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    contentColor = if (isSelected) {
+                                        when (scope) {
+                                            Bip329LabelScope.BITCOIN -> BitcoinOrange
+                                            Bip329LabelScope.LIQUID, Bip329LabelScope.BOTH -> LiquidTeal
+                                        }
+                                    } else {
+                                        TextSecondary
+                                    },
+                                ),
+                            ) {
+                                Text(label)
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+                }
+
                 // Label counts
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -1524,7 +1708,7 @@ private fun Bip329LabelsDialog(
                             Text(
                                 text = "$addrCount",
                                 style = MaterialTheme.typography.titleMedium,
-                                color = BitcoinOrange,
+                                color = if (selectedScope == Bip329LabelScope.LIQUID) LiquidTeal else BitcoinOrange,
                             )
                             Text(
                                 text = "Address",
@@ -1536,7 +1720,7 @@ private fun Bip329LabelsDialog(
                             Text(
                                 text = "$txCount",
                                 style = MaterialTheme.typography.titleMedium,
-                                color = BitcoinOrange,
+                                color = if (selectedScope == Bip329LabelScope.LIQUID) LiquidTeal else BitcoinOrange,
                             )
                             Text(
                                 text = "Transaction",
@@ -1551,7 +1735,11 @@ private fun Bip329LabelsDialog(
                                 color = MaterialTheme.colorScheme.onBackground,
                             )
                             Text(
-                                text = "Total",
+                                text = when (selectedScope) {
+                                    Bip329LabelScope.BITCOIN -> "Bitcoin"
+                                    Bip329LabelScope.LIQUID -> "Liquid"
+                                    Bip329LabelScope.BOTH -> "Combined"
+                                },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = TextSecondary,
                             )
@@ -1571,16 +1759,20 @@ private fun Bip329LabelsDialog(
                 Spacer(modifier = Modifier.height(4.dp))
 
                 Text(
-                    text = "BIP 329 (.jsonl) or Electrum CSV",
+                    text = if (selectedScope == Bip329LabelScope.LIQUID) {
+                        "BIP 329 (.jsonl) for Liquid labels"
+                    } else {
+                        "BIP 329 (.jsonl) or Electrum CSV"
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = TextSecondary.copy(alpha = 0.7f),
                 )
 
                 Spacer(modifier = Modifier.height(8.dp))
 
-                Row(
+                Column(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     OutlinedButton(
                         onClick = {
@@ -1597,8 +1789,8 @@ private fun Bip329LabelsDialog(
                         },
                         modifier =
                             Modifier
-                                .weight(1f)
-                                .height(48.dp),
+                                .fillMaxWidth()
+                                .heightIn(min = 48.dp),
                         shape = RoundedCornerShape(8.dp),
                     ) {
                         Icon(
@@ -1614,8 +1806,8 @@ private fun Bip329LabelsDialog(
                         onClick = { showQrScanner = true },
                         modifier =
                             Modifier
-                                .weight(1f)
-                                .height(48.dp),
+                                .fillMaxWidth()
+                                .heightIn(min = 48.dp),
                         shape = RoundedCornerShape(8.dp),
                     ) {
                         Icon(
@@ -1647,19 +1839,25 @@ private fun Bip329LabelsDialog(
 
                 Spacer(modifier = Modifier.height(8.dp))
 
-                Row(
+                Column(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     OutlinedButton(
                         onClick = {
-                            val fileName = "${wallet.name.replace(" ", "_")}_labels.jsonl"
+                            val suffix =
+                                when (selectedScope) {
+                                    Bip329LabelScope.BITCOIN -> "bitcoin"
+                                    Bip329LabelScope.LIQUID -> "liquid"
+                                    Bip329LabelScope.BOTH -> "combined"
+                                }
+                            val fileName = "${wallet.name.replace(" ", "_")}_${suffix}_labels.jsonl"
                             exportFilePicker.launch(fileName)
                         },
                         modifier =
                             Modifier
-                                .weight(1f)
-                                .height(48.dp),
+                                .fillMaxWidth()
+                                .heightIn(min = 48.dp),
                         shape = RoundedCornerShape(8.dp),
                         enabled = totalCount > 0,
                     ) {
@@ -1674,7 +1872,7 @@ private fun Bip329LabelsDialog(
 
                     OutlinedButton(
                         onClick = {
-                            val content = getLabelsContent(wallet.id)
+                            val content = getLabelsContent(wallet.id, selectedScope)
                             if (content.isNotBlank()) {
                                 labelsBytes = content.toByteArray(Charsets.UTF_8)
                                 showQrExport = true
@@ -1682,8 +1880,8 @@ private fun Bip329LabelsDialog(
                         },
                         modifier =
                             Modifier
-                                .weight(1f)
-                                .height(48.dp),
+                                .fillMaxWidth()
+                                .heightIn(min = 48.dp),
                         shape = RoundedCornerShape(8.dp),
                         enabled = totalCount > 0,
                     ) {
@@ -1729,9 +1927,11 @@ private fun Bip329LabelsDialog(
                 // Close button
                 IbisButton(
                     onClick = onDismiss,
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp),
                 ) {
-                    Text("Close")
+                    Text("Close", style = MaterialTheme.typography.titleMedium)
                 }
             }
         }
@@ -1784,7 +1984,7 @@ private fun KeyMaterialDialog(
     // Generate QR code when view type changes
     LaunchedEffect(selectedViewType, showQrCode) {
         if (selectedViewType != null && currentKeyMaterial != null) {
-            qrBitmap = generateQrCode(currentKeyMaterial)
+            qrBitmap = generateQrBitmap(currentKeyMaterial)
         }
     }
 
@@ -2151,34 +2351,6 @@ private fun KeyMaterialDialog(
     )
 }
 
-/**
- * Generate a QR code bitmap for the given content
- */
-private fun generateQrCode(content: String): Bitmap? {
-    return try {
-        val size = 512
-        val qrCodeWriter = com.google.zxing.qrcode.QRCodeWriter()
-        val bitMatrix =
-            qrCodeWriter.encode(
-                content,
-                com.google.zxing.BarcodeFormat.QR_CODE,
-                size,
-                size,
-            )
-
-        val bitmap = createBitmap(size, size, Bitmap.Config.RGB_565)
-        for (x in 0 until size) {
-            for (y in 0 until size) {
-                bitmap[x, y] =
-                    if (bitMatrix[x, y]) Color.Black.toArgb() else Color.White.toArgb()
-            }
-        }
-        bitmap
-    } catch (_: Exception) {
-        null
-    }
-}
-
 @Composable
 private fun WordChip(
     index: Int,
@@ -2220,6 +2392,11 @@ private fun WalletCard(
     isSyncing: Boolean = false,
     showDragHandle: Boolean = false,
     onMeasured: (Float) -> Unit = {},
+    layer2Enabled: Boolean = false,
+    isLiquidEnabled: Boolean = false,
+    onSetLiquidEnabled: (Boolean) -> Unit = {},
+    isWalletLockAvailable: Boolean = false,
+    onSetWalletLocked: (Boolean) -> Unit = {},
 ) {
     val cardColor =
         if (wallet.isActive) {
@@ -2233,6 +2410,19 @@ private fun WalletCard(
             BitcoinOrange.copy(alpha = 0.5f)
         } else {
             BorderColor
+        }
+
+    val isBip39Wallet = !wallet.isWatchOnly && !wallet.isWatchAddress && !wallet.isPrivateKey
+    val showLiquidToggle = layer2Enabled && isBip39Wallet
+    val managementActionsEnabled = !wallet.isLocked
+    val liquidToggleEnabled = !wallet.isLocked
+    val lockedPrimaryTextColor = ErrorRed.copy(alpha = 0.85f)
+    val lockedSecondaryTextColor = ErrorRed.copy(alpha = 0.6f)
+    val actionTint =
+        if (managementActionsEnabled) {
+            TextSecondary
+        } else {
+            TextSecondary.copy(alpha = 0.35f)
         }
 
     Card(
@@ -2259,20 +2449,20 @@ private fun WalletCard(
                         Text(
                             text = wallet.name,
                             style = MaterialTheme.typography.titleMedium,
-                            color = MaterialTheme.colorScheme.onBackground,
+                            color = if (wallet.isLocked) lockedPrimaryTextColor else MaterialTheme.colorScheme.onBackground,
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         when {
                             wallet.isWatchAddress || wallet.isWatchOnly -> Icon(
                                 imageVector = Icons.Default.Visibility,
                                 contentDescription = if (wallet.isWatchAddress) "Watch Address" else "Watch Only",
-                                tint = BitcoinOrange,
+                                tint = if (wallet.isLocked) lockedPrimaryTextColor else BitcoinOrange,
                                 modifier = Modifier.size(16.dp),
                             )
                             else -> Icon(
                                 imageVector = Icons.Default.Key,
                                 contentDescription = if (wallet.isPrivateKey) "Private Key" else "Seed Phrase",
-                                tint = BitcoinOrange,
+                                tint = if (wallet.isLocked) lockedPrimaryTextColor else BitcoinOrange,
                                 modifier = Modifier.size(16.dp),
                             )
                         }
@@ -2301,8 +2491,8 @@ private fun WalletCard(
                             wallet.isWatchOnly -> "Watch Only"
                             else -> "Seed Phrase"
                         }}",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = TextSecondary,
+                        style = MaterialTheme.typography.bodyMedium.copy(fontSize = 15.sp, lineHeight = 21.sp),
+                        color = if (wallet.isLocked) lockedSecondaryTextColor else TextSecondary,
                     )
 
                     Spacer(modifier = Modifier.height(4.dp))
@@ -2310,8 +2500,8 @@ private fun WalletCard(
                     if (wallet.derivationPath != "single") {
                         Text(
                             text = "Derivation Path: ${wallet.derivationPath}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = TextSecondary.copy(alpha = 0.7f),
+                            style = MaterialTheme.typography.bodySmall.copy(fontSize = 14.sp, lineHeight = 18.sp),
+                            color = if (wallet.isLocked) lockedSecondaryTextColor else TextSecondary.copy(alpha = 0.92f),
                         )
                     }
 
@@ -2319,8 +2509,8 @@ private fun WalletCard(
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
                             text = "Fingerprint: ${wallet.masterFingerprint}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = TextSecondary.copy(alpha = 0.7f),
+                            style = MaterialTheme.typography.bodySmall.copy(fontSize = 14.sp, lineHeight = 18.sp),
+                            color = if (wallet.isLocked) lockedSecondaryTextColor else TextSecondary.copy(alpha = 0.92f),
                         )
                     }
 
@@ -2329,16 +2519,68 @@ private fun WalletCard(
                     val lastSyncText =
                         if (wallet.lastFullSyncTime != null) {
                             val date = Date(wallet.lastFullSyncTime)
-                            val formatter = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault())
+                            val formatter = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
                             "Last full sync: ${formatter.format(date)}"
                         } else {
                             "Never fully synced"
                         }
                     Text(
                         text = lastSyncText,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = TextSecondary.copy(alpha = 0.7f),
+                        style = MaterialTheme.typography.bodySmall.copy(fontSize = 14.sp, lineHeight = 18.sp),
+                        color = if (wallet.isLocked) lockedSecondaryTextColor else TextSecondary.copy(alpha = 0.92f),
                     )
+                    if (isWalletLockAvailable || showLiquidToggle) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            if (isWalletLockAvailable) {
+                                Text(
+                                    text = "Lock",
+                                    style = MaterialTheme.typography.bodySmall.copy(fontSize = 14.sp, lineHeight = 18.sp),
+                                    color = if (wallet.isLocked) lockedPrimaryTextColor else TextSecondary.copy(alpha = 0.8f),
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                SquareToggle(
+                                    checked = wallet.isLocked,
+                                    onCheckedChange = onSetWalletLocked,
+                                    checkedColor = BitcoinOrange,
+                                    trackWidth = 36.dp,
+                                    trackHeight = 20.dp,
+                                    thumbSize = 14.dp,
+                                    thumbPadding = 3.dp,
+                                )
+                            }
+                            if (isWalletLockAvailable && showLiquidToggle) {
+                                Spacer(modifier = Modifier.width(16.dp))
+                            }
+                            if (showLiquidToggle) {
+                                Text(
+                                    text = "Liquid",
+                                    style = MaterialTheme.typography.bodySmall.copy(fontSize = 14.sp, lineHeight = 18.sp),
+                                    color =
+                                        if (liquidToggleEnabled && isLiquidEnabled) {
+                                            LiquidTeal
+                                        } else if (wallet.isLocked) {
+                                            lockedSecondaryTextColor
+                                        } else {
+                                            TextSecondary.copy(alpha = if (liquidToggleEnabled) 0.8f else 0.55f)
+                                        },
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                SquareToggle(
+                                    checked = isLiquidEnabled,
+                                    onCheckedChange = onSetLiquidEnabled,
+                                    enabled = liquidToggleEnabled,
+                                    checkedColor = LiquidTeal,
+                                    trackWidth = 36.dp,
+                                    trackHeight = 20.dp,
+                                    thumbSize = 14.dp,
+                                    thumbPadding = 3.dp,
+                                )
+                            }
+                        }
+                    }
                 }
 
                 Spacer(modifier = Modifier.width(8.dp))
@@ -2357,7 +2599,7 @@ private fun WalletCard(
                                     .size(30.dp)
                                     .clip(RoundedCornerShape(6.dp))
                                     .background(DarkSurface)
-                                    .clickable(enabled = !isSyncing) { onSync() },
+                                    .clickable(enabled = managementActionsEnabled && !isSyncing) { onSync() },
                         ) {
                             if (isSyncing) {
                                 CircularProgressIndicator(
@@ -2369,7 +2611,7 @@ private fun WalletCard(
                                 Icon(
                                     imageVector = Icons.Default.Sync,
                                     contentDescription = "Full Sync",
-                                    tint = TextSecondary,
+                                    tint = actionTint,
                                     modifier = Modifier.size(16.dp),
                                 )
                             }
@@ -2381,12 +2623,12 @@ private fun WalletCard(
                                     .size(30.dp)
                                     .clip(RoundedCornerShape(6.dp))
                                     .background(DarkSurface)
-                                    .clickable { onEdit() },
+                                    .clickable(enabled = managementActionsEnabled) { onEdit() },
                         ) {
                             Icon(
                                 imageVector = Icons.Default.Settings,
                                 contentDescription = "Wallet Settings",
-                                tint = TextSecondary,
+                                tint = actionTint,
                                 modifier = Modifier.size(16.dp),
                             )
                         }
@@ -2397,12 +2639,12 @@ private fun WalletCard(
                                     .size(30.dp)
                                     .clip(RoundedCornerShape(6.dp))
                                     .background(DarkSurface)
-                                    .clickable { onView() },
+                                    .clickable(enabled = managementActionsEnabled) { onView() },
                         ) {
                             Icon(
                                 imageVector = Icons.Default.Visibility,
                                 contentDescription = "View Seed Phrase",
-                                tint = TextSecondary,
+                                tint = actionTint,
                                 modifier = Modifier.size(16.dp),
                             )
                         }
@@ -2419,12 +2661,12 @@ private fun WalletCard(
                                     .size(30.dp)
                                     .clip(RoundedCornerShape(6.dp))
                                     .background(DarkSurface)
-                                    .clickable { onLabels() },
+                                    .clickable(enabled = managementActionsEnabled) { onLabels() },
                         ) {
                             Icon(
                                 imageVector = Icons.Default.Bookmark,
                                 contentDescription = "Labels (BIP 329)",
-                                tint = TextSecondary,
+                                tint = actionTint,
                                 modifier = Modifier.size(16.dp),
                             )
                         }
@@ -2435,12 +2677,12 @@ private fun WalletCard(
                                     .size(30.dp)
                                     .clip(RoundedCornerShape(6.dp))
                                     .background(DarkSurface)
-                                    .clickable { onExport() },
+                                    .clickable(enabled = managementActionsEnabled) { onExport() },
                         ) {
                             Icon(
                                 imageVector = Icons.Default.Download,
                                 contentDescription = "Export Wallet",
-                                tint = TextSecondary,
+                                tint = actionTint,
                                 modifier = Modifier.size(16.dp),
                             )
                         }
@@ -2451,16 +2693,17 @@ private fun WalletCard(
                                     .size(30.dp)
                                     .clip(RoundedCornerShape(6.dp))
                                     .background(DarkSurface)
-                                    .clickable { onDelete() },
+                                    .clickable(enabled = managementActionsEnabled) { onDelete() },
                         ) {
                             Icon(
                                 imageVector = Icons.Default.Delete,
                                 contentDescription = "Delete",
-                                tint = TextSecondary,
+                                tint = actionTint,
                                 modifier = Modifier.size(16.dp),
                             )
                         }
                     }
+
                 }
             }
 

@@ -7,10 +7,27 @@ import androidx.core.content.edit
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import github.aeonbtc.ibiswallet.data.model.AddressType
+import github.aeonbtc.ibiswallet.data.model.BoltzChainFundingPreview
+import github.aeonbtc.ibiswallet.data.model.BoltzChainSwapDraft
+import github.aeonbtc.ibiswallet.data.model.BoltzChainSwapDraftState
 import github.aeonbtc.ibiswallet.data.model.ElectrumConfig
+import github.aeonbtc.ibiswallet.data.model.EstimatedSwapTerms
+import github.aeonbtc.ibiswallet.data.model.LiquidSwapDetails
+import github.aeonbtc.ibiswallet.data.model.LiquidSwapTxRole
+import github.aeonbtc.ibiswallet.data.model.LiquidTxSource
+import github.aeonbtc.ibiswallet.data.model.LightningPaymentBackend
+import github.aeonbtc.ibiswallet.data.model.PendingLightningInvoiceSession
+import github.aeonbtc.ibiswallet.data.model.PendingLightningPaymentPhase
+import github.aeonbtc.ibiswallet.data.model.PendingLightningPaymentSession
+import github.aeonbtc.ibiswallet.data.model.PendingLightningReceive
+import github.aeonbtc.ibiswallet.data.model.PendingSwapPhase
+import github.aeonbtc.ibiswallet.data.model.PendingSwapSession
 import github.aeonbtc.ibiswallet.data.model.SeedFormat
 import github.aeonbtc.ibiswallet.data.model.StoredWallet
+import github.aeonbtc.ibiswallet.data.model.SwapDirection
+import github.aeonbtc.ibiswallet.data.model.SwapService
 import github.aeonbtc.ibiswallet.data.model.WalletNetwork
+import github.aeonbtc.ibiswallet.util.BitcoinUtils
 import org.json.JSONArray
 import org.json.JSONObject
 import java.security.SecureRandom
@@ -21,7 +38,7 @@ import javax.crypto.spec.PBEKeySpec
  * Secure storage for sensitive wallet data using Android's EncryptedSharedPreferences
  * Supports multiple wallets with unique IDs
  */
-class SecureStorage(private val context: Context) {
+class SecureStorage private constructor(private val context: Context) {
     private val masterKey =
         MasterKey.Builder(context)
             .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
@@ -65,6 +82,13 @@ class SecureStorage(private val context: Context) {
             REGULAR_PREFS_FILE,
             Context.MODE_PRIVATE,
         )
+
+    data class LiquidMetadataSnapshot(
+        val txLabels: Map<String, String>,
+        val txSources: Map<String, LiquidTxSource>,
+        val txSwapDetails: Map<String, LiquidSwapDetails>,
+        val pendingLightningReceives: List<PendingLightningReceive>,
+    )
 
     // ==================== Multi-Wallet Management ====================
 
@@ -134,6 +158,7 @@ class SecureStorage(private val context: Context) {
                 put("addressType", wallet.addressType.name)
                 put("derivationPath", wallet.derivationPath)
                 put("isWatchOnly", wallet.isWatchOnly)
+                put("isLocked", wallet.isLocked)
                 put("network", wallet.network.name)
                 put("createdAt", wallet.createdAt)
                 wallet.masterFingerprint?.let { put("masterFingerprint", it) }
@@ -161,17 +186,15 @@ class SecureStorage(private val context: Context) {
         return try {
             val jsonObject = JSONObject(json)
             val addressType =
-                try {
-                    AddressType.valueOf(jsonObject.optString("addressType", AddressType.SEGWIT.name))
-                } catch (_: IllegalArgumentException) {
-                    AddressType.SEGWIT
-                }
+                BitcoinUtils.parseSupportedAddressType(
+                    rawAddressType = jsonObject.optString("addressType", AddressType.SEGWIT.name),
+                    default = AddressType.SEGWIT,
+                )
             val network =
-                try {
-                    WalletNetwork.valueOf(jsonObject.optString("network", WalletNetwork.BITCOIN.name))
-                } catch (_: IllegalArgumentException) {
-                    WalletNetwork.BITCOIN
-                }
+                BitcoinUtils.parseSupportedWalletNetwork(
+                    rawNetwork = jsonObject.optString("network", WalletNetwork.BITCOIN.name),
+                    default = WalletNetwork.BITCOIN,
+                )
             val seedFormat =
                 try {
                     SeedFormat.valueOf(jsonObject.optString("seedFormat", SeedFormat.BIP39.name))
@@ -185,6 +208,7 @@ class SecureStorage(private val context: Context) {
                 addressType = addressType,
                 derivationPath = jsonObject.optString("derivationPath", addressType.defaultPath),
                 isWatchOnly = jsonObject.optBoolean("isWatchOnly", false),
+                isLocked = jsonObject.optBoolean("isLocked", false),
                 network = network,
                 createdAt = jsonObject.optLong("createdAt", System.currentTimeMillis()),
                 masterFingerprint =
@@ -203,7 +227,13 @@ class SecureStorage(private val context: Context) {
      * Get all stored wallets
      */
     fun getAllWallets(): List<StoredWallet> {
-        return getWalletIds().mapNotNull { getWalletMetadata(it) }
+        return getWalletIds().mapNotNull { walletId ->
+            try {
+                getWalletMetadata(walletId)
+            } catch (_: IllegalArgumentException) {
+                null
+            }
+        }
     }
 
     /**
@@ -222,6 +252,31 @@ class SecureStorage(private val context: Context) {
         }
         saveWalletMetadata(updated)
         return true
+    }
+
+    /**
+     * Set whether a wallet requires app authentication before opening.
+     */
+    fun setWalletLocked(walletId: String, locked: Boolean): Boolean {
+        val wallet = getWalletMetadata(walletId) ?: return false
+        if (wallet.isLocked == locked) return true
+        saveWalletMetadata(wallet.copy(isLocked = locked))
+        return true
+    }
+
+    /**
+     * Clear the locked state for all wallets.
+     * Returns true if any wallet metadata changed.
+     */
+    fun clearWalletLocks(): Boolean {
+        var updated = false
+        getAllWallets().forEach { wallet ->
+            if (wallet.isLocked) {
+                saveWalletMetadata(wallet.copy(isLocked = false))
+                updated = true
+            }
+        }
+        return updated
     }
 
     /**
@@ -606,6 +661,14 @@ class SecureStorage(private val context: Context) {
         regularPrefs.edit { putBoolean(KEY_USER_DISCONNECTED, disconnected) }
     }
 
+    fun isLiquidUserDisconnected(): Boolean {
+        return regularPrefs.getBoolean(KEY_LIQUID_USER_DISCONNECTED, false)
+    }
+
+    fun setLiquidUserDisconnected(disconnected: Boolean) {
+        regularPrefs.edit { putBoolean(KEY_LIQUID_USER_DISCONNECTED, disconnected) }
+    }
+
     // ==================== Last Sync Time (per wallet) ====================
 
     fun saveLastSyncTime(
@@ -645,6 +708,17 @@ class SecureStorage(private val context: Context) {
         return regularPrefs.getBoolean("${KEY_NEEDS_FULL_SYNC_PREFIX}$walletId", true)
     }
 
+    fun setNeedsLiquidFullSync(
+        walletId: String,
+        needs: Boolean,
+    ) {
+        regularPrefs.edit { putBoolean("${KEY_LIQUID_NEEDS_FULL_SYNC_PREFIX}$walletId", needs) }
+    }
+
+    fun needsLiquidFullSync(walletId: String): Boolean {
+        return regularPrefs.getBoolean("${KEY_LIQUID_NEEDS_FULL_SYNC_PREFIX}$walletId", false)
+    }
+
     /**
      * Save the timestamp of the last full sync for a wallet
      */
@@ -680,6 +754,7 @@ class SecureStorage(private val context: Context) {
         deletePassphrase(walletId)
         deletePrivateKey(walletId)
         deleteWatchAddress(walletId)
+        removeLiquidDescriptor(walletId)
 
         // Delete metadata
         deleteWalletMetadata(walletId)
@@ -688,8 +763,39 @@ class SecureStorage(private val context: Context) {
         regularPrefs.edit {
             remove("${KEY_LAST_SYNC_PREFIX}$walletId")
             remove("${KEY_NEEDS_FULL_SYNC_PREFIX}$walletId")
+            remove("${KEY_LIQUID_NEEDS_FULL_SYNC_PREFIX}$walletId")
             remove("${KEY_LAST_FULL_SYNC_PREFIX}$walletId")
+            remove("${KEY_LIQUID_ENABLED_PREFIX}$walletId")
+            remove("${KEY_ACTIVE_LAYER_PREFIX}$walletId")
+            remove("${KEY_NOTIFIED_TXIDS_PREFIX}$walletId")
+            remove("${KEY_NOTIFIED_LIQUID_TXIDS_PREFIX}$walletId")
+            remove(liquidScriptHashStatusBlobKey(walletId))
+            remove(liquidScriptHashStatusIndexKey(walletId))
+            removeWalletScopedRegularPrefs(this, walletId)
         }
+    }
+
+    private fun removeWalletScopedRegularPrefs(
+        editor: SharedPreferences.Editor,
+        walletId: String,
+    ) {
+        val prefixes = listOf(
+            "${KEY_ADDRESS_LABEL_PREFIX}${walletId}_",
+            "${KEY_LIQUID_ADDRESS_LABEL_PREFIX}${walletId}_",
+            "${KEY_TX_LABEL_PREFIX}${walletId}_",
+            "${KEY_LIQUID_TX_LABEL_PREFIX}${walletId}_",
+            "${KEY_LIQUID_TX_SOURCE_PREFIX}${walletId}_",
+            "${KEY_LIQUID_TX_SWAP_DETAILS_PREFIX}${walletId}_",
+            "${KEY_LIQUID_SCRIPT_HASH_STATUS_ENTRY_PREFIX}${walletId}_",
+            "${KEY_PENDING_PSBT_LABEL_PREFIX}${walletId}_",
+            "${KEY_TX_FIRST_SEEN_PREFIX}${walletId}_",
+            "${KEY_PENDING_REPLACEMENT_TX_PREFIX}${walletId}_",
+            "${KEY_FROZEN_UTXOS_PREFIX}$walletId",
+        )
+
+        regularPrefs.all.keys
+            .filter { key -> prefixes.any(key::startsWith) }
+            .forEach(editor::remove)
     }
 
     // ==================== Sync Batch Size ====================
@@ -732,18 +838,47 @@ class SecureStorage(private val context: Context) {
     // ==================== Display Settings ====================
 
     /**
-     * Get the preferred denomination (BTC or SATS)
-     * Default is BTC
+     * Get the Layer 1 denomination (BTC or SATS).
+     * Falls back to the legacy shared denomination key for migration.
      */
-    fun getDenomination(): String {
-        return regularPrefs.getString(KEY_DENOMINATION, DENOMINATION_BTC) ?: DENOMINATION_BTC
+    fun getLayer1Denomination(): String {
+        return regularPrefs.getString(
+            KEY_LAYER1_DENOMINATION,
+            regularPrefs.getString(KEY_DENOMINATION, DENOMINATION_BTC),
+        ) ?: DENOMINATION_BTC
     }
 
     /**
-     * Set the preferred denomination
+     * Persist the Layer 1 denomination.
      */
-    fun setDenomination(denomination: String) {
-        regularPrefs.edit { putString(KEY_DENOMINATION, denomination) }
+    fun setLayer1Denomination(denomination: String) {
+        regularPrefs.edit { putString(KEY_LAYER1_DENOMINATION, denomination) }
+    }
+
+    /**
+     * Get the Layer 2 denomination (BTC or SATS).
+     * Falls back to the legacy shared denomination key for migration.
+     */
+    fun getLayer2Denomination(): String {
+        return regularPrefs.getString(
+            KEY_LAYER2_DENOMINATION,
+            regularPrefs.getString(KEY_DENOMINATION, DENOMINATION_BTC),
+        ) ?: DENOMINATION_BTC
+    }
+
+    /**
+     * Persist the Layer 2 denomination.
+     */
+    fun setLayer2Denomination(denomination: String) {
+        regularPrefs.edit { putString(KEY_LAYER2_DENOMINATION, denomination) }
+    }
+
+    fun getSwipeMode(): String {
+        return regularPrefs.getString(KEY_SWIPE_MODE, SWIPE_MODE_DISABLED) ?: SWIPE_MODE_DISABLED
+    }
+
+    fun setSwipeMode(mode: String) {
+        regularPrefs.edit { putString(KEY_SWIPE_MODE, mode) }
     }
 
     /**
@@ -787,7 +922,7 @@ class SecureStorage(private val context: Context) {
             MEMPOOL_DISABLED -> ""
             MEMPOOL_SPACE -> "https://mempool.space"
             MEMPOOL_ONION -> "http://mempoolhqx4isw62xs7abwphsq7ldayuidyx2v2oethdhhj6mlo2r6ad.onion"
-            MEMPOOL_CUSTOM -> getCustomMempoolUrl() ?: "https://mempool.space"
+            MEMPOOL_CUSTOM -> getCustomMempoolUrl()?.trim()?.trimEnd('/').orEmpty()
             else -> ""
         }
     }
@@ -804,6 +939,36 @@ class SecureStorage(private val context: Context) {
      */
     fun setCustomMempoolUrl(url: String) {
         regularPrefs.edit { putString(KEY_MEMPOOL_CUSTOM_URL, url) }
+    }
+
+    // ==================== Liquid Explorer Settings ====================
+
+    fun getLiquidExplorer(): String {
+        return regularPrefs.getString(KEY_LIQUID_EXPLORER, LIQUID_EXPLORER_DISABLED) ?: LIQUID_EXPLORER_DISABLED
+    }
+
+    fun setLiquidExplorer(explorer: String) {
+        regularPrefs.edit { putString(KEY_LIQUID_EXPLORER, explorer) }
+    }
+
+    fun getCustomLiquidExplorerUrl(): String? {
+        return regularPrefs.getString(KEY_LIQUID_EXPLORER_CUSTOM_URL, null)
+    }
+
+    fun setCustomLiquidExplorerUrl(url: String) {
+        regularPrefs.edit { putString(KEY_LIQUID_EXPLORER_CUSTOM_URL, url) }
+    }
+
+    fun getLiquidExplorerUrl(): String {
+        return when (getLiquidExplorer()) {
+            LIQUID_EXPLORER_DISABLED -> ""
+            LIQUID_EXPLORER_LIQUID_NETWORK -> "https://liquid.network"
+            LIQUID_EXPLORER_LIQUID_NETWORK_ONION ->
+                "http://liquidmom47f6s3m53ebfxn47p76a6tlnxib3wp6deux7wuzotdr6cyd.onion"
+            LIQUID_EXPLORER_BLOCKSTREAM -> "https://blockstream.info/liquid"
+            LIQUID_EXPLORER_CUSTOM -> getCustomLiquidExplorerUrl()?.trim()?.trimEnd('/').orEmpty()
+            else -> ""
+        }
     }
 
     // ==================== Fee Estimation Settings ====================
@@ -885,6 +1050,49 @@ class SecureStorage(private val context: Context) {
         regularPrefs.edit { putBoolean(KEY_NFC_ENABLED, enabled) }
     }
 
+    /**
+     * Get whether Android wallet activity notifications are enabled.
+     * Defaults to false until the user explicitly opts in.
+     */
+    fun isWalletNotificationsEnabled(): Boolean {
+        return regularPrefs.getBoolean(KEY_WALLET_NOTIFICATIONS_ENABLED, false)
+    }
+
+    /**
+     * Set whether Android wallet activity notifications are enabled.
+     */
+    fun setWalletNotificationsEnabled(enabled: Boolean) {
+        regularPrefs.edit { putBoolean(KEY_WALLET_NOTIFICATIONS_ENABLED, enabled) }
+    }
+
+    // ==================== Notified Transaction IDs (per wallet) ====================
+
+    fun getNotifiedTxids(walletId: String): Set<String> {
+        val raw = regularPrefs.getString("${KEY_NOTIFIED_TXIDS_PREFIX}$walletId", null)
+            ?: return emptySet()
+        if (raw.isEmpty()) return emptySet()
+        return raw.split(',').toSet()
+    }
+
+    fun saveNotifiedTxids(walletId: String, txids: Set<String>) {
+        regularPrefs.edit {
+            putString("${KEY_NOTIFIED_TXIDS_PREFIX}$walletId", txids.joinToString(","))
+        }
+    }
+
+    fun getNotifiedLiquidTxids(walletId: String): Set<String> {
+        val raw = regularPrefs.getString("${KEY_NOTIFIED_LIQUID_TXIDS_PREFIX}$walletId", null)
+            ?: return emptySet()
+        if (raw.isEmpty()) return emptySet()
+        return raw.split(',').toSet()
+    }
+
+    fun saveNotifiedLiquidTxids(walletId: String, txids: Set<String>) {
+        regularPrefs.edit {
+            putString("${KEY_NOTIFIED_LIQUID_TXIDS_PREFIX}$walletId", txids.joinToString(","))
+        }
+    }
+
     // ==================== BTC/USD Price Source ====================
 
     /**
@@ -900,6 +1108,35 @@ class SecureStorage(private val context: Context) {
      */
     fun setPriceSource(source: String) {
         regularPrefs.edit { putString(KEY_PRICE_SOURCE, source) }
+    }
+
+    // ==================== Layer 2 External Services ====================
+
+    fun getBoltzApiSource(): String {
+        return regularPrefs.getString(KEY_BOLTZ_API_SOURCE, BOLTZ_API_DISABLED) ?: BOLTZ_API_DISABLED
+    }
+
+    fun setBoltzApiSource(source: String) {
+        regularPrefs.edit { putString(KEY_BOLTZ_API_SOURCE, source) }
+    }
+
+    fun getSideSwapApiSource(): String {
+        return regularPrefs.getString(KEY_SIDESWAP_API_SOURCE, SIDESWAP_API_DISABLED) ?: SIDESWAP_API_DISABLED
+    }
+
+    fun setSideSwapApiSource(source: String) {
+        regularPrefs.edit { putString(KEY_SIDESWAP_API_SOURCE, source) }
+    }
+
+    fun getPreferredSwapService(): SwapService {
+        val storedValue = regularPrefs.getString(KEY_PREFERRED_SWAP_SERVICE, SwapService.BOLTZ.name)
+        return storedValue
+            ?.let { value -> SwapService.entries.firstOrNull { it.name == value } }
+            ?: SwapService.BOLTZ
+    }
+
+    fun setPreferredSwapService(service: SwapService) {
+        regularPrefs.edit { putString(KEY_PREFERRED_SWAP_SERVICE, service.name) }
     }
 
     // ==================== Address Labels ====================
@@ -952,6 +1189,57 @@ class SecureStorage(private val context: Context) {
         address: String,
     ) {
         val key = "${KEY_ADDRESS_LABEL_PREFIX}${walletId}_$address"
+        regularPrefs.edit { remove(key) }
+    }
+
+    /**
+     * Save a Layer 2 Liquid label for a receive address.
+     */
+    fun saveLiquidAddressLabel(
+        walletId: String,
+        address: String,
+        label: String,
+    ) {
+        val key = "${KEY_LIQUID_ADDRESS_LABEL_PREFIX}${walletId}_$address"
+        regularPrefs.edit { putString(key, label) }
+    }
+
+    /**
+     * Get the Layer 2 Liquid label for a receive address.
+     */
+    fun getLiquidAddressLabel(
+        walletId: String,
+        address: String,
+    ): String? {
+        val key = "${KEY_LIQUID_ADDRESS_LABEL_PREFIX}${walletId}_$address"
+        return regularPrefs.getString(key, null)
+    }
+
+    /**
+     * Get all Layer 2 Liquid labels for receive addresses in a wallet.
+     */
+    fun getAllLiquidAddressLabels(walletId: String): Map<String, String> {
+        val prefix = "${KEY_LIQUID_ADDRESS_LABEL_PREFIX}${walletId}_"
+        val labels = mutableMapOf<String, String>()
+
+        regularPrefs.all.forEach { (key, value) ->
+            if (key.startsWith(prefix) && value is String) {
+                val address = key.removePrefix(prefix)
+                labels[address] = value
+            }
+        }
+
+        return labels
+    }
+
+    /**
+     * Delete a Layer 2 Liquid label for a receive address.
+     */
+    fun deleteLiquidAddressLabel(
+        walletId: String,
+        address: String,
+    ) {
+        val key = "${KEY_LIQUID_ADDRESS_LABEL_PREFIX}${walletId}_$address"
         regularPrefs.edit { remove(key) }
     }
 
@@ -1009,6 +1297,767 @@ class SecureStorage(private val context: Context) {
         return labels
     }
 
+    /**
+     * Save a Layer 2 Liquid label for a transaction.
+     */
+    fun saveLiquidTransactionLabel(
+        walletId: String,
+        txid: String,
+        label: String,
+    ) {
+        val key = "${KEY_LIQUID_TX_LABEL_PREFIX}${walletId}_$txid"
+        regularPrefs.edit { putString(key, label) }
+    }
+
+    /**
+     * Get a Layer 2 Liquid label for a transaction.
+     */
+    /**
+     * Get all Layer 2 Liquid transaction labels for a wallet.
+     */
+    fun getAllLiquidTransactionLabels(walletId: String): Map<String, String> {
+        return getLiquidMetadataSnapshot(walletId).txLabels
+    }
+
+    /**
+     * Save internal Liquid transaction source metadata.
+     */
+    fun saveLiquidTransactionSource(
+        walletId: String,
+        txid: String,
+        source: LiquidTxSource,
+    ) {
+        val key = "${KEY_LIQUID_TX_SOURCE_PREFIX}${walletId}_$txid"
+        regularPrefs.edit { putString(key, source.name) }
+    }
+
+    /**
+     * Get all internal Liquid transaction source metadata for a wallet.
+     */
+    fun getAllLiquidTransactionSources(walletId: String): Map<String, LiquidTxSource> {
+        return getLiquidMetadataSnapshot(walletId).txSources
+    }
+
+    fun saveLiquidSwapDetails(
+        walletId: String,
+        txid: String,
+        details: LiquidSwapDetails,
+    ) {
+        val key = "${KEY_LIQUID_TX_SWAP_DETAILS_PREFIX}${walletId}_$txid"
+        val json =
+            JSONObject().apply {
+                put("service", details.service.name)
+                put("direction", details.direction.name)
+                put("swapId", details.swapId)
+                put("role", details.role.name)
+                put("depositAddress", details.depositAddress)
+                put("receiveAddress", details.receiveAddress)
+                put("refundAddress", details.refundAddress)
+                put("sendAmountSats", details.sendAmountSats)
+                put("expectedReceiveAmountSats", details.expectedReceiveAmountSats)
+            }
+        regularPrefs.edit(commit = true) {
+            putString(key, json.toString())
+        }
+    }
+
+    fun getAllLiquidSwapDetails(walletId: String): Map<String, LiquidSwapDetails> {
+        return getLiquidMetadataSnapshot(walletId).txSwapDetails
+    }
+
+    /**
+     * Persist pending Lightning-to-Liquid receive metadata until the final txid is known.
+     */
+    fun savePendingLightningReceive(
+        walletId: String,
+        swapId: String,
+        claimAddress: String,
+        label: String,
+    ) {
+        regularPrefs.edit(commit = true) {
+            putString("${KEY_PENDING_LIQUID_LIGHTNING_RECEIVE_ADDRESS_PREFIX}${walletId}_$swapId", claimAddress)
+            putString("${KEY_PENDING_LIQUID_LIGHTNING_RECEIVE_LABEL_PREFIX}${walletId}_$swapId", label)
+        }
+    }
+
+    /**
+     * Get pending Lightning receive metadata for a specific swap.
+     */
+    fun getPendingLightningReceive(
+        walletId: String,
+        swapId: String,
+    ): PendingLightningReceive? {
+        val addressKey = "${KEY_PENDING_LIQUID_LIGHTNING_RECEIVE_ADDRESS_PREFIX}${walletId}_$swapId"
+        val claimAddress = regularPrefs.getString(addressKey, null) ?: return null
+        val labelKey = "${KEY_PENDING_LIQUID_LIGHTNING_RECEIVE_LABEL_PREFIX}${walletId}_$swapId"
+        return PendingLightningReceive(
+            swapId = swapId,
+            claimAddress = claimAddress,
+            label = regularPrefs.getString(labelKey, "") ?: "",
+        )
+    }
+
+    /**
+     * Get all pending Lightning receive metadata for a wallet.
+     */
+    fun getAllPendingLightningReceives(walletId: String): List<PendingLightningReceive> {
+        return getLiquidMetadataSnapshot(walletId).pendingLightningReceives
+    }
+
+    private fun parseLiquidSwapDetails(raw: String): LiquidSwapDetails? {
+        return runCatching {
+            val json = JSONObject(raw)
+            LiquidSwapDetails(
+                service = SwapService.valueOf(json.getString("service")),
+                direction = SwapDirection.valueOf(json.getString("direction")),
+                swapId = json.getString("swapId"),
+                role = LiquidSwapTxRole.valueOf(json.optString("role", LiquidSwapTxRole.FUNDING.name)),
+                depositAddress = json.getString("depositAddress"),
+                receiveAddress = json.optString("receiveAddress").takeIf { it.isNotBlank() },
+                refundAddress = json.optString("refundAddress").takeIf { it.isNotBlank() },
+                sendAmountSats = json.optLong("sendAmountSats", 0L),
+                expectedReceiveAmountSats = json.optLong("expectedReceiveAmountSats", 0L),
+            )
+        }.getOrNull()
+    }
+
+    fun getLiquidMetadataSnapshot(walletId: String): LiquidMetadataSnapshot {
+        val txLabelPrefix = "${KEY_LIQUID_TX_LABEL_PREFIX}${walletId}_"
+        val txSourcePrefix = "${KEY_LIQUID_TX_SOURCE_PREFIX}${walletId}_"
+        val txSwapPrefix = "${KEY_LIQUID_TX_SWAP_DETAILS_PREFIX}${walletId}_"
+        val pendingAddressPrefix = "${KEY_PENDING_LIQUID_LIGHTNING_RECEIVE_ADDRESS_PREFIX}${walletId}_"
+        val pendingLabelPrefix = "${KEY_PENDING_LIQUID_LIGHTNING_RECEIVE_LABEL_PREFIX}${walletId}_"
+
+        val txLabels = mutableMapOf<String, String>()
+        val txSources = mutableMapOf<String, LiquidTxSource>()
+        val txSwapDetails = mutableMapOf<String, LiquidSwapDetails>()
+        val pendingAddresses = mutableMapOf<String, String>()
+        val pendingLabels = mutableMapOf<String, String>()
+
+        regularPrefs.all.forEach { (key, value) ->
+            when {
+                key.startsWith(txLabelPrefix) && value is String -> {
+                    txLabels[key.removePrefix(txLabelPrefix)] = value
+                }
+
+                key.startsWith(txSourcePrefix) && value is String -> {
+                    val txid = key.removePrefix(txSourcePrefix)
+                    val source = runCatching { LiquidTxSource.valueOf(value) }.getOrNull() ?: return@forEach
+                    txSources[txid] = source
+                }
+
+                key.startsWith(txSwapPrefix) && value is String -> {
+                    val txid = key.removePrefix(txSwapPrefix)
+                    val details = parseLiquidSwapDetails(value) ?: return@forEach
+                    txSwapDetails[txid] = details
+                }
+
+                key.startsWith(pendingAddressPrefix) && value is String -> {
+                    pendingAddresses[key.removePrefix(pendingAddressPrefix)] = value
+                }
+
+                key.startsWith(pendingLabelPrefix) && value is String -> {
+                    pendingLabels[key.removePrefix(pendingLabelPrefix)] = value
+                }
+            }
+        }
+
+        return LiquidMetadataSnapshot(
+            txLabels = txLabels,
+            txSources = txSources,
+            txSwapDetails = txSwapDetails,
+            pendingLightningReceives =
+                pendingAddresses.map { (swapId, claimAddress) ->
+                    PendingLightningReceive(
+                        swapId = swapId,
+                        claimAddress = claimAddress,
+                        label = pendingLabels[swapId].orEmpty(),
+                    )
+                },
+        )
+    }
+
+    /**
+     * Delete pending Lightning receive metadata for a specific swap.
+     */
+    fun deletePendingLightningReceive(
+        walletId: String,
+        swapId: String,
+    ) {
+        regularPrefs.edit(commit = true) {
+            remove("${KEY_PENDING_LIQUID_LIGHTNING_RECEIVE_ADDRESS_PREFIX}${walletId}_$swapId")
+            remove("${KEY_PENDING_LIQUID_LIGHTNING_RECEIVE_LABEL_PREFIX}${walletId}_$swapId")
+        }
+    }
+
+    /**
+     * Delete any pending Lightning receive metadata that targets a claim address.
+     */
+    fun deletePendingLightningReceivesByClaimAddress(
+        walletId: String,
+        claimAddress: String,
+    ) {
+        val matchingSwapIds =
+            getAllPendingLightningReceives(walletId)
+                .filter { it.claimAddress == claimAddress }
+                .map { it.swapId }
+
+        if (matchingSwapIds.isEmpty()) return
+
+        regularPrefs.edit(commit = true) {
+            matchingSwapIds.forEach { swapId ->
+                remove("${KEY_PENDING_LIQUID_LIGHTNING_RECEIVE_ADDRESS_PREFIX}${walletId}_$swapId")
+                remove("${KEY_PENDING_LIQUID_LIGHTNING_RECEIVE_LABEL_PREFIX}${walletId}_$swapId")
+            }
+        }
+    }
+
+    fun savePendingSwap(
+        walletId: String,
+        pendingSwap: PendingSwapSession,
+    ) {
+        val swaps = getPendingSwaps(walletId).toMutableList()
+        swaps.removeAll { it.swapId == pendingSwap.swapId }
+        swaps.add(pendingSwap)
+        regularPrefs.edit(commit = true) {
+            putString(
+                "${KEY_PENDING_SWAP_PREFIX}$walletId",
+                JSONArray(swaps.sortedByDescending { it.createdAt }.map(::pendingSwapToJson)).toString(),
+            )
+        }
+        val snapshotKey = pendingSwapSnapshotKey(walletId, pendingSwap.swapId)
+        securePrefs.edit(commit = true) {
+            if (pendingSwap.boltzSnapshot.isNullOrBlank()) {
+                remove(snapshotKey)
+            } else {
+                putString(snapshotKey, pendingSwap.boltzSnapshot)
+            }
+        }
+    }
+
+    fun getPendingSwaps(walletId: String): List<PendingSwapSession> {
+        val raw = regularPrefs.getString("${KEY_PENDING_SWAP_PREFIX}$walletId", null) ?: return emptyList()
+        return try {
+            val array = runCatching { JSONArray(raw) }.getOrElse {
+                JSONArray().put(JSONObject(raw))
+            }
+            buildList {
+                for (index in 0 until array.length()) {
+                    val json = array.optJSONObject(index) ?: continue
+                    parsePendingSwap(walletId, json)?.let(::add)
+                }
+            }.sortedByDescending { it.createdAt }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    fun getPendingSwap(walletId: String, swapId: String): PendingSwapSession? {
+        return getPendingSwaps(walletId).firstOrNull { it.swapId == swapId }
+    }
+
+    fun deletePendingSwap(
+        walletId: String,
+        swapId: String? = null,
+    ) {
+        if (swapId == null) {
+            val swaps = getPendingSwaps(walletId)
+            securePrefs.edit(commit = true) {
+                swaps.forEach { remove(pendingSwapSnapshotKey(walletId, it.swapId)) }
+            }
+            regularPrefs.edit(commit = true) {
+                remove("${KEY_PENDING_SWAP_PREFIX}$walletId")
+            }
+            return
+        }
+
+        val swaps = getPendingSwaps(walletId).filterNot { it.swapId == swapId }
+        regularPrefs.edit(commit = true) {
+            if (swaps.isEmpty()) {
+                remove("${KEY_PENDING_SWAP_PREFIX}$walletId")
+            } else {
+                putString(
+                    "${KEY_PENDING_SWAP_PREFIX}$walletId",
+                    JSONArray(swaps.map(::pendingSwapToJson)).toString(),
+                )
+            }
+        }
+        securePrefs.edit(commit = true) {
+            remove(pendingSwapSnapshotKey(walletId, swapId))
+        }
+    }
+
+    fun saveBoltzChainSwapDraft(
+        walletId: String,
+        draft: BoltzChainSwapDraft,
+    ) {
+        val drafts = getBoltzChainSwapDrafts(walletId).toMutableList()
+        drafts.removeAll { it.draftId == draft.draftId }
+        drafts.add(draft.copy(snapshot = null))
+        regularPrefs.edit(commit = true) {
+            putString(
+                "${KEY_BOLTZ_CHAIN_SWAP_DRAFT_PREFIX}$walletId",
+                JSONArray(drafts.sortedByDescending { it.updatedAt }.map(::boltzChainSwapDraftToJson)).toString(),
+            )
+        }
+        securePrefs.edit(commit = true) {
+            val key = boltzChainSwapSnapshotKey(walletId, draft.draftId)
+            if (draft.snapshot.isNullOrBlank()) {
+                remove(key)
+            } else {
+                putString(key, draft.snapshot)
+            }
+        }
+    }
+
+    fun getBoltzChainSwapDrafts(walletId: String): List<BoltzChainSwapDraft> {
+        val raw = regularPrefs.getString("${KEY_BOLTZ_CHAIN_SWAP_DRAFT_PREFIX}$walletId", null) ?: return emptyList()
+        return try {
+            val array = JSONArray(raw)
+            buildList {
+                for (index in 0 until array.length()) {
+                    val json = array.optJSONObject(index) ?: continue
+                    parseBoltzChainSwapDraft(walletId, json)?.let(::add)
+                }
+            }.sortedByDescending { it.updatedAt }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    fun getBoltzChainSwapDraftBySwapId(
+        walletId: String,
+        swapId: String,
+    ): BoltzChainSwapDraft? {
+        return getBoltzChainSwapDrafts(walletId).firstOrNull { it.swapId == swapId }
+    }
+
+    fun getBoltzSessionNextIndex(walletId: String): Int? {
+        val key = boltzSessionNextIndexKey(walletId)
+        if (!regularPrefs.contains(key)) return null
+        return regularPrefs.getInt(key, -1).takeIf { it >= 0 }
+    }
+
+    fun setBoltzSessionNextIndex(walletId: String, nextIndex: Int?) {
+        val key = boltzSessionNextIndexKey(walletId)
+        regularPrefs.edit(commit = true) {
+            if (nextIndex == null || nextIndex < 0) {
+                remove(key)
+            } else {
+                putInt(key, nextIndex)
+            }
+        }
+    }
+
+    private fun pendingSwapToJson(pendingSwap: PendingSwapSession): JSONObject {
+        return JSONObject().apply {
+            put("service", pendingSwap.service.name)
+            put("direction", pendingSwap.direction.name)
+            put("sendAmount", pendingSwap.sendAmount)
+            put("requestKey", pendingSwap.requestKey)
+            put("usesMaxAmount", pendingSwap.usesMaxAmount)
+            put("selectedFundingOutpoints", JSONArray(pendingSwap.selectedFundingOutpoints))
+            put("estimatedTerms", estimatedTermsToJson(pendingSwap.estimatedTerms))
+            put("swapId", pendingSwap.swapId)
+            put("depositAddress", pendingSwap.depositAddress)
+            put("receiveAddress", pendingSwap.receiveAddress)
+            put("refundAddress", pendingSwap.refundAddress)
+            put("createdAt", pendingSwap.createdAt)
+            put("reviewExpiresAt", pendingSwap.reviewExpiresAt)
+            put("phase", pendingSwap.phase.name)
+            put("status", pendingSwap.status)
+            put("fundingLiquidFeeRate", pendingSwap.fundingLiquidFeeRate)
+            put("boltzOrderAmountSats", pendingSwap.boltzOrderAmountSats)
+            put("boltzVerifiedRecipientAmountSats", pendingSwap.boltzVerifiedRecipientAmountSats)
+            put("boltzMaxOrderAmountVerified", pendingSwap.boltzMaxOrderAmountVerified)
+            put("actualFundingFeeSats", pendingSwap.actualFundingFeeSats)
+            put("actualFundingTxVBytes", pendingSwap.actualFundingTxVBytes)
+            put("fundingTxid", pendingSwap.fundingTxid)
+            put("settlementTxid", pendingSwap.settlementTxid)
+        }
+    }
+
+    private fun parsePendingSwap(
+        walletId: String,
+        json: JSONObject,
+    ): PendingSwapSession? {
+        return runCatching {
+            PendingSwapSession(
+                service = SwapService.valueOf(json.getString("service")),
+                direction = SwapDirection.valueOf(json.getString("direction")),
+                sendAmount = json.getLong("sendAmount"),
+                requestKey =
+                    json.optString("requestKey", "").takeIf {
+                        it.isNotBlank() && !json.isNull("requestKey")
+                    },
+                usesMaxAmount = json.optBoolean("usesMaxAmount", false),
+                selectedFundingOutpoints =
+                    json.optJSONArray("selectedFundingOutpoints")?.let { array ->
+                        buildList {
+                            for (index in 0 until array.length()) {
+                                array.optString(index)
+                                    .takeIf { it.isNotBlank() }
+                                    ?.let(::add)
+                            }
+                        }
+                    } ?: emptyList(),
+                estimatedTerms = parseEstimatedTerms(json.optJSONObject("estimatedTerms")),
+                swapId = json.getString("swapId"),
+                depositAddress = json.getString("depositAddress"),
+                receiveAddress =
+                    json.optString("receiveAddress", "").takeIf {
+                        it.isNotBlank() && !json.isNull("receiveAddress")
+                    },
+                refundAddress =
+                    json.optString("refundAddress", "").takeIf {
+                        it.isNotBlank() && !json.isNull("refundAddress")
+                    },
+                createdAt = json.optLong("createdAt", 0L),
+                reviewExpiresAt = json.optLong("reviewExpiresAt", 0L),
+                phase =
+                    runCatching {
+                        PendingSwapPhase.valueOf(json.optString("phase", PendingSwapPhase.REVIEW.name))
+                    }.getOrDefault(PendingSwapPhase.REVIEW),
+                status = json.optString("status", ""),
+                fundingLiquidFeeRate = json.optDouble("fundingLiquidFeeRate", 0.0),
+                boltzOrderAmountSats =
+                    json.optLong("boltzOrderAmountSats").takeIf {
+                        !json.isNull("boltzOrderAmountSats")
+                    },
+                boltzVerifiedRecipientAmountSats =
+                    json.optLong("boltzVerifiedRecipientAmountSats").takeIf {
+                        !json.isNull("boltzVerifiedRecipientAmountSats")
+                    },
+                boltzMaxOrderAmountVerified = json.optBoolean("boltzMaxOrderAmountVerified", false),
+                actualFundingFeeSats =
+                    json.optLong("actualFundingFeeSats").takeIf {
+                        !json.isNull("actualFundingFeeSats")
+                    },
+                actualFundingTxVBytes =
+                    json.optDouble("actualFundingTxVBytes").takeIf {
+                        !json.isNull("actualFundingTxVBytes")
+                    },
+                fundingTxid =
+                    json.optString("fundingTxid", "").takeIf {
+                        it.isNotBlank() && !json.isNull("fundingTxid")
+                    },
+                settlementTxid =
+                    json.optString("settlementTxid", "").takeIf {
+                        it.isNotBlank() && !json.isNull("settlementTxid")
+                    },
+                boltzSnapshot =
+                    securePrefs.getString(
+                        pendingSwapSnapshotKey(walletId, json.getString("swapId")),
+                        null,
+                    ),
+            )
+        }.getOrNull()
+    }
+
+    private fun boltzChainSwapDraftToJson(draft: BoltzChainSwapDraft): JSONObject {
+        return JSONObject().apply {
+            put("draftId", draft.draftId)
+            put("requestKey", draft.requestKey)
+            put("direction", draft.direction.name)
+            put("sendAmount", draft.sendAmount)
+            put("orderAmountSats", draft.orderAmountSats)
+            put("maxOrderAmountVerified", draft.maxOrderAmountVerified)
+            put("usesMaxAmount", draft.usesMaxAmount)
+            put("selectedFundingOutpoints", JSONArray(draft.selectedFundingOutpoints))
+            put("estimatedTerms", estimatedTermsToJson(draft.estimatedTerms))
+            put("fundingLiquidFeeRate", draft.fundingLiquidFeeRate)
+            put("bitcoinAddress", draft.bitcoinAddress)
+            put("liquidAddress", draft.liquidAddress)
+            put("swapId", draft.swapId)
+            put("depositAddress", draft.depositAddress)
+            put("receiveAddress", draft.receiveAddress)
+            put("refundAddress", draft.refundAddress)
+            put("state", draft.state.name)
+            put("fundingPreview", fundingPreviewToJson(draft.fundingPreview))
+            put("fundingTxid", draft.fundingTxid)
+            put("settlementTxid", draft.settlementTxid)
+            put("lastError", draft.lastError)
+            put("createdAt", draft.createdAt)
+            put("updatedAt", draft.updatedAt)
+            put("reviewExpiresAt", draft.reviewExpiresAt)
+        }
+    }
+
+    private fun parseBoltzChainSwapDraft(
+        walletId: String,
+        json: JSONObject,
+    ): BoltzChainSwapDraft? {
+        return runCatching {
+            val draftId = json.getString("draftId")
+            BoltzChainSwapDraft(
+                draftId = draftId,
+                requestKey = json.optString("requestKey", draftId),
+                direction = SwapDirection.valueOf(json.getString("direction")),
+                sendAmount = json.getLong("sendAmount"),
+                orderAmountSats = json.optLong("orderAmountSats", json.getLong("sendAmount")),
+                maxOrderAmountVerified = json.optBoolean("maxOrderAmountVerified", false),
+                usesMaxAmount = json.optBoolean("usesMaxAmount", false),
+                selectedFundingOutpoints =
+                    json.optJSONArray("selectedFundingOutpoints")?.let { array ->
+                        buildList {
+                            for (index in 0 until array.length()) {
+                                array.optString(index)
+                                    .takeIf { it.isNotBlank() }
+                                    ?.let(::add)
+                            }
+                        }
+                    } ?: emptyList(),
+                estimatedTerms = parseEstimatedTerms(json.optJSONObject("estimatedTerms")),
+                fundingLiquidFeeRate = json.optDouble("fundingLiquidFeeRate", 0.0),
+                bitcoinAddress = json.optString("bitcoinAddress", ""),
+                liquidAddress =
+                    json.optString("liquidAddress", "").takeIf {
+                        it.isNotBlank() && !json.isNull("liquidAddress")
+                    },
+                swapId =
+                    json.optString("swapId", "").takeIf {
+                        it.isNotBlank() && !json.isNull("swapId")
+                    },
+                depositAddress =
+                    json.optString("depositAddress", "").takeIf {
+                        it.isNotBlank() && !json.isNull("depositAddress")
+                    },
+                receiveAddress =
+                    json.optString("receiveAddress", "").takeIf {
+                        it.isNotBlank() && !json.isNull("receiveAddress")
+                    },
+                refundAddress =
+                    json.optString("refundAddress", "").takeIf {
+                        it.isNotBlank() && !json.isNull("refundAddress")
+                    },
+                state =
+                    runCatching {
+                        BoltzChainSwapDraftState.valueOf(
+                            json.optString("state", BoltzChainSwapDraftState.CREATING.name),
+                        )
+                    }.getOrDefault(BoltzChainSwapDraftState.CREATING),
+                fundingPreview = parseFundingPreview(json.optJSONObject("fundingPreview")),
+                fundingTxid =
+                    json.optString("fundingTxid", "").takeIf {
+                        it.isNotBlank() && !json.isNull("fundingTxid")
+                    },
+                settlementTxid =
+                    json.optString("settlementTxid", "").takeIf {
+                        it.isNotBlank() && !json.isNull("settlementTxid")
+                    },
+                lastError =
+                    json.optString("lastError", "").takeIf {
+                        it.isNotBlank() && !json.isNull("lastError")
+                    },
+                createdAt = json.optLong("createdAt", System.currentTimeMillis()),
+                updatedAt = json.optLong("updatedAt", System.currentTimeMillis()),
+                reviewExpiresAt = json.optLong("reviewExpiresAt", 0L),
+                snapshot = securePrefs.getString(boltzChainSwapSnapshotKey(walletId, draftId), null),
+            )
+        }.getOrNull()
+    }
+
+    private fun estimatedTermsToJson(estimatedTerms: EstimatedSwapTerms): JSONObject {
+        return JSONObject().apply {
+            put("receiveAmount", estimatedTerms.receiveAmount)
+            put("serviceFee", estimatedTerms.serviceFee)
+            put("btcNetworkFee", estimatedTerms.btcNetworkFee)
+            put("liquidNetworkFee", estimatedTerms.liquidNetworkFee)
+            put("providerMinerFee", estimatedTerms.providerMinerFee)
+            put("btcFeeRate", estimatedTerms.btcFeeRate)
+            put("displayLiquidFeeRate", estimatedTerms.displayLiquidFeeRate)
+            put("fundingNetworkFee", estimatedTerms.fundingNetworkFee)
+            put("fundingFeeRate", estimatedTerms.fundingFeeRate)
+            put("payoutNetworkFee", estimatedTerms.payoutNetworkFee)
+            put("payoutFeeRate", estimatedTerms.payoutFeeRate)
+            put("minAmount", estimatedTerms.minAmount)
+            put("maxAmount", estimatedTerms.maxAmount)
+            put("estimatedTime", estimatedTerms.estimatedTime)
+        }
+    }
+
+    private fun parseEstimatedTerms(json: JSONObject?): EstimatedSwapTerms {
+        val estimatedJson = json ?: JSONObject()
+        return EstimatedSwapTerms(
+            receiveAmount = estimatedJson.optLong("receiveAmount", 0L),
+            serviceFee = estimatedJson.optLong("serviceFee", 0L),
+            btcNetworkFee = estimatedJson.optLong("btcNetworkFee", 0L),
+            liquidNetworkFee = estimatedJson.optLong("liquidNetworkFee", 0L),
+            providerMinerFee = estimatedJson.optLong("providerMinerFee", 0L),
+            btcFeeRate = estimatedJson.optDouble("btcFeeRate", 0.0),
+            displayLiquidFeeRate = estimatedJson.optDouble("displayLiquidFeeRate", 0.0),
+            fundingNetworkFee = estimatedJson.optLong("fundingNetworkFee", 0L),
+            fundingFeeRate = estimatedJson.optDouble("fundingFeeRate", 0.0),
+            payoutNetworkFee = estimatedJson.optLong("payoutNetworkFee", 0L),
+            payoutFeeRate = estimatedJson.optDouble("payoutFeeRate", 0.0),
+            minAmount = estimatedJson.optLong("minAmount", 0L),
+            maxAmount = estimatedJson.optLong("maxAmount", 0L),
+            estimatedTime = estimatedJson.optString("estimatedTime", ""),
+        )
+    }
+
+    private fun fundingPreviewToJson(preview: BoltzChainFundingPreview?): JSONObject? {
+        if (preview == null) return null
+        return JSONObject().apply {
+            put("feeSats", preview.feeSats)
+            put("txVBytes", preview.txVBytes)
+            put("effectiveFeeRate", preview.effectiveFeeRate)
+            put("verifiedRecipientAmountSats", preview.verifiedRecipientAmountSats)
+            put("error", preview.error)
+        }
+    }
+
+    private fun parseFundingPreview(json: JSONObject?): BoltzChainFundingPreview? {
+        if (json == null) return null
+        return BoltzChainFundingPreview(
+            feeSats = json.optLong("feeSats", 0L),
+            txVBytes = json.optDouble("txVBytes", 0.0),
+            effectiveFeeRate = json.optDouble("effectiveFeeRate", 0.0),
+            verifiedRecipientAmountSats = json.optLong("verifiedRecipientAmountSats", 0L),
+            error =
+                json.optString("error", "").takeIf {
+                    it.isNotBlank() && !json.isNull("error")
+                },
+        )
+    }
+
+    private fun pendingSwapSnapshotKey(walletId: String, swapId: String): String =
+        "${KEY_PENDING_SWAP_SNAPSHOT_PREFIX}${walletId}_$swapId"
+
+    private fun boltzChainSwapSnapshotKey(walletId: String, draftId: String): String =
+        "${KEY_BOLTZ_CHAIN_SWAP_SNAPSHOT_PREFIX}${walletId}_$draftId"
+
+    private fun boltzSessionNextIndexKey(walletId: String): String =
+        "${KEY_BOLTZ_SESSION_NEXT_INDEX_PREFIX}$walletId"
+
+    fun savePendingLightningInvoiceSession(
+        walletId: String,
+        session: PendingLightningInvoiceSession,
+    ) {
+        val json =
+            JSONObject().apply {
+                put("swapId", session.swapId)
+                put("snapshot", session.snapshot)
+                put("amountSats", session.amountSats)
+                put("createdAt", session.createdAt)
+            }.toString()
+        regularPrefs.edit(commit = true) {
+            putString("${KEY_PENDING_BOLTZ_LIGHTNING_INVOICE_PREFIX}$walletId", json)
+        }
+    }
+
+    fun getPendingLightningInvoiceSession(walletId: String): PendingLightningInvoiceSession? {
+        val raw = regularPrefs.getString("${KEY_PENDING_BOLTZ_LIGHTNING_INVOICE_PREFIX}$walletId", null) ?: return null
+        return try {
+            val json = JSONObject(raw)
+            PendingLightningInvoiceSession(
+                swapId = json.getString("swapId"),
+                snapshot = json.getString("snapshot"),
+                amountSats = json.optLong("amountSats", 0L),
+                createdAt = json.optLong("createdAt", System.currentTimeMillis()),
+            )
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    fun deletePendingLightningInvoiceSession(walletId: String) {
+        regularPrefs.edit(commit = true) {
+            remove("${KEY_PENDING_BOLTZ_LIGHTNING_INVOICE_PREFIX}$walletId")
+        }
+    }
+
+    fun savePendingLightningPaymentSession(
+        walletId: String,
+        session: PendingLightningPaymentSession,
+    ) {
+        val json =
+            JSONObject().apply {
+                put("swapId", session.swapId)
+                put("backend", session.backend.name)
+                put("requestKey", session.requestKey)
+                put("paymentInput", session.paymentInput)
+                put("lockupAddress", session.lockupAddress)
+                put("lockupAmountSats", session.lockupAmountSats)
+                put("refundAddress", session.refundAddress)
+                put("snapshot", session.snapshot)
+                put("requestedAmountSats", session.requestedAmountSats)
+                put("resolvedPaymentInput", session.resolvedPaymentInput)
+                put("fetchedInvoice", session.fetchedInvoice)
+                put("refundPublicKey", session.refundPublicKey)
+                put("paymentAmountSats", session.paymentAmountSats)
+                put("swapFeeSats", session.swapFeeSats)
+                put("createdAt", session.createdAt)
+                put("phase", session.phase.name)
+                put("status", session.status)
+                put("fundingTxid", session.fundingTxid)
+            }.toString()
+        regularPrefs.edit(commit = true) {
+            putString("${KEY_PENDING_BOLTZ_LIGHTNING_PAYMENT_PREFIX}$walletId", json)
+        }
+    }
+
+    fun getPendingLightningPaymentSession(walletId: String): PendingLightningPaymentSession? {
+        val raw = regularPrefs.getString("${KEY_PENDING_BOLTZ_LIGHTNING_PAYMENT_PREFIX}$walletId", null) ?: return null
+        return try {
+            val json = JSONObject(raw)
+            PendingLightningPaymentSession(
+                swapId = json.getString("swapId"),
+                backend = runCatching {
+                    LightningPaymentBackend.valueOf(
+                        json.optString("backend", LightningPaymentBackend.LWK_PREPARE_PAY.name),
+                    )
+                }.getOrDefault(LightningPaymentBackend.LWK_PREPARE_PAY),
+                requestKey = json.optString("requestKey", json.getString("swapId")),
+                paymentInput = json.optString("paymentInput", json.optString("invoice")),
+                lockupAddress = json.getString("lockupAddress"),
+                lockupAmountSats = json.getLong("lockupAmountSats"),
+                refundAddress = json.optString("refundAddress", ""),
+                snapshot =
+                    json.optString("snapshot", "").takeIf {
+                        it.isNotBlank() && !json.isNull("snapshot")
+                    },
+                requestedAmountSats =
+                    json.optLong("requestedAmountSats").takeIf {
+                        !json.isNull("requestedAmountSats")
+                    },
+                resolvedPaymentInput =
+                    json.optString("resolvedPaymentInput", "").takeIf {
+                        it.isNotBlank() && !json.isNull("resolvedPaymentInput")
+                    },
+                fetchedInvoice =
+                    json.optString("fetchedInvoice", "").takeIf {
+                        it.isNotBlank() && !json.isNull("fetchedInvoice")
+                    },
+                refundPublicKey =
+                    json.optString("refundPublicKey", "").takeIf {
+                        it.isNotBlank() && !json.isNull("refundPublicKey")
+                    },
+                paymentAmountSats = json.optLong("paymentAmountSats", 0L),
+                swapFeeSats = json.optLong("swapFeeSats", 0L),
+                createdAt = json.optLong("createdAt", System.currentTimeMillis()),
+                phase = runCatching {
+                    PendingLightningPaymentPhase.valueOf(
+                        json.optString("phase", PendingLightningPaymentPhase.PREPARED.name),
+                    )
+                }.getOrDefault(PendingLightningPaymentPhase.PREPARED),
+                status = json.optString("status", ""),
+                fundingTxid =
+                    json.optString("fundingTxid", "").takeIf {
+                        it.isNotBlank() && !json.isNull("fundingTxid")
+                    },
+            )
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    fun deletePendingLightningPaymentSession(walletId: String) {
+        regularPrefs.edit(commit = true) {
+            remove("${KEY_PENDING_BOLTZ_LIGHTNING_PAYMENT_PREFIX}$walletId")
+        }
+    }
+
     // ==================== Transaction First-Seen Timestamps ====================
 
     /**
@@ -1047,6 +2096,43 @@ class SecureStorage(private val context: Context) {
         txid: String,
     ) {
         val key = "${KEY_TX_FIRST_SEEN_PREFIX}${walletId}_$txid"
+        regularPrefs.edit { remove(key) }
+    }
+
+    /**
+     * Persist a pending RBF replacement mapping so the superseded tx can be
+     * hidden from history until the canonical wallet state catches up.
+     */
+    fun savePendingReplacementTransaction(
+        walletId: String,
+        originalTxid: String,
+        replacementTxid: String,
+    ) {
+        val key = "${KEY_PENDING_REPLACEMENT_TX_PREFIX}${walletId}_$originalTxid"
+        regularPrefs.edit { putString(key, replacementTxid) }
+    }
+
+    /**
+     * Return wallet-local pending RBF replacement mappings (old txid -> new txid).
+     */
+    fun getPendingReplacementTransactions(walletId: String): Map<String, String> {
+        val prefix = "${KEY_PENDING_REPLACEMENT_TX_PREFIX}${walletId}_"
+        return regularPrefs.all.entries
+            .asSequence()
+            .filter { (key, value) -> key.startsWith(prefix) && value is String && value.isNotBlank() }
+            .associate { (key, value) ->
+                key.removePrefix(prefix) to (value as String)
+            }
+    }
+
+    /**
+     * Remove a pending RBF replacement mapping once it is no longer needed.
+     */
+    fun removePendingReplacementTransaction(
+        walletId: String,
+        originalTxid: String,
+    ) {
+        val key = "${KEY_PENDING_REPLACEMENT_TX_PREFIX}${walletId}_$originalTxid"
         regularPrefs.edit { remove(key) }
     }
 
@@ -1101,6 +2187,9 @@ class SecureStorage(private val context: Context) {
         val jsonArray = JSONArray(outpoints.toList())
         regularPrefs.edit { putString(key, jsonArray.toString()) }
     }
+
+    fun setFrozenUtxosForWallet(walletId: String, outpoints: Set<String>) =
+        saveFrozenUtxos(walletId, outpoints)
 
     // ==================== Security Settings ====================
 
@@ -1624,6 +2713,14 @@ class SecureStorage(private val context: Context) {
     }
 
     companion object {
+        @Volatile
+        private var instance: SecureStorage? = null
+
+        fun getInstance(context: Context): SecureStorage =
+            instance ?: synchronized(this) {
+                instance ?: SecureStorage(context.applicationContext).also { instance = it }
+            }
+
         private const val SECURE_PREFS_FILE = "ibis_secure_prefs"
         private const val REGULAR_PREFS_FILE = "ibis_prefs"
 
@@ -1643,6 +2740,7 @@ class SecureStorage(private val context: Context) {
         private const val KEY_NETWORK = "wallet_network"
         private const val KEY_LAST_SYNC_PREFIX = "last_sync_time_"
         private const val KEY_NEEDS_FULL_SYNC_PREFIX = "needs_full_sync_"
+        private const val KEY_LIQUID_NEEDS_FULL_SYNC_PREFIX = "liquid_needs_full_sync_"
         private const val KEY_LAST_FULL_SYNC_PREFIX = "last_full_sync_time_"
 
         // Multi-server keys
@@ -1653,6 +2751,7 @@ class SecureStorage(private val context: Context) {
         private const val KEY_DEFAULT_SERVERS_SEEDED = "default_servers_seeded"
         private const val KEY_AUTO_SWITCH_SERVER = "auto_switch_server"
         private const val KEY_USER_DISCONNECTED = "user_disconnected"
+        private const val KEY_LIQUID_USER_DISCONNECTED = "liquid_user_disconnected"
 
         // Sync settings
         private const val KEY_SYNC_BATCH_SIZE = "sync_batch_size"
@@ -1662,8 +2761,17 @@ class SecureStorage(private val context: Context) {
 
         // Display settings
         private const val KEY_DENOMINATION = "denomination"
+        private const val KEY_LAYER1_DENOMINATION = "layer1_denomination"
+        private const val KEY_LAYER2_DENOMINATION = "layer2_denomination"
         const val DENOMINATION_BTC = "BTC"
         const val DENOMINATION_SATS = "SATS"
+
+        // Swipe navigation
+        private const val KEY_SWIPE_MODE = "swipe_mode"
+        const val SWIPE_MODE_DISABLED = "DISABLED"
+        const val SWIPE_MODE_SEND_RECEIVE = "SEND_RECEIVE"
+        const val SWIPE_MODE_WALLETS = "WALLETS"
+        const val SWIPE_MODE_LAYERS = "LAYERS"
 
         // Mempool server settings
         private const val KEY_MEMPOOL_SERVER = "mempool_server"
@@ -1672,6 +2780,15 @@ class SecureStorage(private val context: Context) {
         const val MEMPOOL_SPACE = "MEMPOOL_SPACE"
         const val MEMPOOL_ONION = "MEMPOOL_ONION"
         const val MEMPOOL_CUSTOM = "MEMPOOL_CUSTOM"
+
+        // Layer 2 liquid explorer settings
+        private const val KEY_LIQUID_EXPLORER = "liquid_explorer"
+        private const val KEY_LIQUID_EXPLORER_CUSTOM_URL = "liquid_explorer_custom_url"
+        const val LIQUID_EXPLORER_DISABLED = "LIQUID_EXPLORER_DISABLED"
+        const val LIQUID_EXPLORER_LIQUID_NETWORK = "LIQUID_EXPLORER_LIQUID_NETWORK"
+        const val LIQUID_EXPLORER_LIQUID_NETWORK_ONION = "LIQUID_EXPLORER_LIQUID_NETWORK_ONION"
+        const val LIQUID_EXPLORER_BLOCKSTREAM = "LIQUID_EXPLORER_BLOCKSTREAM"
+        const val LIQUID_EXPLORER_CUSTOM = "LIQUID_EXPLORER_CUSTOM"
 
         // Fee estimation settings
         private const val KEY_FEE_SOURCE = "fee_source"
@@ -1689,23 +2806,54 @@ class SecureStorage(private val context: Context) {
         const val PRICE_SOURCE_MEMPOOL_ONION = "MEMPOOL_ONION"
         const val PRICE_SOURCE_COINGECKO = "COINGECKO"
 
+        // Layer 2 external service settings
+        private const val KEY_BOLTZ_API_SOURCE = "boltz_api_source"
+        private const val KEY_SIDESWAP_API_SOURCE = "sideswap_api_source"
+        private const val KEY_PREFERRED_SWAP_SERVICE = "preferred_swap_service"
+        const val BOLTZ_API_DISABLED = "BOLTZ_DISABLED"
+        const val BOLTZ_API_CLEARNET = "BOLTZ_CLEARNET"
+        const val BOLTZ_API_TOR = "BOLTZ_TOR"
+        const val SIDESWAP_API_CLEARNET = "SIDESWAP_CLEARNET"
+        const val SIDESWAP_API_TOR = "SIDESWAP_TOR"
+        const val SIDESWAP_API_DISABLED = "SIDESWAP_DISABLED"
+
         // Address labels
         private const val KEY_ADDRESS_LABEL_PREFIX = "address_label_"
+        private const val KEY_LIQUID_ADDRESS_LABEL_PREFIX = "liquid_address_label_"
 
         // Transaction labels
         private const val KEY_TX_LABEL_PREFIX = "tx_label_"
+        private const val KEY_LIQUID_TX_LABEL_PREFIX = "liquid_tx_label_"
+        private const val KEY_LIQUID_TX_SOURCE_PREFIX = "liquid_tx_source_"
+        private const val KEY_LIQUID_TX_SWAP_DETAILS_PREFIX = "liquid_tx_swap_details_"
+        private const val KEY_PENDING_LIQUID_LIGHTNING_RECEIVE_ADDRESS_PREFIX = "pending_liquid_ln_receive_address_"
+        private const val KEY_PENDING_LIQUID_LIGHTNING_RECEIVE_LABEL_PREFIX = "pending_liquid_ln_receive_label_"
+        private const val KEY_PENDING_SWAP_PREFIX = "pending_swap_"
+        private const val KEY_PENDING_SWAP_SNAPSHOT_PREFIX = "pending_swap_snapshot_"
+        private const val KEY_BOLTZ_CHAIN_SWAP_DRAFT_PREFIX = "boltz_chain_swap_draft_"
+        private const val KEY_BOLTZ_CHAIN_SWAP_SNAPSHOT_PREFIX = "boltz_chain_swap_snapshot_"
+        private const val KEY_BOLTZ_SESSION_NEXT_INDEX_PREFIX = "boltz_session_next_index_"
+        private const val KEY_PENDING_BOLTZ_LIGHTNING_INVOICE_PREFIX = "pending_boltz_ln_invoice_"
+        private const val KEY_PENDING_BOLTZ_LIGHTNING_PAYMENT_PREFIX = "pending_boltz_ln_payment_"
+        private const val KEY_LIQUID_SCRIPT_HASH_STATUS_INDEX_PREFIX = "liquid_script_hash_status_index_"
+        private const val KEY_LIQUID_SCRIPT_HASH_STATUS_ENTRY_PREFIX = "liquid_script_hash_status_entry_"
+        private const val LIQUID_SCRIPT_HASH_STATUS_NULL_SENTINEL = "__NULL__"
 
         // Pending PSBT labels (for watch-only wallet transactions awaiting signing)
         private const val KEY_PENDING_PSBT_LABEL_PREFIX = "pending_psbt_label_"
 
         // Transaction first-seen timestamps (for pending txs)
         private const val KEY_TX_FIRST_SEEN_PREFIX = "tx_first_seen_"
+        private const val KEY_PENDING_REPLACEMENT_TX_PREFIX = "pending_replacement_tx_"
 
         // Spend only confirmed UTXOs
         private const val KEY_SPEND_UNCONFIRMED = "spend_unconfirmed"
 
         // NFC broadcasting
         private const val KEY_NFC_ENABLED = "nfc_enabled"
+        private const val KEY_WALLET_NOTIFICATIONS_ENABLED = "wallet_notifications_enabled"
+        private const val KEY_NOTIFIED_TXIDS_PREFIX = "notified_txids_"
+        private const val KEY_NOTIFIED_LIQUID_TXIDS_PREFIX = "notified_liquid_txids_"
 
         // Frozen UTXOs
         private const val KEY_FROZEN_UTXOS_PREFIX = "frozen_utxos_"
@@ -1743,5 +2891,255 @@ class SecureStorage(private val context: Context) {
         private const val KEY_DURESS_ENABLED = "duress_enabled"
         private const val KEY_DURESS_WALLET_ID = "duress_wallet_id"
         private const val KEY_REAL_WALLET_ID = "real_wallet_id"
+
+        // Layer 2 (Liquid)
+        private const val KEY_LAYER2_ENABLED = "layer2_enabled"
+        private const val KEY_LIQUID_ENABLED_PREFIX = "liquid_enabled_"
+        private const val KEY_ACTIVE_LAYER_PREFIX = "active_layer_"
+        private const val KEY_LIQUID_SERVER_IDS = "liquid_server_ids"
+        private const val KEY_ACTIVE_LIQUID_SERVER = "active_liquid_server_id"
+        private const val KEY_LIQUID_SERVER_SELECTED_BY_USER = "liquid_server_selected_by_user"
+        private const val KEY_LIQUID_SERVER_PREFIX = "liquid_server_"
+        private const val KEY_LIQUID_DEFAULT_SERVERS_SEEDED = "liquid_default_servers_seeded"
+        private const val KEY_LIQUID_DESCRIPTOR_PREFIX = "liquid_descriptor_"
+        private const val KEY_LIQUID_SCRIPT_HASH_STATUS_PREFIX = "liquid_script_hash_status_"
     }
+
+    // ════════════════════════════════════════════
+    // Layer 2 (Liquid) persistence
+    // ════════════════════════════════════════════
+
+    /** Global Layer 2 toggle (Settings → Layer 2) */
+    fun isLayer2Enabled(): Boolean = regularPrefs.getBoolean(KEY_LAYER2_ENABLED, false)
+
+    fun setLayer2Enabled(enabled: Boolean) {
+        regularPrefs.edit { putBoolean(KEY_LAYER2_ENABLED, enabled) }
+    }
+
+    /** Per-wallet Liquid support toggle */
+    fun isLiquidEnabledForWallet(walletId: String): Boolean =
+        regularPrefs.getBoolean("${KEY_LIQUID_ENABLED_PREFIX}$walletId", false)
+
+    fun setLiquidEnabledForWallet(walletId: String, enabled: Boolean) {
+        regularPrefs.edit { putBoolean("${KEY_LIQUID_ENABLED_PREFIX}$walletId", enabled) }
+    }
+
+    /** Active layer per wallet (persisted across restarts) */
+    fun getActiveLayer(walletId: String): String =
+        regularPrefs.getString("${KEY_ACTIVE_LAYER_PREFIX}$walletId", "LAYER1") ?: "LAYER1"
+
+    fun setActiveLayer(walletId: String, layer: String) {
+        regularPrefs.edit { putString("${KEY_ACTIVE_LAYER_PREFIX}$walletId", layer) }
+    }
+
+    /** Liquid CT descriptor (stored in encrypted prefs) */
+    fun getLiquidDescriptor(walletId: String): String? =
+        securePrefs.getString("${KEY_LIQUID_DESCRIPTOR_PREFIX}$walletId", null)
+
+    fun setLiquidDescriptor(walletId: String, descriptor: String) {
+        securePrefs.edit { putString("${KEY_LIQUID_DESCRIPTOR_PREFIX}$walletId", descriptor) }
+    }
+
+    fun removeLiquidDescriptor(walletId: String) {
+        securePrefs.edit { remove("${KEY_LIQUID_DESCRIPTOR_PREFIX}$walletId") }
+    }
+
+    /**
+     * Persist Liquid Electrum script-hash statuses for smart sync.
+     */
+    fun saveLiquidScriptHashStatuses(
+        walletId: String,
+        statuses: Map<String, String?>,
+    ) {
+        if (statuses.isEmpty()) {
+            clearLiquidScriptHashStatuses(walletId)
+            return
+        }
+
+        val existing = getLiquidScriptHashStatuses(walletId)
+        if (existing == statuses) return
+
+        val removed = existing.keys - statuses.keys
+        val indexJson = JSONArray(statuses.keys.toList()).toString()
+        regularPrefs.edit {
+            removed.forEach { scriptHash ->
+                remove(liquidScriptHashStatusEntryKey(walletId, scriptHash))
+            }
+            statuses.forEach { (scriptHash, status) ->
+                if (existing[scriptHash] != status) {
+                    putString(liquidScriptHashStatusEntryKey(walletId, scriptHash), encodeLiquidScriptHashStatus(status))
+                }
+            }
+            putString(liquidScriptHashStatusIndexKey(walletId), indexJson)
+            remove(liquidScriptHashStatusBlobKey(walletId))
+        }
+    }
+
+    /**
+     * Load the last fully processed Liquid Electrum script-hash snapshot.
+     */
+    fun getLiquidScriptHashStatuses(walletId: String): Map<String, String?> {
+        val indexRaw = regularPrefs.getString(liquidScriptHashStatusIndexKey(walletId), null)
+        if (indexRaw != null) {
+            return try {
+                val index = JSONArray(indexRaw)
+                buildMap {
+                    for (i in 0 until index.length()) {
+                        val scriptHash = index.getString(i)
+                        val encoded = regularPrefs.getString(liquidScriptHashStatusEntryKey(walletId, scriptHash), null) ?: continue
+                        put(scriptHash, decodeLiquidScriptHashStatus(encoded))
+                    }
+                }
+            } catch (_: Exception) {
+                emptyMap()
+            }
+        }
+
+        val raw = regularPrefs.getString(liquidScriptHashStatusBlobKey(walletId), null) ?: return emptyMap()
+        return parseLegacyLiquidScriptHashStatuses(raw)
+    }
+
+    fun clearLiquidScriptHashStatuses(walletId: String) {
+        val indexRaw = regularPrefs.getString(liquidScriptHashStatusIndexKey(walletId), null)
+        regularPrefs.edit {
+            if (indexRaw != null) {
+                runCatching { JSONArray(indexRaw) }
+                    .getOrNull()
+                    ?.let { index ->
+                        for (i in 0 until index.length()) {
+                            remove(liquidScriptHashStatusEntryKey(walletId, index.getString(i)))
+                        }
+                    }
+            }
+            remove(liquidScriptHashStatusIndexKey(walletId))
+            remove(liquidScriptHashStatusBlobKey(walletId))
+        }
+    }
+
+    private fun liquidScriptHashStatusBlobKey(walletId: String): String =
+        "${KEY_LIQUID_SCRIPT_HASH_STATUS_PREFIX}$walletId"
+
+    private fun liquidScriptHashStatusIndexKey(walletId: String): String =
+        "${KEY_LIQUID_SCRIPT_HASH_STATUS_INDEX_PREFIX}$walletId"
+
+    private fun liquidScriptHashStatusEntryKey(walletId: String, scriptHash: String): String =
+        "${KEY_LIQUID_SCRIPT_HASH_STATUS_ENTRY_PREFIX}${walletId}_$scriptHash"
+
+    private fun encodeLiquidScriptHashStatus(status: String?): String =
+        status ?: LIQUID_SCRIPT_HASH_STATUS_NULL_SENTINEL
+
+    private fun decodeLiquidScriptHashStatus(encoded: String): String? =
+        if (encoded == LIQUID_SCRIPT_HASH_STATUS_NULL_SENTINEL) null else encoded
+
+    private fun parseLegacyLiquidScriptHashStatuses(raw: String): Map<String, String?> {
+        return try {
+            val json = JSONObject(raw)
+            buildMap {
+                val keys = json.keys()
+                while (keys.hasNext()) {
+                    val scriptHash = keys.next()
+                    put(
+                        scriptHash,
+                        if (json.isNull(scriptHash)) null else json.getString(scriptHash),
+                    )
+                }
+            }
+        } catch (_: Exception) {
+            emptyMap()
+        }
+    }
+
+    // ── Liquid server management ──
+
+    fun getLiquidServerIds(): List<String> {
+        val raw = regularPrefs.getString(KEY_LIQUID_SERVER_IDS, "") ?: ""
+        return if (raw.isBlank()) emptyList() else raw.split(",")
+    }
+
+    private fun saveLiquidServerIds(ids: List<String>) {
+        regularPrefs.edit { putString(KEY_LIQUID_SERVER_IDS, ids.joinToString(",")) }
+    }
+
+    fun getActiveLiquidServerId(): String? =
+        regularPrefs.getString(KEY_ACTIVE_LIQUID_SERVER, null)
+
+    fun setActiveLiquidServerId(id: String?) {
+        regularPrefs.edit {
+            if (id == null) remove(KEY_ACTIVE_LIQUID_SERVER)
+            else putString(KEY_ACTIVE_LIQUID_SERVER, id)
+        }
+    }
+
+    fun hasUserSelectedLiquidServer(): Boolean =
+        regularPrefs.getBoolean(KEY_LIQUID_SERVER_SELECTED_BY_USER, false)
+
+    fun setUserSelectedLiquidServer(selected: Boolean) {
+        regularPrefs.edit { putBoolean(KEY_LIQUID_SERVER_SELECTED_BY_USER, selected) }
+    }
+
+    fun saveLiquidServer(config: github.aeonbtc.ibiswallet.data.model.LiquidElectrumConfig) {
+        val json = JSONObject().apply {
+            put("id", config.id)
+            put("name", config.name)
+            put("url", config.url)
+            put("port", config.port)
+            put("useSsl", config.useSsl)
+            put("useTor", config.useTor)
+        }
+        regularPrefs.edit { putString("${KEY_LIQUID_SERVER_PREFIX}${config.id}", json.toString()) }
+        val ids = getLiquidServerIds().toMutableList()
+        if (config.id !in ids) {
+            ids.add(config.id)
+            saveLiquidServerIds(ids)
+        }
+    }
+
+    fun getLiquidServer(id: String): github.aeonbtc.ibiswallet.data.model.LiquidElectrumConfig? {
+        val raw = regularPrefs.getString("${KEY_LIQUID_SERVER_PREFIX}$id", null) ?: return null
+        return try {
+            val j = JSONObject(raw)
+            github.aeonbtc.ibiswallet.data.model.LiquidElectrumConfig(
+                id = j.getString("id"),
+                name = j.optString("name", ""),
+                url = j.getString("url"),
+                port = j.optInt("port", 995),
+                useSsl = j.optBoolean("useSsl", true),
+                useTor = j.optBoolean("useTor", false),
+            )
+        } catch (_: Exception) { null }
+    }
+
+    fun getAllLiquidServers(): List<github.aeonbtc.ibiswallet.data.model.LiquidElectrumConfig> =
+        getLiquidServerIds().mapNotNull { getLiquidServer(it) }
+
+    fun removeLiquidServer(id: String) {
+        regularPrefs.edit { remove("${KEY_LIQUID_SERVER_PREFIX}$id") }
+        saveLiquidServerIds(getLiquidServerIds().filter { it != id })
+        if (getActiveLiquidServerId() == id) {
+            setActiveLiquidServerId(null)
+            setUserSelectedLiquidServer(false)
+        }
+    }
+
+    fun isLiquidDefaultServersSeeded(): Boolean =
+        regularPrefs.getBoolean(KEY_LIQUID_DEFAULT_SERVERS_SEEDED, false)
+
+    fun setLiquidDefaultServersSeeded() {
+        regularPrefs.edit { putBoolean(KEY_LIQUID_DEFAULT_SERVERS_SEEDED, true) }
+    }
+
+    /** Liquid Tor toggle (force Tor for clearnet Liquid servers) */
+    fun isLiquidTorEnabled(): Boolean = regularPrefs.getBoolean("liquid_tor_enabled", false)
+
+    fun setLiquidTorEnabled(enabled: Boolean) {
+        regularPrefs.edit { putBoolean("liquid_tor_enabled", enabled) }
+    }
+
+    /** Auto-switch to next Liquid server on disconnect */
+    fun isLiquidAutoSwitchEnabled(): Boolean = regularPrefs.getBoolean("liquid_auto_switch", false)
+
+    fun setLiquidAutoSwitchEnabled(enabled: Boolean) {
+        regularPrefs.edit { putBoolean("liquid_auto_switch", enabled) }
+    }
+
 }

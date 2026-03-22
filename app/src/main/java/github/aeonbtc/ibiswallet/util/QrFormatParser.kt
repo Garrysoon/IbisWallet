@@ -15,7 +15,7 @@ import java.security.MessageDigest
  * - Standard SeedQR: 48 or 96 digits (BIP39 word indices, 4 digits each, zero-padded)
  * - CompactSeedQR: 16 or 32 raw bytes (BIP39 entropy as binary QR)
  * - Plain BIP39 mnemonic: space-separated words
- * - Extended public keys: xpub/ypub/zpub/tpub/vpub/upub (bare or with origin info)
+ * - Extended public keys: xpub/zpub (bare or with origin info)
  * - Output descriptors: wpkh(...), tr(...), etc.
  * - ColdCard JSON: {"xfp": "...", "p2wpkh": "zpub...", ...}
  * - Specter JSON: {"MasterFingerprint": "...", "ExtPubKey": "xpub...", ...}
@@ -74,7 +74,11 @@ object QrFormatParser {
         // 3. ColdCard / Specter / generic JSON format
         if (trimmed.startsWith("{")) {
             val parsed = parseColdCardJson(trimmed, addressType)
-            if (parsed != null) return parsed
+            if (parsed != null) {
+                BitcoinUtils.unsupportedNestedSegwitReason(parsed)?.let { throw IllegalArgumentException(it) }
+                BitcoinUtils.unsupportedNonMainnetReason(parsed)?.let { throw IllegalArgumentException(it) }
+                return parsed
+            }
         }
 
         // 4. Abbreviated mnemonic: ColdCard exports seed words truncated to first 4 letters.
@@ -83,6 +87,8 @@ object QrFormatParser {
         if (expanded != trimmed) return expanded
 
         // 5. Already a plain mnemonic, xpub, descriptor, or origin-prefixed key — pass through
+        BitcoinUtils.unsupportedNonMainnetReason(trimmed)?.let { throw IllegalArgumentException(it) }
+        BitcoinUtils.unsupportedNestedSegwitReason(trimmed)?.let { throw IllegalArgumentException(it) }
         return trimmed
     }
 
@@ -275,7 +281,6 @@ object QrFormatParser {
         val (keyField, derivField) =
             when (addressType) {
                 AddressType.SEGWIT -> "p2wpkh" to "p2wpkh_deriv"
-                AddressType.NESTED_SEGWIT -> "p2sh_p2wpkh" to "p2sh_p2wpkh_deriv"
                 AddressType.LEGACY -> "p2pkh" to "p2pkh_deriv"
                 AddressType.TAPROOT -> "p2tr" to "p2tr_deriv"
             }
@@ -290,7 +295,6 @@ object QrFormatParser {
                 listOf(
                     "p2wpkh" to "p2wpkh_deriv",
                     "p2tr" to "p2tr_deriv",
-                    "p2sh_p2wpkh" to "p2sh_p2wpkh_deriv",
                     "p2pkh" to "p2pkh_deriv",
                 )
             for ((kf, df) in fallbacks) {
@@ -301,6 +305,10 @@ object QrFormatParser {
                     break
                 }
             }
+        }
+
+        if (key == null && obj.optString("p2sh_p2wpkh", "").isNotBlank()) {
+            throw IllegalArgumentException(BitcoinUtils.UNSUPPORTED_NESTED_SEGWIT_MESSAGE)
         }
 
         if (key == null) return null

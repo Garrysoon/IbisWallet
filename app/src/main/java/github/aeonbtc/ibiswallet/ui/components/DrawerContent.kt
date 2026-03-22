@@ -13,9 +13,11 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountBalanceWallet
-import androidx.compose.material.icons.filled.Cloud
+import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.SaveAlt
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -29,9 +31,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import github.aeonbtc.ibiswallet.BuildConfig
-import github.aeonbtc.ibiswallet.ui.theme.BitcoinOrange
 import github.aeonbtc.ibiswallet.ui.theme.BorderColor
 import github.aeonbtc.ibiswallet.ui.theme.DarkSurface
+import github.aeonbtc.ibiswallet.ui.theme.DrawerIconColor
 import github.aeonbtc.ibiswallet.ui.theme.TextSecondary
 
 sealed class DrawerItem(
@@ -44,8 +46,8 @@ sealed class DrawerItem(
     )
 
     data object ElectrumServer : DrawerItem(
-        title = "Electrum Server",
-        icon = Icons.Default.Cloud,
+        title = "Electrum Servers",
+        icon = Icons.Default.Dns,
     )
 
     data object Settings : DrawerItem(
@@ -53,9 +55,19 @@ sealed class DrawerItem(
         icon = Icons.Default.Settings,
     )
 
+    data object Layer2Options : DrawerItem(
+        title = "Layer 2",
+        icon = Icons.Default.Layers,
+    )
+
     data object Security : DrawerItem(
         title = "Security",
         icon = Icons.Default.Lock,
+    )
+
+    data object BackupRestore : DrawerItem(
+        title = "Backup / Restore",
+        icon = Icons.Default.SaveAlt,
     )
 
     data object About : DrawerItem(
@@ -64,14 +76,22 @@ sealed class DrawerItem(
     )
 }
 
-val drawerItems =
+/** Base drawer items (always shown) */
+private val baseDrawerItems =
     listOf(
         DrawerItem.ManageWallets,
         DrawerItem.ElectrumServer,
-        DrawerItem.Settings,
-        DrawerItem.Security,
-        DrawerItem.About,
     )
+
+/** Drawer items shown in the main menu */
+fun getDrawerItems(): List<DrawerItem> = buildList {
+    addAll(baseDrawerItems)
+    add(DrawerItem.Security)
+    add(DrawerItem.Settings)
+    add(DrawerItem.Layer2Options)
+    add(DrawerItem.BackupRestore)
+    add(DrawerItem.About)
+}
 
 @Composable
 fun DrawerContent(
@@ -114,7 +134,7 @@ fun DrawerContent(
             Spacer(modifier = Modifier.height(16.dp))
 
             // Menu items
-            drawerItems.forEach { item ->
+            getDrawerItems().forEach { item ->
                 DrawerMenuItem(
                     item = item,
                     onClick = { onItemClick(item) },
@@ -132,7 +152,7 @@ fun DrawerContent(
             Spacer(modifier = Modifier.height(16.dp))
 
             Text(
-                text = "Version ${BuildConfig.VERSION_NAME}",
+                text = "v${BuildConfig.VERSION_NAME}",
                 style = MaterialTheme.typography.bodyMedium,
                 color = TextSecondary.copy(alpha = 0.6f),
                 modifier = Modifier.padding(horizontal = 24.dp),
@@ -159,7 +179,7 @@ private fun DrawerMenuItem(
         Icon(
             imageVector = item.icon,
             contentDescription = item.title,
-            tint = BitcoinOrange,
+            tint = DrawerIconColor,
             modifier = Modifier.size(24.dp),
         )
 

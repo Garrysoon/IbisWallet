@@ -29,6 +29,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Visibility
@@ -50,9 +51,12 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
+import github.aeonbtc.ibiswallet.data.model.SeedFormat
 import github.aeonbtc.ibiswallet.data.model.StoredWallet
 import github.aeonbtc.ibiswallet.ui.theme.BitcoinOrange
 import github.aeonbtc.ibiswallet.ui.theme.BorderColor
+import github.aeonbtc.ibiswallet.ui.theme.ErrorRed
+import github.aeonbtc.ibiswallet.ui.theme.LiquidTeal
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -67,7 +71,6 @@ import github.aeonbtc.ibiswallet.ui.theme.TextTertiary
 @Composable
 fun WalletSelectorDropdown(
     activeWallet: StoredWallet?,
-    wallets: List<StoredWallet>,
     expanded: Boolean,
     onToggle: () -> Unit,
     modifier: Modifier = Modifier,
@@ -123,6 +126,11 @@ fun WalletSelectorPanel(
     onFullSync: (StoredWallet) -> Unit = {},
     syncingWalletId: String? = null,
     lastFullSyncTimes: Map<String, Long?> = emptyMap(),
+    layer2Enabled: Boolean = false,
+    isLiquidEnabledForWallet: (String) -> Boolean = { false },
+    onSetLiquidEnabledForWallet: (String, Boolean) -> Unit = { _, _ -> },
+    isWalletLockAvailable: Boolean = false,
+    onSetWalletLocked: (String, Boolean) -> Unit = { _, _ -> },
 ) {
     // Scrim + panel
     if (expanded) {
@@ -182,6 +190,9 @@ fun WalletSelectorPanel(
                                 isActive = isActive,
                                 isSyncing = syncingWalletId == wallet.id,
                                 lastFullSyncTime = lastFullSyncTimes[wallet.id],
+                                layer2Enabled = layer2Enabled,
+                                isLiquidEnabled = isLiquidEnabledForWallet(wallet.id),
+                                isWalletLockAvailable = isWalletLockAvailable,
                                 onClick = {
                                     if (!isActive) {
                                         onSelectWallet(wallet.id)
@@ -189,6 +200,12 @@ fun WalletSelectorPanel(
                                     onDismiss()
                                 },
                                 onSync = { onFullSync(wallet) },
+                                onSetLiquidEnabled = { enabled ->
+                                    onSetLiquidEnabledForWallet(wallet.id, enabled)
+                                },
+                                onSetWalletLocked = { locked ->
+                                    onSetWalletLocked(wallet.id, locked)
+                                },
                             )
                             HorizontalDivider(
                                 color = BorderColor,
@@ -226,6 +243,10 @@ fun WalletSelectorPanel(
                     }
 
                     Spacer(modifier = Modifier.height(4.dp))
+                    HorizontalDivider(
+                        color = Color.White.copy(alpha = 0.4f),
+                        thickness = 0.5.dp,
+                    )
                 }
             }
         }
@@ -238,9 +259,17 @@ private fun WalletPanelItem(
     isActive: Boolean,
     isSyncing: Boolean = false,
     lastFullSyncTime: Long? = null,
+    layer2Enabled: Boolean = false,
+    isLiquidEnabled: Boolean = false,
+    isWalletLockAvailable: Boolean = false,
     onClick: () -> Unit,
     onSync: () -> Unit = {},
+    onSetLiquidEnabled: (Boolean) -> Unit = {},
+    onSetWalletLocked: (Boolean) -> Unit = {},
 ) {
+    val liquidToggleEnabled = !wallet.isLocked
+    val lockedPrimaryTextColor = ErrorRed.copy(alpha = 0.85f)
+    val lockedSecondaryTextColor = ErrorRed.copy(alpha = 0.6f)
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier =
@@ -267,7 +296,9 @@ private fun WalletPanelItem(
                             fontWeight = if (isActive) FontWeight.SemiBold else FontWeight.Normal,
                         ),
                     color =
-                        if (isActive) {
+                        if (wallet.isLocked) {
+                            lockedPrimaryTextColor
+                        } else if (isActive) {
                             BitcoinOrange
                         } else {
                             MaterialTheme.colorScheme.onBackground
@@ -275,6 +306,15 @@ private fun WalletPanelItem(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
+                if (wallet.isLocked) {
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Icon(
+                        imageVector = Icons.Default.Lock,
+                        contentDescription = "Locked wallet",
+                        tint = lockedPrimaryTextColor,
+                        modifier = Modifier.size(14.dp),
+                    )
+                }
                 Spacer(modifier = Modifier.width(6.dp))
                 val isWatchAddress = wallet.derivationPath == "single" && wallet.isWatchOnly
                 val isPrivateKey = wallet.derivationPath == "single" && !wallet.isWatchOnly
@@ -283,7 +323,9 @@ private fun WalletPanelItem(
                         imageVector = Icons.Default.Visibility,
                         contentDescription = if (isWatchAddress) "Watch Address" else "Watch Only",
                         tint =
-                            if (isActive) {
+                            if (wallet.isLocked) {
+                                lockedPrimaryTextColor
+                            } else if (isActive) {
                                 BitcoinOrange
                             } else {
                                 TextSecondary
@@ -294,7 +336,9 @@ private fun WalletPanelItem(
                         imageVector = Icons.Default.Key,
                         contentDescription = if (isPrivateKey) "Private Key" else "Seed Phrase",
                         tint =
-                            if (isActive) {
+                            if (wallet.isLocked) {
+                                lockedPrimaryTextColor
+                            } else if (isActive) {
                                 BitcoinOrange
                             } else {
                                 TextSecondary
@@ -312,28 +356,106 @@ private fun WalletPanelItem(
             }
             Text(
                 text = "${wallet.addressType.displayName}  -  $walletKind",
-                style = MaterialTheme.typography.bodyLarge.copy(fontSize = 14.sp),
-                color = if (isActive) BitcoinOrange else TextSecondary,
+                style = MaterialTheme.typography.bodyMedium.copy(fontSize = 15.sp, lineHeight = 21.sp),
+                color =
+                    if (wallet.isLocked) {
+                        lockedSecondaryTextColor
+                    } else if (isActive) {
+                        BitcoinOrange
+                    } else {
+                        TextSecondary
+                    },
             )
             if (wallet.derivationPath != "single" && wallet.masterFingerprint != null) {
                 Text(
                     text = "Fingerprint: ${wallet.masterFingerprint}",
-                    style = MaterialTheme.typography.bodyLarge.copy(fontSize = 14.sp),
-                    color = if (isActive) BitcoinOrange.copy(alpha = 0.8f) else TextTertiary.copy(alpha = 0.9f),
+                    style = MaterialTheme.typography.bodySmall.copy(fontSize = 14.sp, lineHeight = 18.sp),
+                    color =
+                        if (wallet.isLocked) {
+                            lockedSecondaryTextColor
+                        } else if (isActive) {
+                            BitcoinOrange.copy(alpha = 0.9f)
+                        } else {
+                            TextTertiary
+                        },
                 )
             }
             val syncText =
                 if (lastFullSyncTime != null) {
-                    val formatter = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault())
+                    val formatter = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
                     "Last full sync: ${formatter.format(Date(lastFullSyncTime))}"
                 } else {
                     "Never fully synced"
                 }
+            val showLiquidToggle =
+                layer2Enabled &&
+                    !wallet.isWatchOnly &&
+                    wallet.derivationPath != "single" &&
+                    wallet.seedFormat == SeedFormat.BIP39
             Text(
                 text = syncText,
-                style = MaterialTheme.typography.bodyLarge.copy(fontSize = 14.sp),
-                color = if (isActive) BitcoinOrange.copy(alpha = 0.8f) else TextTertiary.copy(alpha = 0.9f),
+                style = MaterialTheme.typography.bodySmall.copy(fontSize = 14.sp, lineHeight = 18.sp),
+                color =
+                    if (wallet.isLocked) {
+                        lockedSecondaryTextColor
+                    } else if (isActive) {
+                        BitcoinOrange.copy(alpha = 0.9f)
+                    } else {
+                        TextTertiary
+                    },
             )
+            if (isWalletLockAvailable || showLiquidToggle) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (isWalletLockAvailable) {
+                        Text(
+                            text = "Lock",
+                            style = MaterialTheme.typography.bodySmall.copy(fontSize = 14.sp, lineHeight = 18.sp),
+                            color = if (wallet.isLocked) lockedPrimaryTextColor else TextSecondary.copy(alpha = 0.8f),
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        SquareToggle(
+                            checked = wallet.isLocked,
+                            onCheckedChange = onSetWalletLocked,
+                            checkedColor = BitcoinOrange,
+                            trackWidth = 36.dp,
+                            trackHeight = 20.dp,
+                            thumbSize = 14.dp,
+                            thumbPadding = 3.dp,
+                        )
+                    }
+                    if (isWalletLockAvailable && showLiquidToggle) {
+                        Spacer(modifier = Modifier.width(16.dp))
+                    }
+                    if (showLiquidToggle) {
+                        Text(
+                            text = "Liquid",
+                            style = MaterialTheme.typography.bodySmall.copy(fontSize = 14.sp, lineHeight = 18.sp),
+                            color =
+                                if (liquidToggleEnabled && isLiquidEnabled) {
+                                    LiquidTeal
+                                } else if (wallet.isLocked) {
+                                    lockedSecondaryTextColor
+                                } else {
+                                    TextSecondary.copy(alpha = 0.8f)
+                                },
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        SquareToggle(
+                            checked = isLiquidEnabled,
+                            onCheckedChange = onSetLiquidEnabled,
+                            enabled = liquidToggleEnabled,
+                            checkedColor = LiquidTeal,
+                            trackWidth = 36.dp,
+                            trackHeight = 20.dp,
+                            thumbSize = 14.dp,
+                            thumbPadding = 3.dp,
+                        )
+                    }
+                }
+            }
         }
 
         Spacer(modifier = Modifier.width(8.dp))
@@ -343,7 +465,7 @@ private fun WalletPanelItem(
             contentAlignment = Alignment.Center,
             modifier =
                 Modifier
-                    .size(32.dp)
+                    .size(40.dp)
                     .clip(RoundedCornerShape(6.dp))
                     .background(DarkBackground.copy(alpha = 0.6f))
                     .clickable(enabled = !isSyncing) { onSync() },

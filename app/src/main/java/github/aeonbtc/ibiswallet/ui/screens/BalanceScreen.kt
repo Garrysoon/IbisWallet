@@ -4,10 +4,6 @@ package github.aeonbtc.ibiswallet.ui.screens
 
 import android.content.Intent
 import android.graphics.Bitmap
-import android.nfc.NfcAdapter
-import androidx.core.graphics.createBitmap
-import androidx.core.graphics.set
-import androidx.core.net.toUri
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -28,22 +24,21 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.CallMade
 import androidx.compose.material.icons.automirrored.filled.CallReceived
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.QrCode
 import androidx.compose.material.icons.filled.QrCodeScanner
-import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Replay
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
@@ -55,7 +50,6 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -69,6 +63,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableDoubleStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -79,25 +74,27 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.core.net.toUri
 import github.aeonbtc.ibiswallet.MainActivity
 import github.aeonbtc.ibiswallet.data.local.SecureStorage
-import github.aeonbtc.ibiswallet.data.model.FeeEstimateSource
 import github.aeonbtc.ibiswallet.data.model.FeeEstimationResult
 import github.aeonbtc.ibiswallet.data.model.TransactionDetails
 import github.aeonbtc.ibiswallet.data.model.WalletState
+import github.aeonbtc.ibiswallet.ui.components.FeeRateSection
 import github.aeonbtc.ibiswallet.ui.components.IbisButton
+import github.aeonbtc.ibiswallet.ui.components.MAX_FEE_RATE_SAT_VB
 import github.aeonbtc.ibiswallet.ui.components.QrScannerDialog
+import github.aeonbtc.ibiswallet.ui.components.StatusBadge
 import github.aeonbtc.ibiswallet.ui.components.formatFeeRate
 import github.aeonbtc.ibiswallet.ui.theme.AccentGreen
 import github.aeonbtc.ibiswallet.ui.theme.AccentRed
@@ -109,10 +106,11 @@ import github.aeonbtc.ibiswallet.ui.theme.DarkCard
 import github.aeonbtc.ibiswallet.ui.theme.DarkSurface
 import github.aeonbtc.ibiswallet.ui.theme.DarkSurfaceVariant
 import github.aeonbtc.ibiswallet.ui.theme.ErrorRed
-import github.aeonbtc.ibiswallet.ui.theme.SuccessGreen
 import github.aeonbtc.ibiswallet.ui.theme.TextSecondary
 import github.aeonbtc.ibiswallet.util.SecureClipboard
-import java.text.NumberFormat
+import github.aeonbtc.ibiswallet.util.generateQrBitmap
+import github.aeonbtc.ibiswallet.util.getNfcAvailability
+import github.aeonbtc.ibiswallet.util.matchesTimestampSearch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -121,8 +119,9 @@ import java.util.Locale
  * Method for speeding up a transaction
  */
 enum class SpeedUpMethod {
-    RBF, // Replace-By-Fee (for sent transactions)
-    CPFP, // Child-Pays-For-Parent (for received transactions)
+    RBF,
+    CPFP,
+    REDIRECT,
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -138,10 +137,12 @@ fun BalanceScreen(
     addressLabels: Map<String, String> = emptyMap(),
     transactionLabels: Map<String, String> = emptyMap(),
     feeEstimationState: FeeEstimationResult = FeeEstimationResult.Disabled,
+    minFeeRate: Double = 1.0,
     canBumpFee: (String) -> Boolean = { false },
     canCpfp: (String) -> Boolean = { false },
     onBumpFee: (String, Double) -> Unit = { _, _ -> },
     onCpfp: (String, Double) -> Unit = { _, _ -> },
+    onRedirectTransaction: (String, Double) -> Unit = { _, _ -> },
     onSaveTransactionLabel: (String, String) -> Unit = { _, _ -> },
     onFetchTxVsize: suspend (String) -> Double? = { null },
     onRefreshFees: () -> Unit = {},
@@ -168,19 +169,16 @@ fun BalanceScreen(
 
     val useSats = denomination == SecureStorage.DENOMINATION_SATS
 
-    // NFC passive read: enable foreground dispatch so tapping an NFC tag
-    // with a bitcoin address routes through pendingBitcoinUri -> Send screen.
+    // NFC reader mode: tapping an NFC tag with a bitcoin address or URI
+    // routes through pendingSendInput -> Send screen.
     val context = LocalContext.current
-    val nfcAvailable = remember {
-        NfcAdapter.getDefaultAdapter(context) != null &&
-            SecureStorage(context).isNfcEnabled()
-    }
+    val nfcAvailable = context.getNfcAvailability().canRead
     DisposableEffect(nfcAvailable) {
         if (nfcAvailable) {
-            (context as? MainActivity)?.enableNfcForegroundDispatch()
+            (context as? MainActivity)?.enableNfcReaderMode()
         }
         onDispose {
-            (context as? MainActivity)?.disableNfcForegroundDispatch()
+            (context as? MainActivity)?.disableNfcReaderMode()
         }
     }
 
@@ -202,12 +200,14 @@ fun BalanceScreen(
             canCpfp = txCanCpfp,
             availableBalance = walletState.balanceSats,
             feeEstimationState = feeEstimationState,
+            minFeeRate = minFeeRate,
             onFetchVsize = onFetchTxVsize,
             onRefreshFees = onRefreshFees,
             onSpeedUp = { method, feeRate ->
                 when (method) {
                     SpeedUpMethod.RBF -> onBumpFee(tx.txid, feeRate)
                     SpeedUpMethod.CPFP -> onCpfp(tx.txid, feeRate)
+                    SpeedUpMethod.REDIRECT -> onRedirectTransaction(tx.txid, feeRate)
                 }
             },
             onSaveLabel = { label -> onSaveTransactionLabel(tx.txid, label) },
@@ -252,6 +252,8 @@ fun BalanceScreen(
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             item {
+                val cardAccentColor = BitcoinOrange
+
                 Card(
                     modifier =
                         Modifier
@@ -298,6 +300,8 @@ fun BalanceScreen(
                             }
 
                             // Sync button — pinned to the right
+                            val isSyncing = walletState.isSyncing
+                            val syncEnabled = walletState.isInitialized && !walletState.isSyncing
                             Box(
                                 contentAlignment = Alignment.Center,
                                 modifier =
@@ -306,14 +310,14 @@ fun BalanceScreen(
                                         .align(Alignment.CenterEnd)
                                         .clip(RoundedCornerShape(6.dp))
                                         .background(DarkSurfaceVariant)
-                                        .clickable(
-                                            enabled = walletState.isInitialized && !walletState.isSyncing,
-                                        ) { onSync() },
+                                        .clickable(enabled = syncEnabled) {
+                                            onSync()
+                                        },
                             ) {
-                                if (walletState.isSyncing) {
+                                if (isSyncing) {
                                     CircularProgressIndicator(
                                         modifier = Modifier.size(20.dp),
-                                        color = BitcoinOrange,
+                                        color = cardAccentColor,
                                         strokeWidth = 2.dp,
                                     )
                                 } else {
@@ -367,49 +371,15 @@ fun BalanceScreen(
                                 val usdValue = (walletState.balanceSats.toDouble() / 100_000_000.0) * btcPrice
                                 Text(
                                     text = if (privacyMode) HIDDEN_AMOUNT else formatUsd(usdValue),
-                                    style = MaterialTheme.typography.titleLarge,
+                                    style = MaterialTheme.typography.titleMedium,
                                     color = TextSecondary,
                                 )
                             }
 
-                            // Pending incoming (green)
-                            if (walletState.pendingIncomingSats > 0UL) {
-                                Text(
-                                    text =
-                                        if (privacyMode) {
-                                            "$HIDDEN_AMOUNT pending"
-                                        } else {
-                                            "+${formatAmount(
-                                                walletState.pendingIncomingSats,
-                                                useSats,
-                                            )} pending"
-                                        },
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = SuccessGreen,
-                                    modifier = Modifier.padding(top = 4.dp),
-                                )
-                            }
-
-                            // Pending outgoing (red)
-                            if (walletState.pendingOutgoingSats > 0UL) {
-                                Text(
-                                    text =
-                                        if (privacyMode) {
-                                            "$HIDDEN_AMOUNT pending"
-                                        } else {
-                                            "-${formatAmount(
-                                                walletState.pendingOutgoingSats,
-                                                useSats,
-                                            )} pending"
-                                        },
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = ErrorRed,
-                                    modifier = Modifier.padding(top = 4.dp),
-                                )
-                            }
                         }
 
                         // Quick receive button — pinned to bottom left
+                        val quickReceiveEnabled = walletState.currentAddress != null
                         Box(
                             contentAlignment = Alignment.Center,
                             modifier =
@@ -418,14 +388,14 @@ fun BalanceScreen(
                                     .align(Alignment.BottomStart)
                                     .clip(RoundedCornerShape(6.dp))
                                     .background(DarkSurfaceVariant)
-                                    .clickable(enabled = walletState.currentAddress != null) {
+                                    .clickable(enabled = quickReceiveEnabled) {
                                         showQuickReceive = true
                                     },
                         ) {
                             Icon(
                                 imageVector = Icons.Default.QrCode,
                                 contentDescription = "Quick receive",
-                                tint = BitcoinOrange,
+                                tint = cardAccentColor,
                                 modifier = Modifier.size(22.dp),
                             )
                         }
@@ -446,7 +416,7 @@ fun BalanceScreen(
                             Icon(
                                 imageVector = Icons.Default.QrCodeScanner,
                                 contentDescription = "Scan QR",
-                                tint = BitcoinOrange,
+                                tint = cardAccentColor,
                                 modifier = Modifier.size(24.dp),
                             )
                         }
@@ -481,7 +451,7 @@ fun BalanceScreen(
                             )
                             Spacer(modifier = Modifier.height(8.dp))
                             Text(
-                                text = "Import a wallet to get started",
+                                text = "Add a wallet to get started",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = TextSecondary,
                             )
@@ -534,7 +504,11 @@ fun BalanceScreen(
                         Icon(
                             imageVector = if (isSearchActive) Icons.Default.Close else Icons.Default.Search,
                             contentDescription = if (isSearchActive) "Close search" else "Search",
-                            tint = if (isSearchActive) BitcoinOrange else TextSecondary,
+                            tint = if (isSearchActive) {
+                                BitcoinOrange
+                            } else {
+                                TextSecondary
+                            },
                             modifier = Modifier.size(20.dp),
                         )
                     }
@@ -549,7 +523,7 @@ fun BalanceScreen(
                         modifier = Modifier.fillMaxWidth(),
                         placeholder = {
                             Text(
-                                "Search labels or addresses...",
+                                "Search labels, addresses, txid, or date...",
                                 color = TextSecondary.copy(alpha = 0.5f),
                             )
                         },
@@ -570,6 +544,8 @@ fun BalanceScreen(
             }
 
             // Filter transactions based on search query (always searches ALL transactions)
+            // NOTE: These computations are in LazyListScope (non-composable),
+            // so we use plain Kotlin instead of remember/derivedStateOf.
             val filteredTransactions =
                 if (searchQuery.isBlank()) {
                     walletState.transactions
@@ -580,9 +556,11 @@ fun BalanceScreen(
                         val addrLabel = tx.address?.let { addressLabels[it] }
                         val address = tx.address ?: ""
 
-                        txLabel?.lowercase()?.contains(query) == true ||
+                        tx.txid.lowercase().contains(query) ||
+                            txLabel?.lowercase()?.contains(query) == true ||
                             addrLabel?.lowercase()?.contains(query) == true ||
-                            address.lowercase().contains(query)
+                            address.lowercase().contains(query) ||
+                            matchesTimestampSearch(tx.timestamp, searchQuery)
                     }
                 }
 
@@ -632,7 +610,7 @@ fun BalanceScreen(
                                         } else if (walletState.isInitialized) {
                                             "Transactions will appear here after syncing"
                                         } else {
-                                            "Import a wallet to get started"
+                                            "Add a wallet to get started"
                                         },
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = TextSecondary.copy(alpha = 0.7f),
@@ -642,7 +620,7 @@ fun BalanceScreen(
                     }
                 }
             } else {
-                items(visibleTransactions) { tx ->
+                items(visibleTransactions, key = { it.txid }) { tx ->
                     // Look up label: first check transaction label, then address label
                     val label =
                         transactionLabels[tx.txid]
@@ -708,9 +686,14 @@ fun BalanceScreen(
     }
 
     // Quick Receive Dialog — must be outside LazyColumn
-    if (showQuickReceive && walletState.currentAddress != null) {
-        val address = walletState.currentAddress
-        val qrBitmap = remember(address) { generateQrCode(address) }
+    val quickReceiveAddress = walletState.currentAddress
+    if (showQuickReceive && quickReceiveAddress != null) {
+        var qrBitmap by remember { mutableStateOf<Bitmap?>(null) }
+        LaunchedEffect(quickReceiveAddress) {
+            qrBitmap = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                generateQrBitmap(quickReceiveAddress)
+            }
+        }
         val context = LocalContext.current
         var showCopied by remember { mutableStateOf(false) }
 
@@ -767,7 +750,7 @@ fun BalanceScreen(
                         horizontalArrangement = Arrangement.Center,
                     ) {
                         Text(
-                            text = "${address.take(9)}...${address.takeLast(9)}",
+                            text = "${quickReceiveAddress.take(9)}...${quickReceiveAddress.takeLast(9)}",
                             style = MaterialTheme.typography.bodySmall,
                             fontFamily = FontFamily.Monospace,
                             color = TextSecondary,
@@ -784,7 +767,7 @@ fun BalanceScreen(
                                         SecureClipboard.copyAndScheduleClear(
                                             context,
                                             "Address",
-                                            address,
+                                            quickReceiveAddress,
                                         )
                                         showCopied = true
                                     },
@@ -869,13 +852,13 @@ private fun TransactionItem(
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = if (isReceived) "Received" else "Sent",
-                    style = MaterialTheme.typography.titleMedium,
+                    style = MaterialTheme.typography.titleMedium.copy(fontSize = 17.sp, lineHeight = 25.sp),
                     color = MaterialTheme.colorScheme.onBackground,
                 )
                 if (label != null) {
                     Text(
                         text = label,
-                        style = MaterialTheme.typography.bodyMedium,
+                        style = MaterialTheme.typography.bodySmall.copy(fontSize = 14.sp, lineHeight = 18.sp),
                         color = AccentTeal,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
@@ -884,7 +867,7 @@ private fun TransactionItem(
                 // Date and time
                 Text(
                     text = transaction.timestamp?.let { formatDateTime(it) } ?: "",
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = MaterialTheme.typography.bodySmall.copy(fontSize = 14.sp, lineHeight = 18.sp),
                     color = TextSecondary,
                 )
             }
@@ -901,7 +884,7 @@ private fun TransactionItem(
                     }
                 Text(
                     text = amountText,
-                    style = MaterialTheme.typography.titleMedium,
+                    style = MaterialTheme.typography.titleMedium.copy(fontSize = 17.sp, lineHeight = 25.sp),
                     fontWeight = FontWeight.SemiBold,
                     color = if (isReceived) AccentGreen else AccentRed,
                     textAlign = TextAlign.End,
@@ -911,26 +894,21 @@ private fun TransactionItem(
                     val usdValue = (absSats.toDouble() / 100_000_000.0) * btcPrice
                     Text(
                         text = formatUsd(usdValue),
-                        style = MaterialTheme.typography.bodySmall,
+                        style = MaterialTheme.typography.bodySmall.copy(fontSize = 14.sp, lineHeight = 18.sp),
                         color = TextSecondary,
                         textAlign = TextAlign.End,
                     )
                 }
-                // Pending / Confirmed status
-                Text(
-                    text = if (transaction.isConfirmed) "Confirmed" else "Pending",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (transaction.isConfirmed) TextSecondary else BitcoinOrange,
-                    textAlign = TextAlign.End,
-                )
+                if (!transaction.isConfirmed) {
+                    StatusBadge(
+                        label = "Pending",
+                        color = BitcoinOrange,
+                        modifier = Modifier.align(Alignment.End),
+                    )
+                }
             }
         }
     }
-}
-
-private fun formatBtc(sats: ULong): String {
-    val btc = sats.toDouble() / 100_000_000.0
-    return String.format(Locale.US, "%.8f", btc)
 }
 
 private fun formatDateTime(timestamp: Long): String {
@@ -939,43 +917,7 @@ private fun formatDateTime(timestamp: Long): String {
     return format.format(date)
 }
 
-private fun formatUsd(amount: Double): String {
-    val format = NumberFormat.getCurrencyInstance(Locale.US)
-    return format.format(amount)
-}
-
-private fun formatSatsAmount(sats: ULong): String {
-    return NumberFormat.getNumberInstance(Locale.US).format(sats.toLong())
-}
-
 private const val HIDDEN_AMOUNT = "****"
-
-/**
- * Format amount based on denomination preference
- */
-private fun formatAmount(
-    sats: ULong,
-    useSats: Boolean,
-): String {
-    return if (useSats) {
-        formatSatsAmount(sats)
-    } else {
-        formatBtc(sats)
-    }
-}
-
-private fun formatFullTimestamp(timestamp: Long): String {
-    val sdf = SimpleDateFormat("MMM d, yyyy HH:mm", Locale.getDefault())
-    return sdf.format(Date(timestamp))
-}
-
-/**
- * Format vBytes - up to 2 decimal places, removes trailing zeros: 109.25, 140.5, 154
- */
-private fun formatVBytes(vBytes: Double): String {
-    val formatted = String.format(Locale.US, "%.2f", vBytes)
-    return formatted.trimEnd('0').trimEnd('.')
-}
 
 /**
  * Transaction Detail Dialog
@@ -994,6 +936,7 @@ fun TransactionDetailDialog(
     canCpfp: Boolean = false,
     availableBalance: ULong = 0UL,
     feeEstimationState: FeeEstimationResult = FeeEstimationResult.Disabled,
+    minFeeRate: Double = 1.0,
     onFetchVsize: suspend (String) -> Double? = { null },
     onRefreshFees: () -> Unit = {},
     onSpeedUp: ((SpeedUpMethod, Double) -> Unit)? = null,
@@ -1034,6 +977,10 @@ fun TransactionDetailDialog(
 
     // State for Speed Up dialog
     var showSpeedUpDialog by remember { mutableStateOf(false) }
+
+    // State for Redirect (cancel) dialog
+    var showRedirectDialog by remember { mutableStateOf(false) }
+    val canRedirect = canRbf && !isReceived && !transaction.isConfirmed && !transaction.isSelfTransfer
 
     // State for label editing
     var isEditingLabel by remember { mutableStateOf(false) }
@@ -1095,6 +1042,7 @@ fun TransactionDetailDialog(
             availableBalance = availableBalance,
             cpfpSpendableOutput = cpfpSpendableOutput,
             feeEstimationState = feeEstimationState,
+            minFeeRate = minFeeRate,
             useSats = useSats,
             privacyMode = privacyMode,
             onRefreshFees = onRefreshFees,
@@ -1104,6 +1052,29 @@ fun TransactionDetailDialog(
                 onDismiss()
             },
             onDismiss = { showSpeedUpDialog = false },
+        )
+    }
+
+    // Redirect (cancel transaction) dialog
+    if (showRedirectDialog && canRedirect && onSpeedUp != null) {
+        val dialogVsize = fetchedVsize ?: transaction.vsize
+        SpeedUpDialog(
+            method = SpeedUpMethod.REDIRECT,
+            currentFee = transaction.fee,
+            currentFeeRate = transaction.feeRate,
+            vsize = dialogVsize,
+            availableBalance = availableBalance,
+            feeEstimationState = feeEstimationState,
+            minFeeRate = minFeeRate,
+            useSats = useSats,
+            privacyMode = privacyMode,
+            onRefreshFees = onRefreshFees,
+            onConfirm = { feeRate ->
+                onSpeedUp(SpeedUpMethod.REDIRECT, feeRate)
+                showRedirectDialog = false
+                onDismiss()
+            },
+            onDismiss = { showRedirectDialog = false },
         )
     }
 
@@ -1141,13 +1112,14 @@ fun TransactionDetailDialog(
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onBackground,
                     )
-                    IconButton(
-                        onClick = onDismiss,
+                    Box(
                         modifier =
                             Modifier
                                 .size(28.dp)
                                 .clip(RoundedCornerShape(6.dp))
-                                .background(DarkCard),
+                                .background(DarkCard)
+                                .clickable(onClick = onDismiss),
+                        contentAlignment = Alignment.Center,
                     ) {
                         Icon(
                             imageVector = Icons.Default.Close,
@@ -1244,6 +1216,119 @@ fun TransactionDetailDialog(
                 }
 
                 Spacer(modifier = Modifier.height(12.dp))
+
+                // Speed Up button (for pending transactions)
+                if (canSpeedUp && speedUpMethod != null && onSpeedUp != null) {
+                    OutlinedButton(
+                        onClick = { showSpeedUpDialog = true },
+                        modifier =
+                            Modifier
+                                .fillMaxWidth()
+                                .height(36.dp),
+                        shape = RoundedCornerShape(8.dp),
+                        colors =
+                            ButtonDefaults.outlinedButtonColors(
+                                contentColor = BitcoinOrange,
+                            ),
+                        border = BorderStroke(1.dp, BitcoinOrange.copy(alpha = 0.5f)),
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Speed,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = when (speedUpMethod) {
+                                SpeedUpMethod.RBF -> "Bump Fee (RBF)"
+                                SpeedUpMethod.CPFP -> "Bump Fee (CPFP)"
+                                SpeedUpMethod.REDIRECT -> "Bump Fee (RBF)"
+                            },
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
+
+                // Cancel Transaction button (redirect to self via RBF)
+                if (canRedirect && onSpeedUp != null) {
+                    OutlinedButton(
+                        onClick = { showRedirectDialog = true },
+                        modifier =
+                            Modifier
+                                .fillMaxWidth()
+                                .height(36.dp),
+                        shape = RoundedCornerShape(8.dp),
+                        colors =
+                            ButtonDefaults.outlinedButtonColors(
+                                contentColor = BitcoinOrange,
+                            ),
+                        border = BorderStroke(1.dp, BitcoinOrange.copy(alpha = 0.5f)),
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Replay,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Cancel Transaction (RBF)",
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+                }
+
+                if (mempoolServer != SecureStorage.MEMPOOL_DISABLED && mempoolUrl.isNotBlank()) {
+                    OutlinedButton(
+                        onClick = {
+                            val url = "$mempoolUrl/tx/${transaction.txid}"
+                            if (isOnionAddress) {
+                                // Try to open Tor Browser automatically for onion addresses
+                                val torBrowserPackage = "org.torproject.torbrowser"
+                                val intent =
+                                    Intent(Intent.ACTION_VIEW, url.toUri()).apply {
+                                        setPackage(torBrowserPackage)
+                                    }
+                                try {
+                                    context.startActivity(intent)
+                                } catch (_: Exception) {
+                                    // Tor Browser not installed, show error
+                                    showTorBrowserError = true
+                                }
+                            } else {
+                                // Open directly for clearnet
+                                val intent = Intent(Intent.ACTION_VIEW, url.toUri())
+                                context.startActivity(intent)
+                            }
+                        },
+                        modifier =
+                            Modifier
+                                .fillMaxWidth()
+                                .height(36.dp),
+                        shape = RoundedCornerShape(8.dp),
+                        colors =
+                            ButtonDefaults.outlinedButtonColors(
+                                contentColor = TextSecondary,
+                            ),
+                        border = BorderStroke(1.dp, Color(0xFF9BA3AC)),
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.OpenInNew,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(getMempoolButtonText(mempoolServer), style = MaterialTheme.typography.bodyMedium)
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+                }
 
                 // Transaction details
                 Card(
@@ -1662,95 +1747,15 @@ fun TransactionDetailDialog(
                         }
                     }
                 }
-
-                Spacer(modifier = Modifier.height(12.dp))
-
-                // Speed Up button (for pending transactions)
-                if (canSpeedUp && speedUpMethod != null && onSpeedUp != null) {
-                    OutlinedButton(
-                        onClick = { showSpeedUpDialog = true },
-                        modifier =
-                            Modifier
-                                .fillMaxWidth()
-                                .height(36.dp),
-                        shape = RoundedCornerShape(8.dp),
-                        colors =
-                            ButtonDefaults.outlinedButtonColors(
-                                contentColor = BitcoinOrange,
-                            ),
-                        border = BorderStroke(1.dp, BitcoinOrange.copy(alpha = 0.5f)),
-                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Bolt,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp),
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Speed Up Transaction", style = MaterialTheme.typography.bodyMedium)
-                    }
-
-                    Spacer(modifier = Modifier.height(6.dp))
-                }
-
-                // View on Block Explorer button (only shown when not disabled)
-                if (mempoolServer != SecureStorage.MEMPOOL_DISABLED) {
-                    OutlinedButton(
-                        onClick = {
-                            val url = "$mempoolUrl/tx/${transaction.txid}"
-                            if (isOnionAddress) {
-                                // Try to open Tor Browser automatically for onion addresses
-                                val torBrowserPackage = "org.torproject.torbrowser"
-                                val intent =
-                                    Intent(Intent.ACTION_VIEW, url.toUri()).apply {
-                                        setPackage(torBrowserPackage)
-                                    }
-                                try {
-                                    context.startActivity(intent)
-                                } catch (_: Exception) {
-                                    // Tor Browser not installed, show error
-                                    showTorBrowserError = true
-                                }
-                            } else {
-                                // Open directly for clearnet
-                                val intent = Intent(Intent.ACTION_VIEW, url.toUri())
-                                context.startActivity(intent)
-                            }
-                        },
-                        modifier =
-                            Modifier
-                                .fillMaxWidth()
-                                .height(36.dp),
-                        shape = RoundedCornerShape(8.dp),
-                        colors =
-                            ButtonDefaults.outlinedButtonColors(
-                                contentColor = BitcoinOrange,
-                            ),
-                        border = BorderStroke(1.dp, BitcoinOrange.copy(alpha = 0.5f)),
-                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp),
-                    ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.OpenInNew,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp),
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(getMempoolButtonText(mempoolServer), style = MaterialTheme.typography.bodyMedium)
-                    }
-
-                    Spacer(modifier = Modifier.height(6.dp))
-                }
-
+                Spacer(modifier = Modifier.height(8.dp))
                 // Close button
-                TextButton(
+                IbisButton(
                     onClick = onDismiss,
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp),
                 ) {
-                    Text(
-                        text = "Close",
-                        color = TextSecondary,
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
+                    Text("Close", style = MaterialTheme.typography.titleMedium)
                 }
             }
         }
@@ -1815,14 +1820,13 @@ private fun TorBrowserErrorDialog(onDismiss: () -> Unit) {
                 Spacer(modifier = Modifier.height(24.dp))
 
                 // Close button
-                TextButton(
+                IbisButton(
                     onClick = onDismiss,
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp),
                 ) {
-                    Text(
-                        text = "Close",
-                        color = TextSecondary,
-                    )
+                    Text("Close", style = MaterialTheme.typography.titleMedium)
                 }
             }
         }
@@ -1842,19 +1846,38 @@ private fun SpeedUpDialog(
     availableBalance: ULong = 0UL,
     cpfpSpendableOutput: ULong = 0UL,
     feeEstimationState: FeeEstimationResult = FeeEstimationResult.Disabled,
+    minFeeRate: Double = 1.0,
     useSats: Boolean = true,
     privacyMode: Boolean = false,
     onRefreshFees: () -> Unit = {},
     onConfirm: (Double) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    // Start with empty field - user enters their desired fee rate
-    var feeRateInput by remember { mutableStateOf("") }
-    val feeRate = feeRateInput.toDoubleOrNull() ?: 0.0
-    val isValidFeeRate = feeRate >= 1.0 && (currentFeeRate == null || feeRate > currentFeeRate)
-
-    // Track selected fee estimate option (null = custom/manual input)
-    var selectedFeeOption by remember { mutableStateOf<String?>(null) }
+    val dialogTitle =
+        when (method) {
+            SpeedUpMethod.RBF -> "Bump Fee (RBF)"
+            SpeedUpMethod.CPFP -> "Bump Fee (CPFP)"
+            SpeedUpMethod.REDIRECT -> "Cancel Transaction"
+        }
+    val dialogDescription =
+        when (method) {
+            SpeedUpMethod.RBF -> "Replace this transaction with a higher fee (RBF)"
+            SpeedUpMethod.CPFP -> "Create a child transaction with high fee to speed up confirmation (CPFP)"
+            SpeedUpMethod.REDIRECT -> "Redirect all funds back to your wallet. Requires a higher fee than the original."
+        }
+    var appliedFeeRate by remember { mutableDoubleStateOf(0.0) }
+    var rawCustomFeeRate by remember { mutableStateOf<Double?>(null) }
+    val enteredFeeRate = rawCustomFeeRate ?: appliedFeeRate
+    val isBelowMinFeeRate = enteredFeeRate > 0.0 && enteredFeeRate < minFeeRate
+    val isBelowCurrentFeeRate =
+        currentFeeRate != null &&
+            enteredFeeRate > 0.0 &&
+            enteredFeeRate <= currentFeeRate
+    val isValidFeeRate =
+        appliedFeeRate > 0.0 &&
+            enteredFeeRate <= MAX_FEE_RATE_SAT_VB &&
+            !isBelowMinFeeRate &&
+            !isBelowCurrentFeeRate
 
     // Estimated child tx vsize for CPFP (1 input + 1 output, conservative estimate)
     // P2WPKH: ~110 vB, P2TR: ~111 vB, adding buffer for safety
@@ -1864,22 +1887,20 @@ private fun SpeedUpDialog(
     // P2TR actual dust is ~387, P2WPKH is ~294
     val dustLimit = 546L
 
-    // Calculate costs differently for RBF vs CPFP
+    // Calculate costs differently for RBF vs CPFP vs REDIRECT
     val additionalCost: Long? =
         when (method) {
-            SpeedUpMethod.RBF -> {
-                // RBF: Pay the difference between new total fee and old fee
-                if (vsize != null && feeRate > 0.0 && currentFee != null) {
-                    val newTotalFee = (feeRate * vsize).toLong()
+            SpeedUpMethod.RBF, SpeedUpMethod.REDIRECT -> {
+                if (vsize != null && appliedFeeRate > 0.0 && currentFee != null) {
+                    val newTotalFee = (appliedFeeRate * vsize).toLong()
                     (newTotalFee - currentFee.toLong()).coerceAtLeast(0)
                 } else {
                     null
                 }
             }
             SpeedUpMethod.CPFP -> {
-                // CPFP: Child tx fee = ceil(fee_rate) × child_vsize
-                if (feeRate > 0.0) {
-                    val effectiveFeeRate = kotlin.math.ceil(feeRate).toLong()
+                if (appliedFeeRate > 0.0) {
+                    val effectiveFeeRate = kotlin.math.ceil(appliedFeeRate).toLong()
                     (effectiveFeeRate * estimatedChildVsize)
                 } else {
                     null
@@ -1893,13 +1914,15 @@ private fun SpeedUpDialog(
     val fundsForFee =
         when (method) {
             SpeedUpMethod.RBF -> availableBalance
-            SpeedUpMethod.CPFP -> cpfpSpendableOutput + availableBalance // Parent output + confirmed balance
+            SpeedUpMethod.REDIRECT -> availableBalance
+            SpeedUpMethod.CPFP -> cpfpSpendableOutput + availableBalance
         }
 
     // Check affordability - need funds >= fee + dust (for change output)
     val canAfford =
         when (method) {
             SpeedUpMethod.RBF -> additionalCost == null || additionalCost <= 0 || additionalCost.toULong() <= fundsForFee
+            SpeedUpMethod.REDIRECT -> true // Fee comes from the original inputs, not wallet balance
             SpeedUpMethod.CPFP -> {
                 if (additionalCost == null || additionalCost <= 0) {
                     true
@@ -1922,9 +1945,6 @@ private fun SpeedUpDialog(
             additionalCost != null &&
             !parentCanCoverAlone &&
             canAfford
-
-    // Get fee estimates if available
-    val estimates = (feeEstimationState as? FeeEstimationResult.Success)?.estimates
 
     // Fetch fee estimates when dialog opens
     LaunchedEffect(Unit) {
@@ -1951,7 +1971,7 @@ private fun SpeedUpDialog(
             ) {
                 // Header
                 Text(
-                    text = "Speed Up Transaction",
+                    text = dialogTitle,
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onBackground,
@@ -1961,11 +1981,7 @@ private fun SpeedUpDialog(
 
                 // Method description
                 Text(
-                    text =
-                        when (method) {
-                            SpeedUpMethod.RBF -> "Replace this transaction with a higher fee (RBF)"
-                            SpeedUpMethod.CPFP -> "Create a child transaction with high fee to speed up confirmation (CPFP)"
-                        },
+                    text = dialogDescription,
                     style = MaterialTheme.typography.bodyMedium,
                     color = TextSecondary,
                 )
@@ -2020,41 +2036,29 @@ private fun SpeedUpDialog(
                     Spacer(modifier = Modifier.height(16.dp))
                 }
 
-                // Fee rate input
-                Text(
-                    text = "New Fee Rate (sat/vB)",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = TextSecondary,
+                FeeRateSection(
+                    feeEstimationState = feeEstimationState,
+                    currentFeeRate = appliedFeeRate,
+                    minFeeRate = minFeeRate,
+                    onFeeRateChange = { appliedFeeRate = it },
+                    onRawCustomFeeRateChange = { rawCustomFeeRate = it },
+                    onRefreshFees = onRefreshFees,
+                    enabled = true,
                 )
 
-                Spacer(modifier = Modifier.height(8.dp))
-
-                OutlinedTextField(
-                    value = feeRateInput,
-                    onValueChange = { input ->
-                        if (input.isEmpty() || input.matches(Regex("^\\d*\\.?\\d*$"))) {
-                            feeRateInput = input
-                            selectedFeeOption = null // Clear selection when manually typing
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                    placeholder = { Text("e.g. 6.50", color = TextSecondary.copy(alpha = 0.5f)) },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                    shape = RoundedCornerShape(12.dp),
-                    colors =
-                        OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = BitcoinOrange,
-                            unfocusedBorderColor = TextSecondary.copy(alpha = 0.3f),
-                            cursorColor = BitcoinOrange,
-                        ),
-                )
-
-                // Validation message
-                if (currentFeeRate != null && feeRate > 0.0 && feeRate <= currentFeeRate) {
+                if (isBelowMinFeeRate) {
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = "New fee rate must be higher than current (${formatFeeRate(currentFeeRate)} sat/vB)",
+                        text = "Fee rate is below the minimum (${formatFeeRate(minFeeRate)} sat/vB)",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = ErrorRed,
+                    )
+                }
+
+                currentFeeRate?.takeIf { isBelowCurrentFeeRate }?.let { currentRate ->
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Fee rate must be higher than current (${formatFeeRate(currentRate)} sat/vB)",
                         style = MaterialTheme.typography.bodySmall,
                         color = ErrorRed,
                     )
@@ -2063,7 +2067,7 @@ private fun SpeedUpDialog(
                 Spacer(modifier = Modifier.height(12.dp))
 
                 // New Transaction card (shows estimated fee info)
-                if (feeRate > 0.0 && isValidFeeRate) {
+                if (appliedFeeRate > 0.0 && isValidFeeRate) {
                     Card(
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(12.dp),
@@ -2076,13 +2080,17 @@ private fun SpeedUpDialog(
                                     .padding(12.dp),
                         ) {
                             Text(
-                                text = if (method == SpeedUpMethod.RBF) "Replacement Transaction:" else "Child Transaction (CPFP):",
+                                text = when (method) {
+                                    SpeedUpMethod.RBF -> "Replacement Transaction:"
+                                    SpeedUpMethod.REDIRECT -> "Redirect Transaction:"
+                                    SpeedUpMethod.CPFP -> "Child Transaction (CPFP):"
+                                },
                                 style = MaterialTheme.typography.labelMedium,
                                 color = TextSecondary,
                             )
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
-                                text = "Target fee rate: ${formatFeeRate(feeRate.toDouble())} sat/vB",
+                                text = "Target fee rate: ${formatFeeRate(appliedFeeRate)} sat/vB",
                                 style = MaterialTheme.typography.bodyMedium,
                                 fontWeight = FontWeight.Bold,
                                 color = TextSecondary,
@@ -2106,7 +2114,7 @@ private fun SpeedUpDialog(
                                 if (method == SpeedUpMethod.CPFP) {
                                     Text(
                                         text = "($estimatedChildVsize vB × ${kotlin.math.ceil(
-                                            feeRate.toDouble(),
+                                            appliedFeeRate,
                                         ).toLong()} sat/vB)",
                                         style = MaterialTheme.typography.labelSmall,
                                         color = TextSecondary,
@@ -2116,22 +2124,6 @@ private fun SpeedUpDialog(
                                             text = "Will consolidate all wallet UTXOs",
                                             style = MaterialTheme.typography.labelSmall,
                                             color = BitcoinOrange,
-                                        )
-                                    }
-                                    val changeBack = fundsForFee.toLong() - additionalCost
-                                    if (canAfford && changeBack > dustLimit) {
-                                        Text(
-                                            text =
-                                                if (privacyMode) {
-                                                    "You'll receive back: $HIDDEN_AMOUNT"
-                                                } else {
-                                                    "You'll receive back: ${formatAmount(
-                                                        changeBack.toULong(),
-                                                        useSats,
-                                                    )} ${if (useSats) "sats" else "BTC"}"
-                                                },
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = AccentGreen,
                                         )
                                     }
                                 }
@@ -2192,110 +2184,12 @@ private fun SpeedUpDialog(
                     Spacer(modifier = Modifier.height(8.dp))
                 }
 
-                // Fee estimates (if enabled)
-                if (feeEstimationState !is FeeEstimationResult.Disabled) {
-                    val isLoading = feeEstimationState is FeeEstimationResult.Loading
-                    val isElectrum = estimates?.source == FeeEstimateSource.ELECTRUM_SERVER
-                    val fastLabel = if (isElectrum) "~2 blocks" else "~1 block"
-                    val medLabel = if (isElectrum) "~6 blocks" else "~3 blocks"
-                    val slowLabel = if (isElectrum) "~12 blocks" else "~6 blocks"
-
-                    Spacer(modifier = Modifier.height(2.dp))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(
-                            text = "Current Fee Estimates",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = TextSecondary,
-                        )
-                        Box(
-                            contentAlignment = Alignment.Center,
-                            modifier =
-                                Modifier
-                                    .size(24.dp)
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .background(DarkSurfaceVariant)
-                                    .clickable(enabled = !isLoading) { onRefreshFees() },
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Refresh,
-                                contentDescription = "Refresh",
-                                tint = if (isLoading) TextSecondary.copy(alpha = 0.5f) else BitcoinOrange,
-                                modifier = Modifier.size(16.dp),
-                            )
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(6.dp))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        github.aeonbtc.ibiswallet.ui.components.FeeTargetButton(
-                            label = fastLabel,
-                            feeRate = estimates?.fastestFee,
-                            isSelected = selectedFeeOption == "fastest",
-                            onClick = {
-                                if (estimates != null) {
-                                    feeRateInput = formatFeeRate(estimates.fastestFee)
-                                    selectedFeeOption = "fastest"
-                                }
-                            },
-                            enabled = true,
-                            isLoading = isLoading,
-                            modifier = Modifier.weight(1f),
-                        )
-                        github.aeonbtc.ibiswallet.ui.components.FeeTargetButton(
-                            label = medLabel,
-                            feeRate = estimates?.halfHourFee,
-                            isSelected = selectedFeeOption == "halfHour",
-                            onClick = {
-                                if (estimates != null) {
-                                    feeRateInput = formatFeeRate(estimates.halfHourFee)
-                                    selectedFeeOption = "halfHour"
-                                }
-                            },
-                            enabled = true,
-                            isLoading = isLoading,
-                            modifier = Modifier.weight(1f),
-                        )
-                        github.aeonbtc.ibiswallet.ui.components.FeeTargetButton(
-                            label = slowLabel,
-                            feeRate = estimates?.hourFee,
-                            isSelected = selectedFeeOption == "hour",
-                            onClick = {
-                                if (estimates != null) {
-                                    feeRateInput = formatFeeRate(estimates.hourFee)
-                                    selectedFeeOption = "hour"
-                                }
-                            },
-                            enabled = true,
-                            isLoading = isLoading,
-                            modifier = Modifier.weight(1f),
-                        )
-                    }
-
-                    if (estimates != null && isElectrum && estimates.isUniform) {
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = "Server reports same rate for all targets (low fee environment)",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = TextSecondary,
-                        )
-                    }
-                }
-
                 Spacer(modifier = Modifier.height(24.dp))
 
                 // Confirm button
                 val canConfirm = isValidFeeRate && canAfford
                 IbisButton(
-                    onClick = { onConfirm(feeRate) },
+                    onClick = { onConfirm(appliedFeeRate) },
                     modifier =
                         Modifier
                             .fillMaxWidth()
@@ -2307,6 +2201,7 @@ private fun SpeedUpDialog(
                             when (method) {
                                 SpeedUpMethod.RBF -> "Bump Fee"
                                 SpeedUpMethod.CPFP -> "Bump Fee"
+                                SpeedUpMethod.REDIRECT -> "Cancel Transaction"
                             },
                         style = MaterialTheme.typography.titleMedium,
                     )
@@ -2315,14 +2210,13 @@ private fun SpeedUpDialog(
                 Spacer(modifier = Modifier.height(8.dp))
 
                 // Cancel button
-                TextButton(
+                IbisButton(
                     onClick = onDismiss,
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp),
                 ) {
-                    Text(
-                        text = "Cancel",
-                        color = TextSecondary,
-                    )
+                    Text("Cancel", style = MaterialTheme.typography.titleMedium)
                 }
             }
         }
@@ -2333,40 +2227,12 @@ private fun SpeedUpDialog(
  * Get the appropriate button text for the block explorer button
  * based on the selected mempool server
  */
-private fun generateQrCode(content: String): Bitmap? {
-    return try {
-        val size = 512
-        val qrCodeWriter = com.google.zxing.qrcode.QRCodeWriter()
-        val hints =
-            mapOf(
-                com.google.zxing.EncodeHintType.MARGIN to 1,
-            )
-        val bitMatrix =
-            qrCodeWriter.encode(
-                content,
-                com.google.zxing.BarcodeFormat.QR_CODE,
-                size,
-                size,
-                hints,
-            )
-        val bitmap = createBitmap(size, size, Bitmap.Config.ARGB_8888)
-        for (x in 0 until size) {
-            for (y in 0 until size) {
-                bitmap[x, y] =
-                    if (bitMatrix[x, y]) Color.Black.toArgb() else Color.White.toArgb()
-            }
-        }
-        bitmap
-    } catch (_: Exception) {
-        null
-    }
-}
 
 private fun getMempoolButtonText(mempoolServer: String): String {
     return when (mempoolServer) {
         SecureStorage.MEMPOOL_SPACE -> "View on mempool.space"
         SecureStorage.MEMPOOL_ONION -> "View on mempool.space (onion)"
-        SecureStorage.MEMPOOL_CUSTOM -> "View on custom mempool server"
+        SecureStorage.MEMPOOL_CUSTOM -> "View on custom block explorer"
         else -> "View in block explorer"
     }
 }

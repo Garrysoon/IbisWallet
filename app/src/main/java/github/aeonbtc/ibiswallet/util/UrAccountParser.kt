@@ -66,6 +66,8 @@ object UrAccountParser {
                     null
                 }
             }
+        } catch (e: IllegalArgumentException) {
+            throw e
         } catch (e: Exception) {
             if (BuildConfig.DEBUG) Log.e(TAG, "Failed to parse UR type ${ur.type}", e)
             null
@@ -246,7 +248,7 @@ object UrAccountParser {
     }
 
     /**
-     * Reconstruct a BIP32 Base58Check xpub/tpub from CryptoHDKey fields.
+     * Reconstruct a BIP32 Base58Check xpub from CryptoHDKey fields.
      *
      * BIP32 serialization (78 bytes):
      *   4 bytes version | 1 byte depth | 4 bytes parent fingerprint |
@@ -258,14 +260,10 @@ object UrAccountParser {
 
         if (keyData.size != 33 || chainCode.size != 32) return null
 
-        // Determine version bytes (mainnet vs testnet)
-        val isTestnet = hdKey.useInfo?.network == CryptoCoinInfo.Network.TESTNET
-        val version =
-            if (isTestnet) {
-                byteArrayOf(0x04, 0x35, 0x87.toByte(), 0xCF.toByte()) // tpub
-            } else {
-                byteArrayOf(0x04, 0x88.toByte(), 0xB2.toByte(), 0x1E) // xpub
-            }
+        if (hdKey.useInfo?.network == CryptoCoinInfo.Network.TESTNET) {
+            throw IllegalArgumentException(BitcoinUtils.UNSUPPORTED_NON_MAINNET_MESSAGE)
+        }
+        val version = byteArrayOf(0x04, 0x88.toByte(), 0xB2.toByte(), 0x1E) // xpub
 
         // Depth: number of derivation steps in origin path
         val origin = hdKey.origin
@@ -434,7 +432,7 @@ object UrAccountParser {
                 ScriptExpression.SCRIPT_HASH,
                 ScriptExpression.WITNESS_PUBLIC_KEY_HASH,
             ) ->
-                AddressType.NESTED_SEGWIT
+                throw IllegalArgumentException(BitcoinUtils.UNSUPPORTED_NESTED_SEGWIT_MESSAGE)
             listOf(ScriptExpression.PUBLIC_KEY_HASH) ->
                 AddressType.LEGACY
             listOf(ScriptExpression.TAPROOT) ->
@@ -449,7 +447,7 @@ object UrAccountParser {
     private fun sourceToAddressType(source: String): AddressType? {
         return when {
             source.startsWith("wpkh(") -> AddressType.SEGWIT
-            source.startsWith("sh(wpkh(") -> AddressType.NESTED_SEGWIT
+            source.startsWith("sh(wpkh(") -> throw IllegalArgumentException(BitcoinUtils.UNSUPPORTED_NESTED_SEGWIT_MESSAGE)
             source.startsWith("pkh(") -> AddressType.LEGACY
             source.startsWith("tr(") -> AddressType.TAPROOT
             else -> null

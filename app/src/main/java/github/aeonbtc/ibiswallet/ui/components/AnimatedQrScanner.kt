@@ -19,6 +19,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -358,6 +359,11 @@ private fun QrCameraPreview(
     onFrameScanned: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val analyzerExecutor = remember { Executors.newSingleThreadExecutor() }
+    DisposableEffect(Unit) {
+        onDispose { analyzerExecutor.shutdown() }
+    }
+
     Box(modifier = modifier) {
         @Suppress("COMPOSE_APPLIER_CALL_MISMATCH")
         AndroidView(
@@ -379,7 +385,7 @@ private fun QrCameraPreview(
                                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                                 .build()
                                 .also {
-                                    it.setAnalyzer(Executors.newSingleThreadExecutor()) { imageProxy ->
+                                    it.setAnalyzer(analyzerExecutor) { imageProxy ->
                                         if (isComplete) {
                                             imageProxy.close()
                                             return@setAnalyzer
@@ -469,11 +475,15 @@ private fun handleImportQrData(
                     }
 
                     // Parse wallet-related UR types
-                    val parsed = UrAccountParser.parseUr(ur, preferredAddressType)
-                    if (parsed != null) {
-                        onComplete(parsed.keyMaterial)
-                    } else {
-                        onError("Could not extract key data from ${ur.type} QR code")
+                    try {
+                        val parsed = UrAccountParser.parseUr(ur, preferredAddressType)
+                        if (parsed != null) {
+                            onComplete(parsed.keyMaterial)
+                        } else {
+                            onError("Could not extract key data from ${ur.type} QR code")
+                        }
+                    } catch (e: IllegalArgumentException) {
+                        onError(e.message ?: "Unsupported wallet type")
                     }
                 } else {
                     onError("Failed to decode UR QR code")
@@ -493,7 +503,7 @@ private fun handleImportQrData(
 
 /**
  * QR scanner dialog for BIP 329 label import. Supports:
- * 1. Multi-frame BC-UR animated QR (ur:bytes) — decoded to JSONL string
+ * 1. Multi-frame BBQr animated QR — Zlib-compressed, deterministic parts
  * 2. Single-frame plain text containing BIP 329 JSONL lines
  *
  * @param onLabelsScanned Called with the decoded JSONL content string
@@ -531,8 +541,9 @@ fun LabelsQrScannerDialog(
     }
 
     if (cameraPermission == android.content.pm.PackageManager.PERMISSION_GRANTED) {
-        val urDecoder = remember { URDecoder() }
+        val bbqrJoiner = remember { github.aeonbtc.ibiswallet.util.Bbqr.ContinuousJoiner() }
         var scanProgress by remember { mutableFloatStateOf(0f) }
+        var partsStatus by remember { mutableStateOf("") }
         var isComplete by remember { mutableStateOf(false) }
 
         Dialog(
@@ -577,9 +588,10 @@ fun LabelsQrScannerDialog(
                         onFrameScanned = { scannedText ->
                             handleLabelsQrData(
                                 scannedText = scannedText,
-                                urDecoder = urDecoder,
-                                onProgress = { progress ->
+                                bbqrJoiner = bbqrJoiner,
+                                onProgress = { progress, status ->
                                     scanProgress = progress
+                                    partsStatus = status
                                 },
                                 onComplete = { decodedContent ->
                                     isComplete = true
@@ -611,7 +623,7 @@ fun LabelsQrScannerDialog(
                             )
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
-                                text = "Scanning: ${(scanProgress * 100).toInt()}%",
+                                text = partsStatus.ifEmpty { "Scanning: ${(scanProgress * 100).toInt()}%" },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = TextSecondary,
                             )
@@ -636,41 +648,39 @@ fun LabelsQrScannerDialog(
 
 /**
  * Process a scanned QR frame for BIP 329 label import. Handles:
- * - BC-UR multi-frame (ur:bytes) containing JSONL bytes
- * - Plain text containing BIP 329 JSONL lines
+ * - BBQr multi-frame animated QR (B$...) — Zlib-compressed, deterministic parts
+ * - Single-frame plain text containing BIP 329 JSONL lines
  */
 private fun handleLabelsQrData(
     scannedText: String,
-    urDecoder: URDecoder,
-    onProgress: (Float) -> Unit,
+    bbqrJoiner: github.aeonbtc.ibiswallet.util.Bbqr.ContinuousJoiner,
+    onProgress: (Float, String) -> Unit,
     onComplete: (String) -> Unit,
 ) {
     val trimmed = scannedText.trim()
 
-    // Check if it's a BC-UR part (case-insensitive)
-    if (trimmed.lowercase().startsWith("ur:")) {
+    // Check if it's a BBQr part
+    if (github.aeonbtc.ibiswallet.util.Bbqr.isBbqrPart(trimmed)) {
         try {
-            urDecoder.receivePart(trimmed)
-            val progress = urDecoder.estimatedPercentComplete
-            onProgress(progress.toFloat())
+            bbqrJoiner.addPart(trimmed)
+            val progress = bbqrJoiner.progress
+            val received = bbqrJoiner.partsReceived
+            val total = bbqrJoiner.partsTotal
+            val status = if (total > 0) "Scanned $received of $total" else ""
+            onProgress(progress, status)
 
-            if (urDecoder.result != null) {
-                val result = urDecoder.result
-                if (result.type == ResultType.SUCCESS) {
-                    val ur = result.ur
-                    // ur:bytes contains CBOR-encoded JSONL bytes
-                    val rawBytes = ur.toBytes()
-                    val content = String(rawBytes, Charsets.UTF_8)
-                    onComplete(content)
-                }
+            if (bbqrJoiner.isComplete) {
+                val result = bbqrJoiner.result!!
+                val content = String(result.data, Charsets.UTF_8)
+                onComplete(content)
             }
         } catch (_: Exception) {
-            // Invalid UR part, ignore
+            // Invalid BBQr part, ignore
         }
         return
     }
 
-    // Not a UR — check if it looks like BIP 329 JSONL (starts with {)
+    // Not BBQr — check if it looks like BIP 329 JSONL (starts with {)
     if (trimmed.startsWith("{") && trimmed.contains("\"type\"")) {
         onComplete(trimmed)
     }

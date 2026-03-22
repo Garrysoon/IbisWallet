@@ -374,21 +374,21 @@ fun PsbtScreen(
                                 // Send amount
                                 PsbtDetailRow(
                                     label = "Amount",
-                                    value = formatSats(psbtState.recipientAmountSats),
+                                    value = formatPsbtAmount(psbtState.recipientAmountSats),
                                 )
 
                                 // Change
                                 if (psbtState.changeAmountSats != null) {
                                     PsbtDetailRow(
                                         label = "Change",
-                                        value = formatSats(psbtState.changeAmountSats),
+                                        value = formatPsbtAmount(psbtState.changeAmountSats),
                                     )
                                 }
 
                                 // Fee
                                 PsbtDetailRow(
                                     label = "Fee",
-                                    value = formatSats(psbtState.actualFeeSats),
+                                    value = formatPsbtAmount(psbtState.actualFeeSats),
                                     valueColor = BitcoinOrange,
                                 )
                             }
@@ -636,20 +636,20 @@ private fun BroadcastConfirmation(
 
             PsbtDetailRow(
                 label = "Amount",
-                value = formatSats(psbtState.recipientAmountSats),
+                value = formatPsbtAmount(psbtState.recipientAmountSats),
             )
 
             if (psbtState.changeAmountSats != null) {
                 PsbtDetailRow(
                     label = "Change",
-                    value = formatSats(psbtState.changeAmountSats),
+                    value = formatPsbtAmount(psbtState.changeAmountSats),
                 )
             }
 
             if (psbtState.actualFeeSats > 0UL) {
                 PsbtDetailRow(
                     label = "Fee",
-                    value = formatSats(psbtState.actualFeeSats),
+                    value = formatPsbtAmount(psbtState.actualFeeSats),
                     valueColor = BitcoinOrange,
                 )
             }
@@ -660,7 +660,7 @@ private fun BroadcastConfirmation(
                 Spacer(modifier = Modifier.height(4.dp))
                 PsbtDetailRow(
                     label = "Total",
-                    value = formatSats(psbtState.recipientAmountSats + psbtState.actualFeeSats),
+                    value = formatPsbtAmount(psbtState.recipientAmountSats + psbtState.actualFeeSats),
                 )
             }
 
@@ -872,7 +872,7 @@ private fun PsbtDetailRow(
 }
 
 /** Format sats for display: shows BTC for large amounts, sats for small */
-private fun formatSats(sats: ULong): String {
+private fun formatPsbtAmount(sats: ULong): String {
     return if (sats >= 100_000UL) {
         val btc = sats.toLong() / 100_000_000.0
         "%.8f BTC".format(btc)

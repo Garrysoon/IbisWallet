@@ -3,7 +3,7 @@ package github.aeonbtc.ibiswallet.ui.theme
 import androidx.compose.ui.graphics.Color
 
 // Primary Bitcoin Orange - muted for professional look
-val BitcoinOrange = Color(0xFFD08010)
+val BitcoinOrange = Color(0xFFCD7F32)
 val BitcoinOrangeLight = Color(0xFFE09530)
 val BitcoinOrangeDark = Color(0xFFB87310)
 
@@ -32,3 +32,12 @@ val SuccessGreen = Color(0xFF2D9F5D)
 val WarningYellow = Color(0xFFD4A921)
 val ErrorRed = Color(0xFFC94A4A)
 val TorPurple = Color(0xFF9B59B6)
+
+// Dedicated Lightning accent
+val LightningYellow = Color(0xFFEEB311)
+
+// Layer 2 - Liquid Network branding
+val LiquidTeal = Color(0xFF1F9E8F)
+
+// Drawer menu icon accent - muted orange
+val DrawerIconColor = Color(0xFFCD7F32)

@@ -208,6 +208,7 @@ class CachingElectrumProxy(
         serverSocket = null
         localPort = 0
         pendingTxGetRequests.clear()
+        scope.cancel()
     }
 
     fun setPreConnectedSocket(socket: Socket) {
@@ -725,10 +726,10 @@ class CachingElectrumProxy(
      * Lightweight health check: sends `server.ping` on the direct query socket.
      * Returns true if the server responded, false if the connection is dead.
      *
-     * Uses [tryLock] so that if another operation (sync, verbose tx fetch)
+     * Uses tryLock so that if another operation (sync, verbose tx fetch)
      * is actively using the direct socket, ping returns true immediately —
      * lock contention proves the connection is alive. A tighter socket read
-     * timeout ([PING_SOCKET_TIMEOUT_MS]) ensures readLine() completes and
+     * timeout (PING_SOCKET_TIMEOUT_MS) ensures readLine() completes and
      * releases the lock before the heartbeat coroutine timeout fires,
      * preventing cascading failures from stale lock holds.
      */
@@ -887,7 +888,7 @@ class CachingElectrumProxy(
                     val req =
                         JSONObject().apply {
                             put("id", id)
-                            put("method", "blockchain.script hash.subscribe")
+                            put("method", "blockchain.scripthash.subscribe")
                             put("params", JSONArray().apply { put(scriptHash) })
                         }
                     writer.println(req.toString())
@@ -1659,8 +1660,9 @@ class CachingElectrumProxy(
 
         val maxAttempts = if (useTorProxy) TOR_CONNECT_RETRIES else 1
         for (attempt in 1..maxAttempts) {
+            var rawSocket: Socket? = null
             try {
-                val socket =
+                rawSocket =
                     if (useTorProxy) {
                         val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress(torSocksHost, torSocksPort))
                         Socket(proxy).also {
@@ -1676,8 +1678,11 @@ class CachingElectrumProxy(
                             it.connect(InetSocketAddress(targetHost, targetPort), connectionTimeoutMs)
                         }
                     }
-                return if (useSsl) wrapWithSsl(socket) else socket
+                val result = if (useSsl) wrapWithSsl(rawSocket) else rawSocket
+                rawSocket = null // Ownership transferred to caller (or SSLSocket wraps it with autoClose)
+                return result
             } catch (e: SocketException) {
+                closeQuietly(rawSocket)
                 if (BuildConfig.DEBUG) Log.w(TAG, "Connection attempt $attempt/$maxAttempts failed: ${e.message}")
                 if (attempt < maxAttempts) {
                     try {
@@ -1687,6 +1692,7 @@ class CachingElectrumProxy(
                     }
                 }
             } catch (_: SocketTimeoutException) {
+                closeQuietly(rawSocket)
                 if (BuildConfig.DEBUG) Log.w(TAG, "Connection attempt $attempt/$maxAttempts timed out")
                 if (attempt < maxAttempts) {
                     try {
@@ -1696,6 +1702,7 @@ class CachingElectrumProxy(
                     }
                 }
             } catch (e: Exception) {
+                closeQuietly(rawSocket)
                 if (BuildConfig.DEBUG) Log.e(TAG, "Failed to create target connection", e)
                 return null
             }

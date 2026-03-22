@@ -28,9 +28,13 @@ sealed class Screen(val route: String) {
 
     data object Settings : Screen("settings")
 
+    data object Layer2Options : Screen("layer2_options")
+
     data object Security : Screen("security")
 
     data object About : Screen("about")
+
+    data object BackupRestore : Screen("backup_restore")
 
     // Address and UTXO screens
     data object AllAddresses : Screen("all_addresses")
@@ -45,6 +49,11 @@ sealed class Screen(val route: String) {
 
     // Manual transaction broadcast
     data object BroadcastTransaction : Screen("broadcast_transaction")
+
+    // Layer 2 (Liquid) screens
+    data object LiquidServerConfig : Screen("liquid_server_config")
+
+    data object Swap : Screen("swap")
 }
 
 data class BottomNavItem(

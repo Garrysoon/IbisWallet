@@ -4,38 +4,44 @@ import android.app.Application
 import android.net.Uri
 import android.util.Base64
 import androidx.lifecycle.AndroidViewModel
-import androidx.lifecycle.DefaultLifecycleObserver
-import androidx.lifecycle.LifecycleOwner
-import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.lifecycle.viewModelScope
 import github.aeonbtc.ibiswallet.BuildConfig
 import github.aeonbtc.ibiswallet.data.BtcPriceService
 import github.aeonbtc.ibiswallet.data.FeeEstimationService
 import github.aeonbtc.ibiswallet.data.local.SecureStorage
-import github.aeonbtc.ibiswallet.data.model.AddressType
 import github.aeonbtc.ibiswallet.data.model.DryRunResult
 import github.aeonbtc.ibiswallet.data.model.ElectrumConfig
 import github.aeonbtc.ibiswallet.data.model.FeeEstimationResult
+import github.aeonbtc.ibiswallet.data.model.LiquidSwapDetails
+import github.aeonbtc.ibiswallet.data.model.LiquidSwapTxRole
+import github.aeonbtc.ibiswallet.data.model.LiquidTxSource
 import github.aeonbtc.ibiswallet.data.model.Recipient
 import github.aeonbtc.ibiswallet.data.model.SeedFormat
+import github.aeonbtc.ibiswallet.data.model.StoredWallet
+import github.aeonbtc.ibiswallet.data.model.SwapDirection
+import github.aeonbtc.ibiswallet.data.model.SwapService
 import github.aeonbtc.ibiswallet.data.model.UtxoInfo
 import github.aeonbtc.ibiswallet.data.model.WalletAddress
 import github.aeonbtc.ibiswallet.data.model.WalletImportConfig
-import github.aeonbtc.ibiswallet.data.model.WalletNetwork
 import github.aeonbtc.ibiswallet.data.model.WalletResult
 import github.aeonbtc.ibiswallet.data.model.WalletState
 import github.aeonbtc.ibiswallet.data.repository.WalletRepository
 import github.aeonbtc.ibiswallet.tor.TorManager
 import github.aeonbtc.ibiswallet.tor.TorState
 import github.aeonbtc.ibiswallet.tor.TorStatus
+import github.aeonbtc.ibiswallet.util.Bip329LabelNetwork
+import github.aeonbtc.ibiswallet.util.Bip329LabelScope
+import github.aeonbtc.ibiswallet.util.Bip329Labels
 import github.aeonbtc.ibiswallet.util.BitcoinUtils
 import github.aeonbtc.ibiswallet.util.CertificateFirstUseException
 import github.aeonbtc.ibiswallet.util.CertificateInfo
 import github.aeonbtc.ibiswallet.util.CertificateMismatchException
 import github.aeonbtc.ibiswallet.util.CryptoUtils
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -43,6 +49,8 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -56,7 +64,8 @@ import java.util.Locale
  */
 class WalletViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = WalletRepository(application)
-    private val torManager = TorManager(application)
+    private val secureStorage = SecureStorage.getInstance(application)
+    private val torManager = TorManager.getInstance(application)
     private val feeEstimationService = FeeEstimationService()
     private val btcPriceService = BtcPriceService()
 
@@ -69,6 +78,20 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
     private val _events = MutableSharedFlow<WalletEvent>(extraBufferCapacity = 1)
     val events: SharedFlow<WalletEvent> = _events.asSharedFlow()
 
+    private val _fullBackupResultMessage = MutableStateFlow<String?>(null)
+    val fullBackupResultMessage: StateFlow<String?> = _fullBackupResultMessage.asStateFlow()
+
+    private val _settingsRefreshVersion = MutableStateFlow(0L)
+    val settingsRefreshVersion: StateFlow<Long> = _settingsRefreshVersion.asStateFlow()
+
+    fun clearFullBackupResult() {
+        _fullBackupResultMessage.value = null
+    }
+
+    fun setFullBackupResult(message: String) {
+        _fullBackupResultMessage.value = message
+    }
+
     // Active connection job (cancellable)
     private var connectionJob: Job? = null
 
@@ -78,12 +101,19 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
     // Heartbeat loop job - pings server every ~60s to detect dead connections fast
     private var heartbeatJob: Job? = null
 
+    private var fullSyncJob: Job? = null
+    @Volatile private var fullSyncCancelRequested = false
+
+    private var addressRefreshJob: Job? = null
+    private var labelRefreshJob: Job? = null
+    private var syncTimesRefreshJob: Job? = null
+
     // Server state for reactive UI updates
     private val _serversState = MutableStateFlow(ServersState())
     val serversState: StateFlow<ServersState> = _serversState.asStateFlow()
 
-    // Denomination state (BTC or SATS)
-    private val _denominationState = MutableStateFlow(repository.getDenomination())
+    // Layer 1 denomination state (BTC or SATS)
+    private val _denominationState = MutableStateFlow(repository.getLayer1Denomination())
     val denominationState: StateFlow<String> = _denominationState.asStateFlow()
 
     // Mempool server state
@@ -112,9 +142,37 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
     private val _privacyMode = MutableStateFlow(repository.getPrivacyMode())
     val privacyMode: StateFlow<Boolean> = _privacyMode.asStateFlow()
 
+    // Swipe navigation mode
+    private val _swipeMode = MutableStateFlow(repository.getSwipeMode())
+    val swipeMode: StateFlow<String> = _swipeMode.asStateFlow()
+
     // Pre-selected UTXO for coin control (set from AllUtxosScreen)
     private val _preSelectedUtxo = MutableStateFlow<UtxoInfo?>(null)
     val preSelectedUtxo: StateFlow<UtxoInfo?> = _preSelectedUtxo.asStateFlow()
+
+    // All UTXOs — populated asynchronously on IO to avoid BDK JNI calls on the main thread.
+    // Refreshed when balance or active wallet changes, and after freeze/unfreeze operations.
+    private val _allUtxos = MutableStateFlow<List<UtxoInfo>>(emptyList())
+    val allUtxos: StateFlow<List<UtxoInfo>> = _allUtxos.asStateFlow()
+
+    private val _allAddresses =
+        MutableStateFlow<Triple<List<WalletAddress>, List<WalletAddress>, List<WalletAddress>>>(
+            Triple(emptyList(), emptyList(), emptyList()),
+        )
+    val allAddresses: StateFlow<Triple<List<WalletAddress>, List<WalletAddress>, List<WalletAddress>>> =
+        _allAddresses.asStateFlow()
+
+    private val _allWalletAddresses = MutableStateFlow<Set<String>>(emptySet())
+    val allWalletAddresses: StateFlow<Set<String>> = _allWalletAddresses.asStateFlow()
+
+    private val _addressLabels = MutableStateFlow<Map<String, String>>(emptyMap())
+    val addressLabels: StateFlow<Map<String, String>> = _addressLabels.asStateFlow()
+
+    private val _transactionLabels = MutableStateFlow<Map<String, String>>(emptyMap())
+    val transactionLabels: StateFlow<Map<String, String>> = _transactionLabels.asStateFlow()
+
+    private val _walletLastFullSyncTimes = MutableStateFlow<Map<String, Long?>>(emptyMap())
+    val walletLastFullSyncTimes: StateFlow<Map<String, Long?>> = _walletLastFullSyncTimes.asStateFlow()
 
     // Track which wallet is currently being synced (for UI progress indicator)
     private val _syncingWalletId = MutableStateFlow<String?>(null)
@@ -124,9 +182,9 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
     private val _sendScreenDraft = MutableStateFlow(SendScreenDraft())
     val sendScreenDraft: StateFlow<SendScreenDraft> = _sendScreenDraft.asStateFlow()
 
-    // Pending bitcoin: URI from external intent (consumed by IbisWalletApp after unlock)
-    private val _pendingBitcoinUri = MutableStateFlow<String?>(null)
-    val pendingBitcoinUri: StateFlow<String?> = _pendingBitcoinUri.asStateFlow()
+    // Pending send input from external intent or NFC (consumed by IbisWalletApp after unlock)
+    private val _pendingSendInput = MutableStateFlow<String?>(null)
+    val pendingSendInput: StateFlow<String?> = _pendingSendInput.asStateFlow()
 
     // PSBT state for watch-only wallet signing flow
     private val _psbtState = MutableStateFlow(PsbtState())
@@ -153,28 +211,28 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
     private val _isDuressMode = MutableStateFlow(false)
     val isDuressMode: StateFlow<Boolean> = _isDuressMode.asStateFlow()
 
-    // App lifecycle tracking for graceful background/foreground handling
-    private var wasConnectedBeforeBackground = false
-    private var isInBackground = false
+    // Guards notification firing until the first post-connection sync completes,
+    // preventing stale transactions from being treated as new on cold start.
+    private val _initialSyncComplete = MutableStateFlow(false)
+    val initialSyncComplete: StateFlow<Boolean> = _initialSyncComplete.asStateFlow()
 
-    init {
-        // Register app lifecycle observer for background/foreground handling
-        ProcessLifecycleOwner.get().lifecycle.addObserver(
-            object : DefaultLifecycleObserver {
-                override fun onStart(owner: LifecycleOwner) {
-                    onAppForegrounded()
+    private val lifecycleCoordinator =
+        AppLifecycleCoordinator(
+            scope = viewModelScope,
+            onBackgrounded = {
+                _uiState.value.isConnected
+            },
+            onForegrounded = { wasConnectedBeforeBackground, _ ->
+                if (wasConnectedBeforeBackground && !_uiState.value.isConnected) {
+                    reconnectOnForeground()
                 }
-
-                override fun onStop(owner: LifecycleOwner) {
-                    onAppBackgrounded()
-                }
-            }
+            },
         )
 
+    init {
         // Initialize servers state
         refreshServersState()
 
-        // Fetch fee estimates on startup (independent of Electrum)
         fetchFeeEstimates()
 
         // Load existing wallet and auto-connect to Electrum on startup
@@ -202,49 +260,101 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
                 repository.getElectrumConfig()?.let { config ->
                     connectToElectrum(config)
                 }
+            } else {
+                // No auto-connect — mark initial sync as complete so
+                // persistent notified-txid tracking works for offline mode.
+                _initialSyncComplete.value = true
             }
         }
-    }
 
-    // ==================== App Lifecycle Handling ====================
-
-    /**
-     * Called when app goes to background (ProcessLifecycleOwner.ON_STOP).
-     * Stops periodic tasks to conserve resources. The sockets will likely
-     * be killed by Android anyway.
-     */
-    private fun onAppBackgrounded() {
-        if (isInBackground) return
-        isInBackground = true
-        wasConnectedBeforeBackground = _uiState.value.isConnected
-
-        if (wasConnectedBeforeBackground) {
-            stopHeartbeat()
-            stopBackgroundSync()
-        }
-    }
-
-    /**
-     * Called when app returns to foreground (ProcessLifecycleOwner.ON_START).
-     * Checks if the connection survived and reconnects if needed.
-     */
-    private fun onAppForegrounded() {
-        if (!isInBackground) return
-        isInBackground = false
-
-        if (wasConnectedBeforeBackground) {
-            viewModelScope.launch {
-                val stillAlive = withContext(Dispatchers.IO) { repository.pingServer() }
-
-                if (stillAlive) {
-                    startBackgroundSync()
-                    startHeartbeat()
-                    launchSubscriptions()
-                } else {
-                    reconnectOnForeground()
+        // Refresh UTXOs asynchronously when wallet sync state changes in a way that can
+        // affect confirmation status, balance, or the active wallet.
+        // Uses map + distinctUntilChanged to avoid re-fetching on irrelevant
+        // walletState emissions (sync progress, block height, error, etc.).
+        viewModelScope.launch(Dispatchers.IO) {
+            walletState
+                .map { state ->
+                    state.isInitialized to Triple(
+                        state.balanceSats,
+                        state.activeWallet?.id,
+                        state.lastSyncTimestamp,
+                    )
                 }
-                wasConnectedBeforeBackground = false
+                .distinctUntilChanged()
+                .collect { (initialized, _) ->
+                    if (initialized) {
+                        _allUtxos.value = repository.getAllUtxos()
+                        refreshAddressBook()
+                        refreshLabelSnapshots()
+                    } else {
+                        clearDerivedWalletSnapshots()
+                    }
+                }
+        }
+
+        viewModelScope.launch {
+            walletState
+                .map { state -> state.wallets.map { it.id } to state.activeWallet?.id }
+                .distinctUntilChanged()
+                .collect {
+                    refreshWalletLastFullSyncTimes()
+                }
+        }
+    }
+
+    private fun clearDerivedWalletSnapshots() {
+        _allAddresses.value = Triple(emptyList(), emptyList(), emptyList())
+        _allWalletAddresses.value = emptySet()
+        _addressLabels.value = emptyMap()
+        _transactionLabels.value = emptyMap()
+        _walletLastFullSyncTimes.value = emptyMap()
+    }
+
+    private fun refreshAddressBook() {
+        addressRefreshJob?.cancel()
+        addressRefreshJob =
+            viewModelScope.launch(Dispatchers.IO) {
+                val addresses = repository.getAllAddresses()
+                _allAddresses.value = addresses
+                _allWalletAddresses.value =
+                    buildSet {
+                        addresses.first.forEach { add(it.address) }
+                        addresses.second.forEach { add(it.address) }
+                        addresses.third.forEach { add(it.address) }
+                    }
             }
+    }
+
+    private fun refreshLabelSnapshots() {
+        labelRefreshJob?.cancel()
+        labelRefreshJob =
+            viewModelScope.launch(Dispatchers.IO) {
+                _addressLabels.value = repository.getAllAddressLabels()
+                _transactionLabels.value = repository.getAllTransactionLabels()
+            }
+    }
+
+    private fun refreshWalletLastFullSyncTimes() {
+        syncTimesRefreshJob?.cancel()
+        syncTimesRefreshJob =
+            viewModelScope.launch(Dispatchers.IO) {
+                val walletIds = walletState.value.wallets.map { it.id }
+                _walletLastFullSyncTimes.value =
+                    walletIds.associateWith { walletId ->
+                        repository.getLastFullSyncTime(walletId)
+                    }
+            }
+    }
+
+    private fun refreshCurrentWalletSnapshots() {
+        refreshAddressBook()
+        refreshLabelSnapshots()
+        refreshUtxos()
+    }
+
+    private fun refreshActiveWalletSnapshotsIfNeeded(walletId: String) {
+        if (walletId == repository.getActiveWalletId()) {
+            refreshCurrentWalletSnapshots()
         }
     }
 
@@ -254,6 +364,7 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
      */
     private suspend fun reconnectOnForeground() {
         if (repository.isUserDisconnected()) return
+        if (connectionJob?.isActive == true) return
         val config = repository.getElectrumConfig() ?: return
 
         _uiState.value = _uiState.value.copy(isConnecting = true, isConnected = false)
@@ -267,20 +378,20 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
                 _events.emit(WalletEvent.Error("Connection lost"))
                 return
             }
+            delay(TOR_POST_BOOTSTRAP_DELAY_MS)
         }
 
         val timeoutMs = if (needsTor) CONNECTION_TIMEOUT_TOR_MS else CONNECTION_TIMEOUT_CLEARNET_MS
-        val result = withTimeoutOrNull(timeoutMs) {
-            repository.connectToElectrum(config)
-        }
+        val result =
+            withTimeoutOrNull(timeoutMs) {
+                repository.connectToElectrum(config)
+            }
 
         when (result) {
-            is WalletResult.Success -> {
+            is WalletResult.Success<*> -> {
                 _uiState.value = _uiState.value.copy(isConnecting = false, isConnected = true)
-                startBackgroundSync()
                 startHeartbeat()
                 launchSubscriptions()
-                repository.sync()
             }
             else -> {
                 _uiState.value = _uiState.value.copy(isConnecting = false, isConnected = false)
@@ -342,18 +453,21 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
      * Automatically enables/disables Tor based on server type
      */
     fun connectToElectrum(config: ElectrumConfig) {
-        connectionJob?.cancel()
+        val previousJob = connectionJob
         stopBackgroundSync()
         stopHeartbeat()
         repository.setUserDisconnected(false)
         connectionJob =
             viewModelScope.launch {
+                previousJob?.cancelAndJoin()
                 _uiState.value = _uiState.value.copy(isConnecting = true, isConnected = false, error = null, serverVersion = null)
 
                 try {
                     // Auto-enable Tor for .onion addresses, auto-disable for clearnet
                     // (but keep Tor alive if fee/price source is .onion)
                     val otherNeedsTor = isFeeSourceOnion() || isPriceSourceOnion()
+                    val shouldKeepTorRunning = config.isOnionAddress() || otherNeedsTor
+                    disconnectForServerSwitch(shouldKeepTorRunning)
                     if (config.isOnionAddress()) {
                         repository.setTorEnabled(true)
                     } else if (repository.isTorEnabled()) {
@@ -379,6 +493,8 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
                             _events.emit(WalletEvent.Error(msg))
                             return@launch
                         }
+                        // Brief settle time for the SOCKS proxy after bootstrap
+                        delay(TOR_POST_BOOTSTRAP_DELAY_MS)
                     }
 
                     // Connect with timeout
@@ -401,33 +517,27 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
                             launch(Dispatchers.IO) { repository.disconnect() }
                             if (_autoSwitchServer.value) attemptAutoSwitch()
                         }
-                        is WalletResult.Success -> {
-                            // Query server software version (e.g. "Fulcrum 1.10.0")
-                            val serverVersion =
-                                withContext(Dispatchers.IO) {
-                                    repository.getServerVersion()
-                                }
+                        is WalletResult.Success<*> -> {
                             _uiState.value =
                                 _uiState.value.copy(
                                     isConnecting = false,
                                     isConnected = true,
-                                    serverVersion = serverVersion,
+                                    serverVersion = null,
                                 )
                             refreshServersState()
                             _events.emit(WalletEvent.Connected)
+                            val serverVersion =
+                                withContext(Dispatchers.IO) {
+                                    repository.getServerVersion()
+                                }
+                            _uiState.value = _uiState.value.copy(serverVersion = serverVersion)
                             // Refresh fee estimates (server may support sub-sat fees)
                             fetchFeeEstimates()
-                            // Background sync as safety net / keep-alive.
-                            // Start BEFORE subscriptions so it runs even if the
-                            // subscription socket fails (critical for Tor where
-                            // the third circuit may not establish).
-                            startBackgroundSync()
                             startHeartbeat()
                             // Smart sync + real-time subscriptions (Sparrow-style).
                             // Runs in the background — does NOT block the connection
                             // flow. Creates a third upstream socket for push
                             // notifications. Over Tor this takes 3-10s extra.
-                            // If it fails, background sync polling covers us.
                             launchSubscriptions()
                         }
                         is WalletResult.Error -> {
@@ -469,6 +579,18 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
             }
     }
 
+    private suspend fun disconnectForServerSwitch(shouldKeepTorRunning: Boolean) {
+        withContext(Dispatchers.IO) {
+            repository.disconnect()
+        }
+
+        val previousServerUsedTor =
+            repository.getElectrumConfig()?.isOnionAddress() == true || repository.isTorEnabled()
+        if (previousServerUsedTor && !shouldKeepTorRunning) {
+            torManager.stop()
+        }
+    }
+
     /**
      * Quick sync wallet with the blockchain (revealed addresses only)
      * Used by balance screen refresh
@@ -497,26 +619,6 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
                 }
             }
         }
-    }
-
-    /**
-     * Start background sync loop. Runs every ~45s while connected.
-     * Uses the script hash pre-check so it's nearly free when nothing changed.
-     * Also acts as a keep-alive: if the server connection is dead, marks
-     * isConnected=false so the UI reflects reality without waiting for user action.
-     */
-    private fun startBackgroundSync() {
-        backgroundSyncJob?.cancel()
-        backgroundSyncJob =
-            viewModelScope.launch {
-                while (true) {
-                    delay(BACKGROUND_SYNC_INTERVAL_MS)
-                    if (!_uiState.value.isConnected) break
-                    // Fire-and-forget sync. Disconnect detection is handled
-                    // by the heartbeat loop (60s ping) — not by sync failures.
-                    repository.sync()
-                }
-            }
     }
 
     /**
@@ -565,6 +667,7 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
      * (2 consecutive failures) instead of ~10min (background sync alone).
      */
     private fun startHeartbeat() {
+        if (heartbeatJob?.isActive == true) return
         heartbeatJob?.cancel()
         var consecutiveFailures = 0
         heartbeatJob =
@@ -587,6 +690,10 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
                     } else {
                         consecutiveFailures++
                         if (consecutiveFailures >= HEARTBEAT_MAX_FAILURES) {
+                            if (walletState.value.isFullSyncing) {
+                                consecutiveFailures = 0
+                                continue
+                            }
                             stopBackgroundSync()
                             _uiState.value = _uiState.value.copy(isConnected = false)
                             _events.emit(WalletEvent.Error("Server connection lost"))
@@ -647,6 +754,7 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
                     }
                 }
             }
+            _initialSyncComplete.value = true
         }
     }
 
@@ -656,41 +764,77 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
      * If the wallet is not active, switches to it first.
      */
     fun fullSync(walletId: String) {
-        viewModelScope.launch {
+        fullSyncJob?.cancel()
+        fullSyncCancelRequested = false
+        val newJob =
+            viewModelScope.launch {
             _syncingWalletId.value = walletId
 
-            // Switch to the wallet if it's not already active
-            val activeId = repository.getActiveWalletId()
-            if (walletId != activeId) {
-                when (val switchResult = repository.switchWallet(walletId)) {
-                    is WalletResult.Success -> {
-                        _events.emit(WalletEvent.WalletSwitched)
+                try {
+                    // Switch to the wallet if it's not already active
+                    val activeId = repository.getActiveWalletId()
+                    if (walletId != activeId) {
+                        when (val switchResult = repository.switchWallet(walletId)) {
+                            is WalletResult.Success -> {
+                                _events.emit(WalletEvent.WalletSwitched)
+                            }
+                            is WalletResult.Error -> {
+                                _events.emit(WalletEvent.Error(switchResult.message))
+                                return@launch
+                            }
+                        }
                     }
-                    is WalletResult.Error -> {
-                        _events.emit(WalletEvent.Error(switchResult.message))
-                        _syncingWalletId.value = null
-                        return@launch
+
+                    // Watch address wallets use Electrum-only sync
+                    val result =
+                        if (repository.isWatchAddressWallet()) {
+                            repository.syncWatchAddress(walletId)
+                        } else {
+                            repository.requestFullSync(walletId)
+                        }
+
+                    if (fullSyncCancelRequested) return@launch
+
+                    when (result) {
+                        is WalletResult.Success -> {
+                            refreshWalletLastFullSyncTimes()
+                            _events.emit(WalletEvent.SyncCompleted)
+                        }
+                        is WalletResult.Error -> {
+                            _events.emit(WalletEvent.Error(result.message))
+                        }
                     }
+                } catch (_: CancellationException) {
+                    // User cancelled the manual full sync.
+                } finally {
+                    _syncingWalletId.value = null
+                    if (fullSyncJob === kotlinx.coroutines.currentCoroutineContext()[Job]) {
+                        fullSyncJob = null
+                    }
+                    fullSyncCancelRequested = false
                 }
             }
+        fullSyncJob = newJob
+    }
 
-            // Watch address wallets use Electrum-only sync
-            val result =
-                if (repository.isWatchAddressWallet()) {
-                    repository.syncWatchAddress(walletId)
-                } else {
-                    repository.requestFullSync(walletId)
-                }
-
-            when (result) {
-                is WalletResult.Success -> {
-                    _events.emit(WalletEvent.SyncCompleted)
-                }
-                is WalletResult.Error -> {
-                    _events.emit(WalletEvent.Error(result.message))
+    fun cancelFullSync() {
+        val serverId = _serversState.value.activeServerId ?: repository.getActiveServerId()
+        val jobToCancel = fullSyncJob
+        fullSyncCancelRequested = true
+        fullSyncJob = null
+        _syncingWalletId.value = null
+        stopBackgroundSync()
+        stopHeartbeat()
+        _uiState.value = _uiState.value.copy(isConnecting = false, isConnected = false, serverVersion = null, error = null)
+        viewModelScope.launch(Dispatchers.IO) {
+            jobToCancel?.cancel()
+            repository.setUserDisconnected(false)
+            repository.abortActiveFullSync()
+            if (serverId != null) {
+                withContext(Dispatchers.Main) {
+                    connectToServer(serverId)
                 }
             }
-            _syncingWalletId.value = null
         }
     }
 
@@ -701,6 +845,7 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             when (val result = repository.getNewAddress()) {
                 is WalletResult.Success -> {
+                    refreshAddressBook()
                     _events.emit(WalletEvent.AddressGenerated(result.data))
                 }
                 is WalletResult.Error -> {
@@ -718,6 +863,8 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
         label: String,
     ) {
         repository.saveAddressLabel(address, label)
+        refreshAddressBook()
+        refreshLabelSnapshots()
     }
 
     /**
@@ -725,20 +872,22 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
      */
     fun deleteAddressLabel(address: String) {
         repository.deleteAddressLabel(address)
+        refreshAddressBook()
+        refreshLabelSnapshots()
     }
 
     /**
      * Get all address labels
      */
     fun getAllAddressLabels(): Map<String, String> {
-        return repository.getAllAddressLabels()
+        return _addressLabels.value
     }
 
     /**
      * Get all transaction labels
      */
     fun getAllTransactionLabels(): Map<String, String> {
-        return repository.getAllTransactionLabels()
+        return _transactionLabels.value
     }
 
     /**
@@ -749,20 +898,32 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
         label: String,
     ) {
         repository.saveTransactionLabel(txid, label)
+        refreshLabelSnapshots()
     }
 
     /**
      * Get all addresses (receive, change, used)
      */
     fun getAllAddresses(): Triple<List<WalletAddress>, List<WalletAddress>, List<WalletAddress>> {
-        return repository.getAllAddresses()
+        return _allAddresses.value
     }
 
     /**
      * Get all UTXOs
      */
     fun getAllUtxos(): List<UtxoInfo> {
-        return repository.getAllUtxos()
+        return _allUtxos.value
+    }
+
+    /**
+     * Refresh the UTXO list asynchronously on IO.
+     * Called after freeze/unfreeze since that changes a local flag
+     * that doesn't trigger a walletState emission.
+     */
+    fun refreshUtxos() {
+        viewModelScope.launch(Dispatchers.IO) {
+            _allUtxos.value = repository.getAllUtxos()
+        }
     }
 
     /**
@@ -773,91 +934,66 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
         frozen: Boolean,
     ) {
         repository.setUtxoFrozen(outpoint, frozen)
+        refreshUtxos()
     }
 
     // ==================== BIP 329 Labels ====================
-
-    /**
-     * Export labels in BIP 329 JSONL format to a file.
-     */
-    fun exportBip329Labels(
-        walletId: String,
-        uri: Uri,
-    ) {
-        viewModelScope.launch {
-            try {
-                val content = repository.exportBip329Labels(walletId)
-                if (content.isBlank()) {
-                    _events.emit(WalletEvent.Error("No labels to export"))
-                    return@launch
-                }
-
-                withContext(Dispatchers.IO) {
-                    getApplication<Application>().contentResolver.openOutputStream(uri)?.use { stream ->
-                        stream.write(content.toByteArray(Charsets.UTF_8))
-                    } ?: throw IllegalStateException("Could not open output stream")
-                }
-
-                val lineCount = content.lines().count { it.isNotBlank() }
-                _events.emit(WalletEvent.Bip329LabelsExported(lineCount))
-            } catch (e: Exception) {
-                _events.emit(WalletEvent.Error("Export failed: ${e.message}"))
-            }
-        }
-    }
-
-    /**
-     * Import labels from a BIP 329 JSONL or Electrum CSV file.
-     */
-    fun importBip329Labels(
-        walletId: String,
-        uri: Uri,
-    ) {
-        viewModelScope.launch {
-            try {
-                val content = withContext(Dispatchers.IO) {
-                    getApplication<Application>().contentResolver.openInputStream(uri)?.use {
-                        it.readBytes().toString(Charsets.UTF_8)
-                    } ?: throw IllegalStateException("Could not read file")
-                }
-
-                val result = repository.importBip329Labels(walletId, content)
-                _events.emit(WalletEvent.Bip329LabelsImported(result.totalLabelsImported))
-            } catch (e: Exception) {
-                _events.emit(WalletEvent.Error("Import failed: ${e.message}"))
-            }
-        }
-    }
-
-    /**
-     * Import labels from BIP 329 JSONL content string (from QR scan).
-     */
-    fun importBip329LabelsFromContent(
-        walletId: String,
-        content: String,
-    ) {
-        viewModelScope.launch {
-            try {
-                val result = repository.importBip329Labels(walletId, content)
-                _events.emit(WalletEvent.Bip329LabelsImported(result.totalLabelsImported))
-            } catch (e: Exception) {
-                _events.emit(WalletEvent.Error("Import failed: ${e.message}"))
-            }
-        }
-    }
-
-    /**
-     * Get BIP 329 JSONL content for QR display.
-     */
-    fun getBip329LabelsContent(walletId: String): String {
-        return repository.exportBip329Labels(walletId)
-    }
 
     /**
      * Get label counts (address, transaction) for a wallet.
      */
     fun getLabelCounts(walletId: String): Pair<Int, Int> {
         return repository.getLabelCounts(walletId)
+    }
+
+    fun getBitcoinBip329LabelsContent(
+        walletId: String,
+        includeNetworkTag: Boolean = false,
+    ): String {
+        if (!includeNetworkTag) {
+            return repository.exportBip329Labels(walletId)
+        }
+
+        val metadata = secureStorage.getWalletMetadata(walletId)
+        val origin = metadata?.let {
+            Bip329Labels.buildOrigin(
+                addressType = it.addressType,
+                fingerprint = it.masterFingerprint,
+            )
+        }
+        return Bip329Labels.export(
+            addressLabels = repository.getAllAddressLabelsForWallet(walletId),
+            transactionLabels = repository.getAllTransactionLabelsForWallet(walletId),
+            origin = origin,
+            network = Bip329LabelNetwork.BITCOIN,
+        )
+    }
+
+    fun importBitcoinBip329LabelsFromContent(
+        walletId: String,
+        content: String,
+        defaultScope: Bip329LabelScope = Bip329LabelScope.BITCOIN,
+    ): Int {
+        val result = Bip329Labels.import(content, defaultScope)
+
+        for ((address, label) in result.bitcoinAddressLabels) {
+            repository.saveAddressLabelForWallet(walletId, address, label)
+        }
+
+        for ((txid, label) in result.bitcoinTransactionLabels) {
+            repository.saveTransactionLabelForWallet(walletId, txid, label)
+        }
+
+        for ((outpoint, spendable) in result.outputSpendable) {
+            if (!spendable) {
+                secureStorage.freezeUtxo(walletId, outpoint)
+            } else {
+                secureStorage.unfreezeUtxo(walletId, outpoint)
+            }
+        }
+
+        refreshActiveWalletSnapshotsIfNeeded(walletId)
+        return result.totalBitcoinLabelsImported
     }
 
     /**
@@ -882,18 +1018,18 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     /**
-     * Set a pending bitcoin: URI from an external intent.
+     * Set a pending send input from an external intent or NFC scan.
      * IbisWalletApp will consume it after unlock and navigate to Send.
      */
-    fun setPendingBitcoinUri(uri: String?) {
-        _pendingBitcoinUri.value = uri
+    fun setPendingSendInput(input: String?) {
+        _pendingSendInput.value = input
     }
 
     /**
-     * Consume the pending bitcoin: URI (called after navigation to Send).
+     * Consume the pending send input (called after navigation to Send).
      */
-    fun consumePendingBitcoinUri() {
-        _pendingBitcoinUri.value = null
+    fun consumePendingSendInput() {
+        _pendingSendInput.value = null
     }
 
     /**
@@ -907,7 +1043,7 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
      * Send Bitcoin to an address with specified fee rate
      * @param selectedUtxos Optional list of specific UTXOs to spend from (coin control)
      * @param label Optional label for the transaction
-     * @param isMaxSend If true, sends entire balance minus fees
+     * @param isMaxSend If true, resolves the largest exact send amount with fees on top
      */
     fun sendBitcoin(
         recipientAddress: String,
@@ -955,6 +1091,75 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
                 }
             }
         }
+    }
+
+    suspend fun sendBitcoinForSwap(
+        recipientAddress: String,
+        amountSats: Long,
+        feeRate: Double,
+        selectedUtxos: List<UtxoInfo>? = null,
+        isMaxSend: Boolean = false,
+    ): Pair<String, Long> {
+        val recipientAmountSats =
+            if (isMaxSend) {
+                getMaxBitcoinSpendableForSwap(
+                    recipientAddress = recipientAddress,
+                    feeRate = feeRate,
+                    selectedUtxos = selectedUtxos,
+                )
+            } else {
+                amountSats
+            }
+        return when (
+            val result = repository.sendBitcoin(
+                recipientAddress = recipientAddress,
+                amountSats = recipientAmountSats.toULong(),
+                feeRateSatPerVb = feeRate,
+                selectedUtxos = selectedUtxos,
+                isMaxSend = false,
+                onProgress = {},
+            )
+        ) {
+            is WalletResult.Success -> {
+                sync()
+                result.data to recipientAmountSats
+            }
+            is WalletResult.Error -> {
+                val message = result.exception?.message?.takeIf { it.isNotBlank() } ?: result.message
+                throw Exception(message, result.exception)
+            }
+        }
+    }
+
+    suspend fun getMaxBitcoinSpendableForSwap(
+        recipientAddress: String,
+        feeRate: Double,
+        selectedUtxos: List<UtxoInfo>? = null,
+    ): Long {
+        return repository.dryRunBuildTx(
+            recipientAddress = recipientAddress,
+            amountSats = 0u,
+            feeRateSatPerVb = feeRate,
+            selectedUtxos = selectedUtxos,
+            isMaxSend = true,
+        )?.recipientAmountSats?.takeIf { it > 0 }
+            ?: throw Exception("Unable to compute max spendable Bitcoin amount")
+    }
+
+    suspend fun previewBitcoinFundingForSwap(
+        recipientAddress: String,
+        amountSats: Long,
+        feeRate: Double,
+        selectedUtxos: List<UtxoInfo>? = null,
+        isMaxSend: Boolean = false,
+    ): DryRunResult? {
+        return repository.dryRunBuildTx(
+            recipientAddress = recipientAddress,
+            amountSats = amountSats.toULong(),
+            feeRateSatPerVb = feeRate,
+            selectedUtxos = selectedUtxos,
+            isMaxSend = isMaxSend,
+        )
     }
 
     /**
@@ -1298,6 +1503,34 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     /**
+     * Cancel an unconfirmed sent transaction by redirecting all funds back to the wallet via RBF.
+     */
+    fun redirectTransaction(
+        txid: String,
+        newFeeRate: Double,
+    ) {
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(isSending = true, error = null)
+
+            when (val result = repository.redirectTransaction(txid, newFeeRate)) {
+                is WalletResult.Success -> {
+                    _uiState.value = _uiState.value.copy(isSending = false)
+                    _events.emit(WalletEvent.TransactionRedirected(result.data))
+                    sync()
+                }
+                is WalletResult.Error -> {
+                    _uiState.value =
+                        _uiState.value.copy(
+                            isSending = false,
+                            error = result.message,
+                        )
+                    _events.emit(WalletEvent.Error(result.message))
+                }
+            }
+        }
+    }
+
+    /**
      * Check if a transaction can be bumped with RBF
      */
     fun canBumpFee(txid: String): Boolean {
@@ -1329,6 +1562,7 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
             when (val result = repository.deleteWallet(walletId)) {
                 is WalletResult.Success -> {
                     _uiState.value = _uiState.value.copy(isLoading = false)
+                    refreshWalletLastFullSyncTimes()
                     _events.emit(WalletEvent.WalletDeleted)
                 }
                 is WalletResult.Error -> {
@@ -1356,11 +1590,19 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     /**
+     * Set whether a wallet requires app authentication before opening.
+     */
+    fun setWalletLocked(walletId: String, locked: Boolean) {
+        repository.setWalletLocked(walletId, locked)
+    }
+
+    /**
      * Reorder wallets to the given ID order.
      * Persists the new order and updates the wallet list for all screens.
      */
     fun reorderWallets(orderedIds: List<String>) {
         repository.reorderWallets(orderedIds)
+        refreshWalletLastFullSyncTimes()
     }
 
     /**
@@ -1369,15 +1611,26 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
     fun switchWallet(walletId: String) {
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isLoading = true, error = null)
+            _initialSyncComplete.value = false
 
             when (val result = repository.switchWallet(walletId)) {
                 is WalletResult.Success -> {
                     _uiState.value = _uiState.value.copy(isLoading = false)
+                    refreshCurrentWalletSnapshots()
+                    refreshWalletLastFullSyncTimes()
                     _events.emit(WalletEvent.WalletSwitched)
-                    // Quick sync the new wallet and re-subscribe its addresses
+                    // For normal wallets, restarting subscriptions is enough:
+                    // it resubscribes the new addresses and runs sync only if needed.
+                    // Watch-address wallets have no subscription lifecycle, so sync directly.
                     if (_uiState.value.isConnected) {
-                        sync()
-                        launchSubscriptions()
+                        if (repository.isWatchAddressWallet()) {
+                            sync()
+                            _initialSyncComplete.value = true
+                        } else {
+                            launchSubscriptions()
+                        }
+                    } else {
+                        _initialSyncComplete.value = true
                     }
                 }
                 is WalletResult.Error -> {
@@ -1434,7 +1687,7 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
      * Automatically enables/disables Tor based on server type
      */
     fun connectToServer(serverId: String) {
-        connectionJob?.cancel()
+        val previousJob = connectionJob
         stopBackgroundSync()
         stopHeartbeat()
         repository.setUserDisconnected(false)
@@ -1442,6 +1695,7 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
         _serversState.value = _serversState.value.copy(activeServerId = serverId)
         connectionJob =
             viewModelScope.launch {
+                previousJob?.cancelAndJoin()
                 _uiState.value = _uiState.value.copy(isConnecting = true, isConnected = false, error = null, serverVersion = null)
 
                 try {
@@ -1453,6 +1707,8 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
                     // (but keep Tor alive if fee/price source is .onion)
                     val isOnion = serverConfig?.isOnionAddress() == true
                     val otherNeedsTor = isFeeSourceOnion() || isPriceSourceOnion()
+                    val shouldKeepTorRunning = isOnion || otherNeedsTor
+                    disconnectForServerSwitch(shouldKeepTorRunning)
                     if (isOnion) {
                         repository.setTorEnabled(true)
                     } else if (repository.isTorEnabled()) {
@@ -1476,6 +1732,8 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
                             _events.emit(WalletEvent.Error(msg))
                             return@launch
                         }
+                        // Brief settle time for the SOCKS proxy after bootstrap
+                        delay(TOR_POST_BOOTSTRAP_DELAY_MS)
                     }
 
                     // Connect with timeout
@@ -1514,7 +1772,6 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
                             _events.emit(WalletEvent.Connected)
                             // Refresh fee estimates (server may support sub-sat fees)
                             fetchFeeEstimates()
-                            startBackgroundSync()
                             startHeartbeat()
                             launchSubscriptions()
                         }
@@ -1562,7 +1819,8 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
     /**
      * Get the last full sync timestamp for a wallet
      */
-    fun getLastFullSyncTime(walletId: String): Long? = repository.getLastFullSyncTime(walletId)
+    fun getLastFullSyncTime(walletId: String): Long? =
+        _walletLastFullSyncTimes.value[walletId] ?: repository.getLastFullSyncTime(walletId)
 
     // ==================== Wallet Export/Import ====================
 
@@ -1590,7 +1848,7 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
                 // Build the wallet payload JSON
                 val payloadJson =
                     JSONObject().apply {
-                        put("version", 1)
+                        put("version", 2)
                         put("encrypted", password != null)
                         put("exportedAt", SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).format(Date()))
 
@@ -1623,6 +1881,7 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
                         if (includeLabels) {
                             val addressLabels = repository.getAllAddressLabelsForWallet(walletId)
                             val txLabels = repository.getAllTransactionLabelsForWallet(walletId)
+                            val liquidTxLabels = repository.getAllLiquidTransactionLabelsForWallet(walletId)
 
                             put(
                                 "labels",
@@ -1637,6 +1896,49 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
                                         "transactions",
                                         JSONObject().apply {
                                             txLabels.forEach { (txid, label) -> put(txid, label) }
+                                        },
+                                    )
+                                    put(
+                                        "liquidTransactions",
+                                        JSONObject().apply {
+                                            liquidTxLabels.forEach { (txid, label) -> put(txid, label) }
+                                        },
+                                    )
+                                },
+                            )
+                        }
+
+                        val liquidTxSources = repository.getAllLiquidTransactionSourcesForWallet(walletId)
+                        val liquidSwapDetails = repository.getAllLiquidSwapDetailsForWallet(walletId)
+                        if (liquidTxSources.isNotEmpty() || liquidSwapDetails.isNotEmpty()) {
+                            put(
+                                "liquidMetadata",
+                                JSONObject().apply {
+                                    put(
+                                        "transactionSources",
+                                        JSONObject().apply {
+                                            liquidTxSources.forEach { (txid, source) -> put(txid, source.name) }
+                                        },
+                                    )
+                                    put(
+                                        "swapDetails",
+                                        JSONObject().apply {
+                                            liquidSwapDetails.forEach { (txid, details) ->
+                                                put(
+                                                    txid,
+                                                    JSONObject().apply {
+                                                        put("service", details.service.name)
+                                                        put("direction", details.direction.name)
+                                                        put("swapId", details.swapId)
+                                                        put("role", details.role.name)
+                                                        put("depositAddress", details.depositAddress)
+                                                        put("receiveAddress", details.receiveAddress)
+                                                        put("refundAddress", details.refundAddress)
+                                                        put("sendAmountSats", details.sendAmountSats)
+                                                        put("expectedReceiveAmountSats", details.expectedReceiveAmountSats)
+                                                    },
+                                                )
+                                            }
                                         },
                                     )
                                 },
@@ -1669,26 +1971,27 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
                                             }
                                         },
                                     )
-                                    put(
-                                        "blockExplorer",
-                                        JSONObject().apply {
-                                            put("type", repository.getMempoolServer())
-                                            val customUrl = repository.getCustomMempoolUrl()
-                                            if (!customUrl.isNullOrBlank()) {
-                                                put("customUrl", customUrl)
-                                            }
-                                        },
-                                    )
-                                    put(
-                                        "feeSource",
-                                        JSONObject().apply {
-                                            put("type", repository.getFeeSource())
-                                            val customUrl = repository.getCustomFeeSourceUrl()
-                                            if (!customUrl.isNullOrBlank()) {
-                                                put("customUrl", customUrl)
-                                            }
-                                        },
-                                    )
+                                    // Only export custom URLs — don't export the type
+                                    // selection (e.g. MEMPOOL_SPACE) because restoring it
+                                    // would silently enable an external service on import.
+                                    val explorerCustomUrl = repository.getCustomMempoolUrl()
+                                    if (!explorerCustomUrl.isNullOrBlank()) {
+                                        put(
+                                            "blockExplorer",
+                                            JSONObject().apply {
+                                                put("customUrl", explorerCustomUrl)
+                                            },
+                                        )
+                                    }
+                                    val feeCustomUrl = repository.getCustomFeeSourceUrl()
+                                    if (!feeCustomUrl.isNullOrBlank()) {
+                                        put(
+                                            "feeSource",
+                                            JSONObject().apply {
+                                                put("customUrl", feeCustomUrl)
+                                            },
+                                        )
+                                    }
                                 },
                             )
                         }
@@ -1701,7 +2004,7 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
                         val encrypted = encryptData(plaintext, password)
 
                         JSONObject().apply {
-                            put("version", 1)
+                            put("version", 2)
                             put("encrypted", true)
                             put("salt", Base64.encodeToString(encrypted.salt, Base64.NO_WRAP))
                             put("iv", Base64.encodeToString(encrypted.iv, Base64.NO_WRAP))
@@ -1724,6 +2027,503 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
                 _uiState.value = _uiState.value.copy(isLoading = false, error = e.message)
                 _events.emit(WalletEvent.Error("Export failed: ${e.message}"))
             }
+        }
+    }
+
+    // ==================== Full App Backup / Restore ====================
+
+    fun getBackupWalletEntries(): List<github.aeonbtc.ibiswallet.ui.screens.BackupWalletEntry> {
+        return repository.getAllWalletIds().mapNotNull { id ->
+            val metadata = repository.getWalletMetadata(id) ?: return@mapNotNull null
+            github.aeonbtc.ibiswallet.ui.screens.BackupWalletEntry(
+                id = id,
+                name = metadata.name,
+                type = metadata.addressType.displayName,
+                isWatchOnly = metadata.isWatchOnly,
+            )
+        }
+    }
+
+    fun exportFullBackup(
+        uri: Uri,
+        walletIds: List<String>,
+        includeLabels: Boolean,
+        includeServers: Boolean,
+        includeAppSettings: Boolean,
+        password: String?,
+    ) {
+        viewModelScope.launch {
+            try {
+                _uiState.value = _uiState.value.copy(isLoading = true, error = null)
+
+                val walletsArray = org.json.JSONArray()
+                for (walletId in walletIds) {
+                    val metadata = repository.getWalletMetadata(walletId) ?: continue
+                    val keyMaterial = repository.getKeyMaterial(walletId) ?: continue
+
+                    val walletEntry = JSONObject().apply {
+                        put("wallet", JSONObject().apply {
+                            put("name", metadata.name)
+                            put("addressType", metadata.addressType.name)
+                            put("derivationPath", metadata.derivationPath)
+                            put("network", metadata.network.name)
+                            put("isWatchOnly", metadata.isWatchOnly)
+                            put("isLocked", metadata.isLocked)
+                            put("createdAt", metadata.createdAt)
+                            put("seedFormat", metadata.seedFormat.name)
+                            if (metadata.gapLimit != StoredWallet.DEFAULT_GAP_LIMIT) {
+                                put("gapLimit", metadata.gapLimit)
+                            }
+                            metadata.masterFingerprint?.let { put("masterFingerprint", it) }
+                        })
+                        put("keyMaterial", JSONObject().apply {
+                            keyMaterial.mnemonic?.let { put("mnemonic", it) }
+                            keyMaterial.extendedPublicKey?.let { put("extendedPublicKey", it) }
+                            keyMaterial.watchAddress?.let { put("watchAddress", it) }
+                            keyMaterial.privateKey?.let { put("privateKey", it) }
+                        })
+
+                        put("walletSettings", JSONObject().apply {
+                            put("liquidEnabled", repository.isLiquidEnabledForWallet(walletId))
+                            val frozen = repository.getFrozenUtxosForWallet(walletId)
+                            if (frozen.isNotEmpty()) {
+                                put("frozenUtxos", org.json.JSONArray(frozen.toList()))
+                            }
+                        })
+
+                        if (includeLabels) {
+                            val addrLabels = repository.getAllAddressLabelsForWallet(walletId)
+                            val txLabels = repository.getAllTransactionLabelsForWallet(walletId)
+                            val liquidTxLabels = repository.getAllLiquidTransactionLabelsForWallet(walletId)
+                            put("labels", JSONObject().apply {
+                                put("addresses", JSONObject().apply { addrLabels.forEach { (k, v) -> put(k, v) } })
+                                put("transactions", JSONObject().apply { txLabels.forEach { (k, v) -> put(k, v) } })
+                                put("liquidTransactions", JSONObject().apply { liquidTxLabels.forEach { (k, v) -> put(k, v) } })
+                            })
+
+                            val liquidTxSources = repository.getAllLiquidTransactionSourcesForWallet(walletId)
+                            val liquidSwapDetails = repository.getAllLiquidSwapDetailsForWallet(walletId)
+                            if (liquidTxSources.isNotEmpty() || liquidSwapDetails.isNotEmpty()) {
+                                put("liquidMetadata", JSONObject().apply {
+                                    put("transactionSources", JSONObject().apply {
+                                        liquidTxSources.forEach { (txid, source) -> put(txid, source.name) }
+                                    })
+                                    put("swapDetails", JSONObject().apply {
+                                        liquidSwapDetails.forEach { (txid, details) ->
+                                            put(txid, JSONObject().apply {
+                                                put("service", details.service.name)
+                                                put("direction", details.direction.name)
+                                                put("swapId", details.swapId)
+                                                put("role", details.role.name)
+                                                put("depositAddress", details.depositAddress)
+                                                put("receiveAddress", details.receiveAddress)
+                                                put("refundAddress", details.refundAddress)
+                                                put("sendAmountSats", details.sendAmountSats)
+                                                put("expectedReceiveAmountSats", details.expectedReceiveAmountSats)
+                                            })
+                                        }
+                                    })
+                                })
+                            }
+                        }
+                    }
+                    walletsArray.put(walletEntry)
+                }
+
+                val payloadJson = JSONObject().apply {
+                    put("ibisFullBackup", true)
+                    put("version", 1)
+                    put("encrypted", password != null)
+                    put("exportedAt", SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).format(Date()))
+                    put("wallets", walletsArray)
+
+                    if (includeServers) {
+                        val servers = repository.getAllElectrumServers()
+                        val activeId = repository.getActiveServerId()
+                        put("electrumServers", org.json.JSONArray().apply {
+                            servers.forEach { server ->
+                                put(JSONObject().apply {
+                                    put("name", server.name ?: "")
+                                    put("url", server.url)
+                                    put("port", server.port)
+                                    put("useSsl", server.useSsl)
+                                    put("useTor", server.useTor)
+                                    if (server.id == activeId) put("isActive", true)
+                                })
+                            }
+                        })
+
+                        val liquidServers = repository.getAllLiquidServers()
+                        val activeLiquidId = repository.getActiveLiquidServerId()
+                        put("liquidServers", org.json.JSONArray().apply {
+                            liquidServers.forEach { server ->
+                                put(JSONObject().apply {
+                                    put("name", server.name)
+                                    put("url", server.url)
+                                    put("port", server.port)
+                                    put("useSsl", server.useSsl)
+                                    put("useTor", server.useTor)
+                                    if (server.id == activeLiquidId) put("isActive", true)
+                                })
+                            }
+                        })
+                    }
+
+                    if (includeAppSettings) {
+                        put("appSettings", JSONObject().apply {
+                            put("layer1Denomination", repository.getLayer1Denomination())
+                            put("layer2Denomination", repository.getLayer2Denomination())
+                            put("autoSwitchServer", repository.isAutoSwitchServerEnabled())
+                            put("torEnabled", repository.isTorEnabled())
+                            put("spendUnconfirmed", repository.getSpendUnconfirmed())
+                            put("nfcEnabled", repository.isNfcEnabled())
+                            put("privacyMode", repository.getPrivacyMode())
+                            put("walletNotificationsEnabled", repository.isWalletNotificationsEnabled())
+                            put("mempoolServer", repository.getMempoolServer())
+                            repository.getCustomMempoolUrl()?.let { put("mempoolCustomUrl", it) }
+                            put("feeSource", repository.getFeeSource())
+                            repository.getCustomFeeSourceUrl()?.let { put("feeSourceCustomUrl", it) }
+                            put("priceSource", repository.getPriceSource())
+                            put("layer2Enabled", repository.isLayer2Enabled())
+                            put("liquidTorEnabled", repository.isLiquidTorEnabled())
+                            put("boltzApiSource", repository.getBoltzApiSource())
+                            put("sideSwapApiSource", repository.getSideSwapApiSource())
+                            put("preferredSwapService", repository.getPreferredSwapService().name)
+                            put("liquidAutoSwitch", repository.isLiquidAutoSwitchEnabled())
+                            put("liquidServerSelectedByUser", repository.hasUserSelectedLiquidServer())
+                            put("liquidExplorer", repository.getLiquidExplorer())
+                            repository.getCustomLiquidExplorerUrl()?.let { put("liquidExplorerCustomUrl", it) }
+                        })
+                    }
+                }
+
+                val outputJson = if (password != null) {
+                    val plaintext = payloadJson.toString().toByteArray(Charsets.UTF_8)
+                    val encrypted = encryptData(plaintext, password)
+                    JSONObject().apply {
+                        put("ibisFullBackup", true)
+                        put("version", 1)
+                        put("encrypted", true)
+                        put("salt", Base64.encodeToString(encrypted.salt, Base64.NO_WRAP))
+                        put("iv", Base64.encodeToString(encrypted.iv, Base64.NO_WRAP))
+                        put("data", Base64.encodeToString(encrypted.ciphertext, Base64.NO_WRAP))
+                    }
+                } else {
+                    payloadJson
+                }
+
+                withContext(Dispatchers.IO) {
+                    getApplication<Application>().contentResolver.openOutputStream(uri)?.use { stream ->
+                        stream.write(outputJson.toString(2).toByteArray(Charsets.UTF_8))
+                    } ?: throw IllegalStateException("Could not open output stream")
+                }
+
+                _uiState.value = _uiState.value.copy(isLoading = false)
+                _fullBackupResultMessage.value = "Successfully exported ${walletIds.size} wallet(s)"
+                _events.emit(WalletEvent.WalletExported("Full backup (${walletIds.size} wallets)"))
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(isLoading = false, error = e.message)
+                _fullBackupResultMessage.value = "Export failed: ${e.message}"
+                _events.emit(WalletEvent.Error("Full backup export failed: ${e.message}"))
+            }
+        }
+    }
+
+    suspend fun parseFullBackup(
+        uri: Uri,
+        password: String?,
+    ): JSONObject {
+        return withContext(Dispatchers.IO) {
+            val rawBytes = getApplication<Application>().contentResolver.openInputStream(uri)?.use {
+                it.readBytes()
+            } ?: throw IllegalStateException("Could not read file")
+
+            val fileJson = JSONObject(String(rawBytes, Charsets.UTF_8))
+
+            if (!fileJson.optBoolean("ibisFullBackup", false)) {
+                throw IllegalStateException("Not a full Ibis backup file. Use Manage Wallets to restore single-wallet backups.")
+            }
+
+            if (fileJson.optBoolean("encrypted", false)) {
+                if (password.isNullOrEmpty()) {
+                    throw IllegalStateException("This backup is encrypted. Please enter the password.")
+                }
+                val salt = Base64.decode(fileJson.getString("salt"), Base64.NO_WRAP)
+                val iv = Base64.decode(fileJson.getString("iv"), Base64.NO_WRAP)
+                val ciphertext = Base64.decode(fileJson.getString("data"), Base64.NO_WRAP)
+                val plaintext = decryptData(EncryptedPayload(salt, iv, ciphertext), password)
+                JSONObject(String(plaintext, Charsets.UTF_8))
+            } else {
+                fileJson
+            }
+        }
+    }
+
+    suspend fun importFullBackup(
+        backupJson: JSONObject,
+        importWallets: Boolean,
+        importLabels: Boolean,
+        importServers: Boolean,
+        importAppSettings: Boolean,
+    ): Boolean {
+        return try {
+            _uiState.value = _uiState.value.copy(isLoading = true, error = null)
+
+            var walletsImported = 0
+            var walletsSkipped = 0
+
+            if (importWallets || importLabels) {
+                val walletsArray = backupJson.optJSONArray("wallets") ?: org.json.JSONArray()
+                val existingMnemonics = repository.getAllWalletIds().mapNotNull { id ->
+                    repository.getKeyMaterial(id)?.mnemonic
+                }.toSet()
+
+                for (i in 0 until walletsArray.length()) {
+                    val entry = walletsArray.getJSONObject(i)
+                    val walletObj = entry.getJSONObject("wallet")
+                    val keyMaterialObj = entry.getJSONObject("keyMaterial")
+                    val mnemonic = keyMaterialObj.optString("mnemonic", "")
+
+                        if (mnemonic.isNotBlank() && mnemonic in existingMnemonics) {
+                            walletsSkipped++
+                            val existingId = findWalletIdByMnemonic(mnemonic)
+                            if (existingId != null) {
+                                restoreWalletSettings(existingId, entry)
+                                if (importLabels) {
+                                    restoreLabelsForWallet(existingId, entry)
+                                }
+                            }
+                            continue
+                        }
+
+                        if (importWallets) {
+                            try {
+                                val parsed = BitcoinUtils.parseBackupJson(walletObj, keyMaterialObj)
+                                val network = BitcoinUtils.parseSupportedWalletNetwork(parsed.network)
+                                val seedFormat = try {
+                                    SeedFormat.valueOf(parsed.seedFormat)
+                                } catch (_: Exception) { SeedFormat.BIP39 }
+
+                                val gapLimit = walletObj.optInt("gapLimit", StoredWallet.DEFAULT_GAP_LIMIT)
+                                val fingerprint = walletObj.optString("masterFingerprint", "").ifBlank { null }
+
+                                val config = WalletImportConfig(
+                                    name = parsed.name,
+                                    keyMaterial = parsed.keyMaterial,
+                                    addressType = parsed.addressType,
+                                    customDerivationPath = parsed.customDerivationPath,
+                                    network = network,
+                                    isWatchOnly = parsed.isWatchOnly,
+                                    seedFormat = seedFormat,
+                                    gapLimit = gapLimit,
+                                    masterFingerprint = fingerprint,
+                                )
+                                repository.importWallet(config)
+                                walletsImported++
+
+                                val newWalletId = repository.getActiveWalletId()
+                                if (newWalletId != null) {
+                                    restoreWalletSettings(newWalletId, entry)
+                                    if (importLabels) {
+                                        restoreLabelsForWallet(newWalletId, entry)
+                                    }
+                                }
+                            } catch (e: Exception) {
+                                if (BuildConfig.DEBUG) {
+                                    android.util.Log.w("WalletViewModel", "Skip wallet import: ${e.message}")
+                                }
+                                walletsSkipped++
+                            }
+                        }
+                    }
+                }
+
+            if (importServers) {
+                val serverSettingsObj = backupJson.optJSONObject("serverSettings")
+                    ?: JSONObject().apply {
+                        backupJson.optJSONArray("electrumServers")?.let { put("electrumServers", it) }
+                    }
+                if (serverSettingsObj.length() > 0) {
+                    restoreServerSettings(serverSettingsObj)
+                }
+                restoreLiquidServers(backupJson.optJSONArray("liquidServers"))
+            }
+
+            if (importAppSettings) {
+                val settingsObj = backupJson.optJSONObject("appSettings")
+                if (settingsObj != null) {
+                    restoreAppSettings(settingsObj)
+                }
+            }
+
+            _uiState.value = _uiState.value.copy(isLoading = false)
+
+            val msg = buildString {
+                append("Restored successfully.")
+                if (walletsImported > 0) append(" $walletsImported wallet(s) imported.")
+                if (walletsSkipped > 0) append(" $walletsSkipped skipped (already exist).")
+            }
+            _fullBackupResultMessage.value = msg
+            _events.emit(WalletEvent.WalletImported)
+            true
+        } catch (e: Exception) {
+            _uiState.value = _uiState.value.copy(isLoading = false, error = e.message)
+            _fullBackupResultMessage.value = "Restore failed: ${e.message}"
+            _events.emit(WalletEvent.Error("Restore failed: ${e.message}"))
+            false
+        }
+    }
+
+    private fun findWalletIdByMnemonic(mnemonic: String): String? {
+        return repository.getAllWalletIds().firstOrNull { id ->
+            repository.getKeyMaterial(id)?.mnemonic == mnemonic
+        }
+    }
+
+    private fun restoreLabelsForWallet(walletId: String, walletEntry: JSONObject) {
+        val labelsObj = walletEntry.optJSONObject("labels") ?: return
+        val addrLabels = labelsObj.optJSONObject("addresses")
+        val txLabels = labelsObj.optJSONObject("transactions")
+        val liquidTxLabels = labelsObj.optJSONObject("liquidTransactions")
+
+        addrLabels?.keys()?.forEach { addr ->
+            val label = addrLabels.optString(addr, "")
+            if (label.isNotBlank()) {
+                repository.saveAddressLabelForWallet(walletId, addr, label)
+            }
+        }
+        txLabels?.keys()?.forEach { txid ->
+            val label = txLabels.optString(txid, "")
+            if (label.isNotBlank()) {
+                repository.saveTransactionLabelForWallet(walletId, txid, label)
+            }
+        }
+        liquidTxLabels?.keys()?.forEach { txid ->
+            val label = liquidTxLabels.optString(txid, "")
+            if (label.isNotBlank()) {
+                repository.saveLiquidTransactionLabelForWallet(walletId, txid, label)
+            }
+        }
+
+        val metadataObj = walletEntry.optJSONObject("liquidMetadata")
+        if (metadataObj != null) {
+            val sourcesObj = metadataObj.optJSONObject("transactionSources")
+            sourcesObj?.keys()?.forEach { txid ->
+                val sourceName = sourcesObj.optString(txid, "")
+                val source = try { LiquidTxSource.valueOf(sourceName) } catch (_: Exception) { null }
+                if (source != null) {
+                    repository.saveLiquidTransactionSourceForWallet(walletId, txid, source)
+                }
+            }
+            val detailsObj = metadataObj.optJSONObject("swapDetails")
+            detailsObj?.keys()?.forEach { txid ->
+                val d = detailsObj.optJSONObject(txid) ?: return@forEach
+                try {
+                    repository.saveLiquidSwapDetailsForWallet(walletId, txid, LiquidSwapDetails(
+                        service = SwapService.valueOf(d.getString("service")),
+                        direction = SwapDirection.valueOf(d.getString("direction")),
+                        swapId = d.getString("swapId"),
+                        role = LiquidSwapTxRole.valueOf(d.getString("role")),
+                        depositAddress = d.optString("depositAddress"),
+                        receiveAddress = d.optString("receiveAddress"),
+                        refundAddress = d.optString("refundAddress"),
+                        sendAmountSats = d.optLong("sendAmountSats"),
+                        expectedReceiveAmountSats = d.optLong("expectedReceiveAmountSats"),
+                    ))
+                } catch (_: Exception) {}
+            }
+        }
+    }
+
+    private fun restoreLiquidServers(serversArray: org.json.JSONArray?) {
+        if (serversArray == null || serversArray.length() == 0) return
+        val existing = repository.getAllLiquidServers()
+        val existingKeys = existing.map { "${it.cleanUrl()}:${it.port}" }.toSet()
+        val activeLiquidId = repository.getActiveLiquidServerId()
+
+        for (i in 0 until serversArray.length()) {
+            val obj = serversArray.getJSONObject(i)
+            val url = obj.getString("url")
+            val port = obj.optInt("port", 995)
+            val key = "${github.aeonbtc.ibiswallet.data.model.LiquidElectrumConfig(url = url, port = port).cleanUrl()}:$port"
+
+            if (key in existingKeys) continue
+
+            val config = github.aeonbtc.ibiswallet.data.model.LiquidElectrumConfig(
+                name = obj.optString("name", ""),
+                url = url,
+                port = port,
+                useSsl = obj.optBoolean("useSsl", true),
+                useTor = obj.optBoolean("useTor", false),
+            )
+            repository.saveLiquidServer(config)
+            if (obj.optBoolean("isActive", false) && activeLiquidId == null) {
+                repository.setActiveLiquidServerId(config.id)
+            }
+        }
+    }
+
+    private fun restoreAppSettings(settings: JSONObject) {
+        settings.optString("layer1Denomination", "").takeIf { it.isNotBlank() }
+            ?.let { repository.setLayer1Denomination(it) }
+        settings.optString("layer2Denomination", "").takeIf { it.isNotBlank() }
+            ?.let { repository.setLayer2Denomination(it) }
+        if (settings.has("autoSwitchServer")) {
+            repository.setAutoSwitchServerEnabled(settings.getBoolean("autoSwitchServer"))
+        }
+        if (settings.has("torEnabled")) repository.setTorEnabled(settings.getBoolean("torEnabled"))
+        if (settings.has("spendUnconfirmed")) repository.setSpendUnconfirmed(settings.getBoolean("spendUnconfirmed"))
+        if (settings.has("nfcEnabled")) repository.setNfcEnabled(settings.getBoolean("nfcEnabled"))
+        if (settings.has("privacyMode")) repository.setPrivacyMode(settings.getBoolean("privacyMode"))
+        if (settings.has("walletNotificationsEnabled")) repository.setWalletNotificationsEnabled(settings.getBoolean("walletNotificationsEnabled"))
+        settings.optString("mempoolServer", "").takeIf { it.isNotBlank() }
+            ?.let { repository.setMempoolServer(it) }
+        settings.optString("mempoolCustomUrl", "").takeIf { it.isNotBlank() }
+            ?.let { repository.setCustomMempoolUrl(it) }
+        settings.optString("feeSource", "").takeIf { it.isNotBlank() }
+            ?.let { repository.setFeeSource(it) }
+        settings.optString("feeSourceCustomUrl", "").takeIf { it.isNotBlank() }
+            ?.let { repository.setCustomFeeSourceUrl(it) }
+        settings.optString("priceSource", "").takeIf { it.isNotBlank() }
+            ?.let { repository.setPriceSource(it) }
+        if (settings.has("layer2Enabled")) repository.setLayer2Enabled(settings.getBoolean("layer2Enabled"))
+        if (settings.has("liquidTorEnabled")) {
+            repository.setLiquidTorEnabled(settings.getBoolean("liquidTorEnabled"))
+        }
+        settings.optString("boltzApiSource", "").takeIf { it.isNotBlank() }
+            ?.let { repository.setBoltzApiSource(it) }
+        settings.optString("sideSwapApiSource", "").takeIf { it.isNotBlank() }
+            ?.let { repository.setSideSwapApiSource(it) }
+        settings.optString("preferredSwapService", "").takeIf { it.isNotBlank() }?.let { name ->
+            try { repository.setPreferredSwapService(SwapService.valueOf(name)) } catch (_: Exception) {}
+        }
+        if (settings.has("liquidAutoSwitch")) {
+            repository.setLiquidAutoSwitchEnabled(settings.getBoolean("liquidAutoSwitch"))
+        }
+        if (settings.has("liquidServerSelectedByUser")) {
+            repository.setUserSelectedLiquidServer(settings.getBoolean("liquidServerSelectedByUser"))
+        }
+        settings.optString("liquidExplorer", "").takeIf { it.isNotBlank() }
+            ?.let { repository.setLiquidExplorer(it) }
+        settings.optString("liquidExplorerCustomUrl", "").takeIf { it.isNotBlank() }
+            ?.let { repository.setCustomLiquidExplorerUrl(it) }
+    }
+
+    private fun restoreWalletSettings(walletId: String, walletEntry: JSONObject) {
+        val settingsObj = walletEntry.optJSONObject("walletSettings") ?: return
+
+        if (settingsObj.has("liquidEnabled")) {
+            repository.setLiquidEnabledForWallet(walletId, settingsObj.getBoolean("liquidEnabled"))
+        }
+        val frozenArr = settingsObj.optJSONArray("frozenUtxos")
+        if (frozenArr != null && frozenArr.length() > 0) {
+            val outpoints = (0 until frozenArr.length()).map { frozenArr.getString(it) }.toSet()
+            repository.setFrozenUtxosForWallet(walletId, outpoints)
+        }
+
+        val walletObj = walletEntry.optJSONObject("wallet")
+        if (walletObj != null && walletObj.optBoolean("isLocked", false)) {
+            repository.setWalletLocked(walletId, true)
         }
     }
 
@@ -1770,13 +2570,28 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
         val keyMaterialObj = backupJson.getJSONObject("keyMaterial")
 
         // Delegate JSON field extraction to testable pure function
-        val parsed = BitcoinUtils.parseBackupJson(walletObj, keyMaterialObj)
+        val parsed =
+            try {
+                BitcoinUtils.parseBackupJson(walletObj, keyMaterialObj)
+            } catch (e: Exception) {
+                val message = e.message ?: "Failed to import backup"
+                viewModelScope.launch {
+                    _uiState.value = _uiState.value.copy(error = message)
+                    _events.emit(WalletEvent.Error(message))
+                }
+                return
+            }
 
         val network =
             try {
-                WalletNetwork.valueOf(parsed.network)
-            } catch (_: Exception) {
-                WalletNetwork.BITCOIN
+                BitcoinUtils.parseSupportedWalletNetwork(parsed.network)
+            } catch (e: Exception) {
+                viewModelScope.launch {
+                    val message = e.message ?: "Failed to import backup"
+                    _uiState.value = _uiState.value.copy(error = message)
+                    _events.emit(WalletEvent.Error(message))
+                }
+                return
             }
 
         val seedFormat =
@@ -1797,54 +2612,128 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
                 seedFormat = seedFormat,
             )
 
-        // Import the wallet, then restore labels once import completes
+        // Import the wallet, then restore metadata once import completes
         val labelsObj = backupJson.optJSONObject("labels")
-        if (labelsObj != null) {
-            viewModelScope.launch {
-                // Wait for import to complete by watching for the wallet to appear
-                var activeWalletId: String? = null
-                repeat(20) {
-                    if (activeWalletId == null || _uiState.value.isLoading) {
-                        delay(250)
-                        activeWalletId = walletState.value.activeWallet?.id
+        val liquidMetadataObj = backupJson.optJSONObject("liquidMetadata")
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(isLoading = true, error = null)
+
+            // Restore server settings before import so the imported wallet can use them immediately.
+            if (importServerSettings) {
+                val serverSettingsObj = backupJson.optJSONObject("serverSettings")
+                if (serverSettingsObj != null) {
+                    restoreServerSettings(serverSettingsObj)
+                }
+            }
+
+            when (val result = repository.importWallet(config)) {
+                is WalletResult.Success -> {
+                    val restoredWalletId = repository.getActiveWalletId() ?: walletState.value.activeWallet?.id
+
+                    if (restoredWalletId != null && (labelsObj != null || liquidMetadataObj != null)) {
+                        restoreBackupMetadata(
+                            walletId = restoredWalletId,
+                            labelsObj = labelsObj,
+                            liquidMetadataObj = liquidMetadataObj,
+                        )
+                    }
+
+                    _uiState.value = _uiState.value.copy(isLoading = false)
+                    _events.emit(WalletEvent.WalletImported)
+
+                    if (labelsObj != null || liquidMetadataObj != null) {
+                        _events.emit(WalletEvent.LabelsRestored)
+                    }
+
+                    if (_uiState.value.isConnected) {
+                        sync()
                     }
                 }
-                if (activeWalletId == null) return@launch
-
-                val addressLabels = labelsObj.optJSONObject("addresses")
-                if (addressLabels != null) {
-                    val keys = addressLabels.keys()
-                    while (keys.hasNext()) {
-                        val addr = keys.next()
-                        val label = addressLabels.getString(addr)
-                        repository.saveAddressLabelForWallet(activeWalletId, addr, label)
-                    }
+                is WalletResult.Error -> {
+                    _uiState.value =
+                        _uiState.value.copy(
+                            isLoading = false,
+                            error = result.message,
+                        )
+                    _events.emit(WalletEvent.Error(result.message))
                 }
+            }
+        }
+    }
 
-                val txLabels = labelsObj.optJSONObject("transactions")
-                if (txLabels != null) {
-                    val keys = txLabels.keys()
-                    while (keys.hasNext()) {
-                        val txid = keys.next()
-                        val label = txLabels.getString(txid)
-                        repository.saveTransactionLabelForWallet(activeWalletId, txid, label)
-                    }
-                }
-
-                // Notify UI that labels have been restored
-                _events.emit(WalletEvent.LabelsRestored)
+    private fun restoreBackupMetadata(
+        walletId: String,
+        labelsObj: JSONObject?,
+        liquidMetadataObj: JSONObject?,
+    ) {
+        val addressLabels = labelsObj?.optJSONObject("addresses")
+        if (addressLabels != null) {
+            val keys = addressLabels.keys()
+            while (keys.hasNext()) {
+                val addr = keys.next()
+                val label = addressLabels.getString(addr)
+                repository.saveAddressLabelForWallet(walletId, addr, label)
             }
         }
 
-        // Restore server settings if present and requested
-        if (importServerSettings) {
-            val serverSettingsObj = backupJson.optJSONObject("serverSettings")
-            if (serverSettingsObj != null) {
-                restoreServerSettings(serverSettingsObj)
+        val txLabels = labelsObj?.optJSONObject("transactions")
+        if (txLabels != null) {
+            val keys = txLabels.keys()
+            while (keys.hasNext()) {
+                val txid = keys.next()
+                val label = txLabels.getString(txid)
+                repository.saveTransactionLabelForWallet(walletId, txid, label)
             }
         }
 
-        importWallet(config)
+        val liquidTxLabels = labelsObj?.optJSONObject("liquidTransactions")
+        if (liquidTxLabels != null) {
+            val keys = liquidTxLabels.keys()
+            while (keys.hasNext()) {
+                val txid = keys.next()
+                val label = liquidTxLabels.getString(txid)
+                repository.saveLiquidTransactionLabelForWallet(walletId, txid, label)
+            }
+        }
+
+        val liquidTxSources = liquidMetadataObj?.optJSONObject("transactionSources")
+        if (liquidTxSources != null) {
+            val keys = liquidTxSources.keys()
+            while (keys.hasNext()) {
+                val txid = keys.next()
+                val source =
+                    runCatching {
+                        LiquidTxSource.valueOf(liquidTxSources.getString(txid))
+                    }.getOrNull() ?: continue
+                repository.saveLiquidTransactionSourceForWallet(walletId, txid, source)
+            }
+        }
+
+        val liquidSwapDetails = liquidMetadataObj?.optJSONObject("swapDetails")
+        if (liquidSwapDetails != null) {
+            val keys = liquidSwapDetails.keys()
+            while (keys.hasNext()) {
+                val txid = keys.next()
+                val detailsJson = liquidSwapDetails.optJSONObject(txid) ?: continue
+                val details =
+                    runCatching {
+                        LiquidSwapDetails(
+                            service = SwapService.valueOf(detailsJson.getString("service")),
+                            direction = SwapDirection.valueOf(detailsJson.getString("direction")),
+                            swapId = detailsJson.getString("swapId"),
+                            role = LiquidSwapTxRole.valueOf(
+                                detailsJson.optString("role", LiquidSwapTxRole.FUNDING.name),
+                            ),
+                            depositAddress = detailsJson.getString("depositAddress"),
+                            receiveAddress = detailsJson.optString("receiveAddress").takeIf { it.isNotBlank() },
+                            refundAddress = detailsJson.optString("refundAddress").takeIf { it.isNotBlank() },
+                            sendAmountSats = detailsJson.optLong("sendAmountSats", 0L),
+                            expectedReceiveAmountSats = detailsJson.optLong("expectedReceiveAmountSats", 0L),
+                        )
+                    }.getOrNull() ?: continue
+                repository.saveLiquidSwapDetailsForWallet(walletId, txid, details)
+            }
+        }
     }
 
     /**
@@ -1897,28 +2786,19 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
                 )
             }
 
-            // Restore block explorer setting
+            // Restore block explorer custom URL only — don't restore the type
+            // selection so we never silently enable an external service on import.
             val explorerObj = serverSettingsObj.optJSONObject("blockExplorer")
             if (explorerObj != null) {
-                val type = explorerObj.optString("type", "")
-                if (type.isNotBlank()) {
-                    repository.setMempoolServer(type)
-                    _mempoolServerState.value = type
-                }
                 val customUrl = explorerObj.optString("customUrl", "")
                 if (customUrl.isNotBlank()) {
                     repository.setCustomMempoolUrl(customUrl)
                 }
             }
 
-            // Restore fee source setting
+            // Restore fee source custom URL only — same rationale as above.
             val feeObj = serverSettingsObj.optJSONObject("feeSource")
             if (feeObj != null) {
-                val type = feeObj.optString("type", "")
-                if (type.isNotBlank()) {
-                    repository.setFeeSource(type)
-                    _feeSourceState.value = type
-                }
                 val customUrl = feeObj.optString("customUrl", "")
                 if (customUrl.isNotBlank()) {
                     repository.setCustomFeeSourceUrl(customUrl)
@@ -2061,9 +2941,11 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
      */
     override fun onCleared() {
         super.onCleared()
+        lifecycleCoordinator.dispose()
         // Run on IO to avoid blocking the main thread with socket closes
         CoroutineScope(Dispatchers.IO).launch {
             repository.disconnect()
+            repository.close()
             torManager.stop()
         }
     }
@@ -2072,6 +2954,10 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
      * Disconnect from the current Electrum server
      */
     fun disconnect() {
+        if (_uiState.value.isConnecting) {
+            cancelConnection()
+            return
+        }
         stopBackgroundSync()
         stopHeartbeat()
         _uiState.value = _uiState.value.copy(isConnected = false, serverVersion = null)
@@ -2087,11 +2973,12 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
     fun cancelConnection() {
         stopBackgroundSync()
         stopHeartbeat()
-        connectionJob?.cancel()
+        val jobToCancel = connectionJob
         connectionJob = null
         _uiState.value = _uiState.value.copy(isConnecting = false, isConnected = false, serverVersion = null, error = null)
         viewModelScope.launch(Dispatchers.IO) {
             repository.setUserDisconnected(true)
+            jobToCancel?.cancelAndJoin()
             repository.disconnect()
         }
     }
@@ -2108,11 +2995,16 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     /**
-     * Set the denomination preference
+     * Set the Layer 1 denomination preference
      */
     fun setDenomination(denomination: String) {
-        repository.setDenomination(denomination)
+        repository.setLayer1Denomination(denomination)
         _denominationState.value = denomination
+    }
+
+    fun setSwipeMode(mode: String) {
+        repository.setSwipeMode(mode)
+        _swipeMode.value = mode
     }
 
     // ==================== Mempool Server Settings ====================
@@ -2204,6 +3096,12 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
         repository.setNfcEnabled(enabled)
     }
 
+    fun isWalletNotificationsEnabled(): Boolean = repository.isWalletNotificationsEnabled()
+
+    fun setWalletNotificationsEnabled(enabled: Boolean) {
+        repository.setWalletNotificationsEnabled(enabled)
+    }
+
     // ==================== Fee Estimation Settings ====================
 
     /**
@@ -2275,11 +3173,14 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
                         _feeEstimationState.value = FeeEstimationResult.Error(msg)
                         return@launch
                     }
+                    // Brief settle time for the SOCKS proxy after bootstrap
+                    delay(TOR_POST_BOOTSTRAP_DELAY_MS)
                 }
             }
 
-            // Only use precise fees if the connected server supports sub-sat fee rates
-            val usePrecise = repository.supportsSubSatFees()
+            // HTTP fee providers should decide whether `/precise` works; the service
+            // already falls back to `/recommended` when the endpoint is unsupported.
+            val usePrecise = true
 
             val result = feeEstimationService.fetchFeeEstimates(feeSourceUrl, useTorProxy, usePrecise)
 
@@ -2308,6 +3209,40 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    fun reloadRestoredAppSettings() {
+        _denominationState.value = repository.getLayer1Denomination()
+        _mempoolServerState.value = repository.getMempoolServer()
+        _feeSourceState.value = repository.getFeeSource()
+        _priceSourceState.value = repository.getPriceSource()
+        _privacyMode.value = repository.getPrivacyMode()
+        _swipeMode.value = repository.getSwipeMode()
+        _autoSwitchServer.value = repository.isAutoSwitchServerEnabled()
+
+        if (_feeSourceState.value == SecureStorage.FEE_SOURCE_OFF) {
+            _feeEstimationState.value = FeeEstimationResult.Disabled
+        } else {
+            fetchFeeEstimates()
+        }
+
+        if (_priceSourceState.value == SecureStorage.PRICE_SOURCE_OFF) {
+            _btcPriceState.value = null
+        } else {
+            fetchBtcPrice()
+        }
+
+        val shouldKeepTorRunning =
+            repository.isTorEnabled() ||
+                isFeeSourceOnion() ||
+                isPriceSourceOnion()
+        if (shouldKeepTorRunning) {
+            startTor()
+        } else {
+            stopTor()
+        }
+
+        _settingsRefreshVersion.value += 1
+    }
+
     /**
      * Fetch BTC/USD price from the configured source
      */
@@ -2330,6 +3265,8 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
                         }
                         return@launch
                     }
+                    // Brief settle time for the SOCKS proxy after bootstrap
+                    delay(TOR_POST_BOOTSTRAP_DELAY_MS)
                 }
             }
 
@@ -2409,20 +3346,17 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
     fun isDuressEnabled(): Boolean = repository.isDuressEnabled()
 
     /**
-     * Set up a duress wallet with a PIN and mnemonic.
+     * Set up a duress wallet with a PIN and import config.
      * Creates the decoy wallet, saves the duress PIN, and enables duress mode.
      */
     fun setupDuress(
         pin: String,
-        mnemonic: String,
-        passphrase: String?,
-        customDerivationPath: String? = null,
-        addressType: AddressType = AddressType.SEGWIT,
+        config: WalletImportConfig,
         onSuccess: () -> Unit = {},
         onError: (String) -> Unit = {},
     ) {
         viewModelScope.launch {
-            when (val result = repository.createDuressWallet(mnemonic, passphrase, customDerivationPath, addressType)) {
+            when (val result = repository.createDuressWallet(config)) {
                 is WalletResult.Success -> {
                     repository.saveDuressPin(pin)
                     repository.setDuressEnabled(true)
@@ -2517,8 +3451,8 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
 
     /**
      * Wipe all wallet data. Called when auto-wipe threshold is reached.
-     * Clears clipboard, stops Tor and deletes its data, wipes all wallet
-     * databases and preferences, and deletes the Electrum cache DB file.
+     * Clears clipboard, stops Tor and deletes its data, and asks the repository
+     * to wipe wallet databases, preferences, and the Electrum cache database.
      */
     fun wipeAllData(onComplete: () -> Unit = {}) {
         viewModelScope.launch {
@@ -2545,15 +3479,8 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
             } catch (_: Exception) {
             }
 
-            // Wipe all wallet data (BDK databases, preferences, Electrum cache tables, in-memory state)
+            // Wipe all wallet data (BDK/LWK databases, preferences, Electrum cache DB, in-memory state)
             repository.wipeAllData()
-
-            // Delete the Electrum cache database file (not just cleared rows)
-            // to prevent forensic recovery from SQLite free pages
-            try {
-                app.deleteDatabase("electrum_cache.db")
-            } catch (_: Exception) {
-            }
 
             onComplete()
         }
@@ -2641,8 +3568,8 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
         private const val CONNECTION_TIMEOUT_CLEARNET_MS = 15_000L
         private const val CONNECTION_TIMEOUT_TOR_MS = 30_000L
         private const val TOR_BOOTSTRAP_TIMEOUT_MS = 60_000L
+        private const val TOR_POST_BOOTSTRAP_DELAY_MS = 2_500L
         private const val PBKDF2_ITERATIONS = 600_000
-        private const val BACKGROUND_SYNC_INTERVAL_MS = 300_000L
         private const val HEARTBEAT_INTERVAL_MS = 60_000L
         private const val HEARTBEAT_PING_TIMEOUT_MS = 10_000L
         private const val HEARTBEAT_MAX_FAILURES = 3
@@ -2685,6 +3612,8 @@ sealed class WalletEvent {
     data class FeeBumped(val newTxid: String) : WalletEvent()
 
     data class CpfpCreated(val childTxid: String) : WalletEvent()
+
+    data class TransactionRedirected(val newTxid: String) : WalletEvent()
 
     data class PsbtCreated(val psbtBase64: String) : WalletEvent()
 

@@ -33,7 +33,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import github.aeonbtc.ibiswallet.data.model.FeeEstimateSource
@@ -70,6 +73,11 @@ fun FeeRateSection(
     currentFeeRate: Double,
     minFeeRate: Double,
     onFeeRateChange: (Double) -> Unit,
+    selectedOption: FeeRateOption? = null,
+    onSelectedOptionChange: ((FeeRateOption) -> Unit)? = null,
+    customFeeInput: String? = null,
+    onCustomFeeInputChange: ((String?) -> Unit)? = null,
+    onRawCustomFeeRateChange: ((Double?) -> Unit)? = null,
     onRefreshFees: () -> Unit,
     enabled: Boolean,
     estimatedFeeSats: Long? = null,
@@ -82,19 +90,47 @@ fun FeeRateSection(
     formatVBytesDisplay: ((Double) -> String)? = null,
     hiddenAmount: String? = null,
 ) {
-    var selectedOption by remember { mutableStateOf(FeeRateOption.HALF_HOUR) }
-    var customFeeInput by remember { mutableStateOf<String?>(null) }
+    var resolvedSelectedOption by remember { mutableStateOf(selectedOption ?: FeeRateOption.HALF_HOUR) }
+    var resolvedCustomFeeInput by remember { mutableStateOf(customFeeInput) }
+    val customFocusRequester = remember { FocusRequester() }
+
+    LaunchedEffect(selectedOption) {
+        selectedOption?.let { resolvedSelectedOption = it }
+    }
+
+    LaunchedEffect(customFeeInput) {
+        if (onCustomFeeInputChange != null) {
+            resolvedCustomFeeInput = customFeeInput
+        }
+    }
+
+    fun updateSelectedOption(option: FeeRateOption) {
+        resolvedSelectedOption = option
+        onSelectedOptionChange?.invoke(option)
+    }
+
+    fun updateCustomFeeInput(input: String?) {
+        resolvedCustomFeeInput = input
+        onCustomFeeInputChange?.invoke(input)
+    }
 
     val estimates = (feeEstimationState as? FeeEstimationResult.Success)?.estimates
 
-    LaunchedEffect(estimates) {
-        if (estimates != null && selectedOption != FeeRateOption.CUSTOM) {
+    LaunchedEffect(resolvedSelectedOption) {
+        if (resolvedSelectedOption == FeeRateOption.CUSTOM) {
+            customFocusRequester.requestFocus()
+        }
+    }
+
+    LaunchedEffect(estimates, resolvedSelectedOption) {
+        if (estimates != null && resolvedSelectedOption != FeeRateOption.CUSTOM) {
+            onRawCustomFeeRateChange?.invoke(null)
             val newRate =
-                when (selectedOption) {
+                when (resolvedSelectedOption) {
                     FeeRateOption.FASTEST -> estimates.fastestFee
                     FeeRateOption.HALF_HOUR -> estimates.halfHourFee
                     FeeRateOption.HOUR -> estimates.hourFee
-                    FeeRateOption.CUSTOM -> currentFeeRate
+                    FeeRateOption.CUSTOM -> return@LaunchedEffect
                 }
             onFeeRateChange(newRate.coerceAtLeast(minFeeRate))
         }
@@ -165,17 +201,19 @@ fun FeeRateSection(
             )
         }
 
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(6.dp))
 
         if (feeEstimationState is FeeEstimationResult.Disabled) {
-            if (customFeeInput == null) {
-                customFeeInput = formatFeeRate(currentFeeRate)
+            if (resolvedCustomFeeInput == null) {
+                updateCustomFeeInput(formatFeeRate(currentFeeRate))
             }
             ManualFeeInput(
-                value = customFeeInput ?: "",
+                value = resolvedCustomFeeInput ?: "",
                 onValueChange = { input ->
-                    customFeeInput = input
-                    input.toDoubleOrNull()?.let {
+                    updateCustomFeeInput(input)
+                    val parsedRate = input.toDoubleOrNull()
+                    onRawCustomFeeRateChange?.invoke(parsedRate)
+                    parsedRate?.let {
                         onFeeRateChange(it.coerceIn(minFeeRate, MAX_FEE_RATE_SAT_VB))
                     }
                 },
@@ -219,16 +257,17 @@ fun FeeRateSection(
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(1.dp),
             ) {
                 FeeTargetButton(
                     label = fastLabel,
                     feeRate = estimates?.fastestFee,
-                    isSelected = selectedOption == FeeRateOption.FASTEST,
+                    isSelected = resolvedSelectedOption == FeeRateOption.FASTEST,
                     onClick = {
                         estimates?.let {
-                            selectedOption = FeeRateOption.FASTEST
-                            customFeeInput = null
+                            updateSelectedOption(FeeRateOption.FASTEST)
+                            updateCustomFeeInput(null)
+                            onRawCustomFeeRateChange?.invoke(null)
                             onFeeRateChange(it.fastestFee.coerceAtLeast(minFeeRate))
                         }
                     },
@@ -240,11 +279,12 @@ fun FeeRateSection(
                 FeeTargetButton(
                     label = medLabel,
                     feeRate = estimates?.halfHourFee,
-                    isSelected = selectedOption == FeeRateOption.HALF_HOUR,
+                    isSelected = resolvedSelectedOption == FeeRateOption.HALF_HOUR,
                     onClick = {
                         estimates?.let {
-                            selectedOption = FeeRateOption.HALF_HOUR
-                            customFeeInput = null
+                            updateSelectedOption(FeeRateOption.HALF_HOUR)
+                            updateCustomFeeInput(null)
+                            onRawCustomFeeRateChange?.invoke(null)
                             onFeeRateChange(it.halfHourFee.coerceAtLeast(minFeeRate))
                         }
                     },
@@ -256,11 +296,12 @@ fun FeeRateSection(
                 FeeTargetButton(
                     label = slowLabel,
                     feeRate = estimates?.hourFee,
-                    isSelected = selectedOption == FeeRateOption.HOUR,
+                    isSelected = resolvedSelectedOption == FeeRateOption.HOUR,
                     onClick = {
                         estimates?.let {
-                            selectedOption = FeeRateOption.HOUR
-                            customFeeInput = null
+                            updateSelectedOption(FeeRateOption.HOUR)
+                            updateCustomFeeInput(null)
+                            onRawCustomFeeRateChange?.invoke(null)
                             onFeeRateChange(it.hourFee.coerceAtLeast(minFeeRate))
                         }
                     },
@@ -269,22 +310,25 @@ fun FeeRateSection(
                     modifier = Modifier.weight(1f),
                 )
             }
-            Spacer(modifier = Modifier.height(6.dp))
+            Spacer(modifier = Modifier.height(4.dp))
 
-            if (selectedOption == FeeRateOption.CUSTOM) {
-                if (customFeeInput == null) {
-                    customFeeInput = formatFeeRate(currentFeeRate)
+            if (resolvedSelectedOption == FeeRateOption.CUSTOM) {
+                if (resolvedCustomFeeInput == null) {
+                    updateCustomFeeInput(formatFeeRate(currentFeeRate))
                 }
                 ManualFeeInput(
-                    value = customFeeInput ?: "",
+                    value = resolvedCustomFeeInput ?: "",
                     onValueChange = { input ->
-                        customFeeInput = input
-                        input.toDoubleOrNull()?.let {
+                        updateCustomFeeInput(input)
+                        val parsedRate = input.toDoubleOrNull()
+                        onRawCustomFeeRateChange?.invoke(parsedRate)
+                        parsedRate?.let {
                             onFeeRateChange(it.coerceIn(minFeeRate, MAX_FEE_RATE_SAT_VB))
                         }
                     },
                     enabled = enabled,
                     minFeeRate = minFeeRate,
+                    modifier = Modifier.focusRequester(customFocusRequester),
                 )
             } else {
                 Card(
@@ -293,8 +337,9 @@ fun FeeRateSection(
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(12.dp))
                             .clickable(enabled = enabled && !isLoading) {
-                                selectedOption = FeeRateOption.CUSTOM
-                                customFeeInput = formatFeeRate(currentFeeRate)
+                                updateSelectedOption(FeeRateOption.CUSTOM)
+                                updateCustomFeeInput(formatFeeRate(currentFeeRate))
+                                onRawCustomFeeRateChange?.invoke(currentFeeRate)
                             },
                     shape = RoundedCornerShape(12.dp),
                     colors = CardDefaults.cardColors(containerColor = DarkSurface),
@@ -346,15 +391,16 @@ internal fun FeeTargetButton(
             modifier =
                 Modifier
                     .fillMaxWidth()
-                    .padding(vertical = 8.dp, horizontal = 8.dp),
+                    .padding(vertical = 6.dp, horizontal = 0.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
         ) {
             Text(
                 text = label,
                 style = MaterialTheme.typography.bodySmall,
                 color = if (isSelected) MaterialTheme.colorScheme.onBackground else TextSecondary,
+                textAlign = TextAlign.Center,
             )
-            Spacer(modifier = Modifier.height(1.dp))
             if (isLoading) {
                 CircularProgressIndicator(
                     modifier = Modifier.size(20.dp),
@@ -367,12 +413,14 @@ internal fun FeeTargetButton(
                     style = MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.SemiBold,
                     color = textColor,
+                    textAlign = TextAlign.Center,
                 )
             }
             Text(
                 text = "sat/vB",
                 style = MaterialTheme.typography.labelSmall,
                 color = TextSecondary,
+                textAlign = TextAlign.Center,
             )
         }
     }
@@ -383,10 +431,12 @@ private fun ManualFeeInput(
     value: String,
     onValueChange: (String) -> Unit,
     enabled: Boolean,
+    modifier: Modifier = Modifier,
     minFeeRate: Double = 1.0,
 ) {
     val parsedRate = value.toDoubleOrNull()
     val isOverCap = parsedRate != null && parsedRate > MAX_FEE_RATE_SAT_VB
+    val isBelowMin = parsedRate != null && parsedRate > 0.0 && parsedRate < minFeeRate
 
     OutlinedTextField(
         value = value,
@@ -406,14 +456,25 @@ private fun ManualFeeInput(
                 onValueChange(input)
             }
         },
-        modifier = Modifier.fillMaxWidth(),
-        label = { Text("Fee rate (sat/vB)") },
+        modifier = modifier.fillMaxWidth(),
+        suffix = {
+            Text(
+                text = "sat/vB",
+                color = TextSecondary.copy(alpha = 0.7f),
+            )
+        },
         placeholder = { Text(formatFeeRate(minFeeRate), color = TextSecondary.copy(alpha = 0.5f)) },
-        isError = isOverCap,
+        isError = isOverCap || isBelowMin,
         supportingText = {
             if (isOverCap) {
                 Text(
                     text = "Exceeds ${formatFeeRate(MAX_FEE_RATE_SAT_VB)} sat/vB safety cap — will be clamped",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = WarningYellow,
+                )
+            } else if (isBelowMin) {
+                Text(
+                    text = "Below minimum: ${formatFeeRate(minFeeRate)} sat/vB",
                     style = MaterialTheme.typography.bodySmall,
                     color = WarningYellow,
                 )
@@ -431,9 +492,9 @@ private fun ManualFeeInput(
         shape = RoundedCornerShape(12.dp),
         colors =
             OutlinedTextFieldDefaults.colors(
-                focusedBorderColor = if (isOverCap) WarningYellow else BitcoinOrange,
-                unfocusedBorderColor = if (isOverCap) WarningYellow else BorderColor,
-                focusedLabelColor = if (isOverCap) WarningYellow else BitcoinOrange,
+                focusedBorderColor = if (isOverCap || isBelowMin) WarningYellow else BitcoinOrange,
+                unfocusedBorderColor = if (isOverCap || isBelowMin) WarningYellow else BorderColor,
+                focusedLabelColor = if (isOverCap || isBelowMin) WarningYellow else BitcoinOrange,
                 unfocusedLabelColor = TextSecondary,
                 focusedTextColor = MaterialTheme.colorScheme.onBackground,
                 unfocusedTextColor = MaterialTheme.colorScheme.onBackground,

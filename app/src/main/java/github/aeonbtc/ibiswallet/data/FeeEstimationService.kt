@@ -6,10 +6,8 @@ import github.aeonbtc.ibiswallet.data.model.FeeEstimates
 import github.aeonbtc.ibiswallet.util.BitcoinUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import okhttp3.Dns
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import org.json.JSONObject
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Proxy
@@ -48,23 +46,10 @@ class FeeEstimationService {
                 val client = buildClient(useTorProxy)
 
                 if (usePrecise) {
-                    // Try precise endpoint first for sub-sat precision
-                    val preciseResult = tryFetchFromEndpoint(client, baseUrl, PRECISE_ENDPOINT)
-                    if (preciseResult.isSuccess) {
-                        return@withContext preciseResult
-                    }
-                    if (BuildConfig.DEBUG) Log.d(TAG, "Precise endpoint failed, trying recommended endpoint")
+                    return@withContext tryFetchFromEndpoint(client, baseUrl, PRECISE_ENDPOINT)
                 }
 
-                // Use recommended endpoint (either as fallback or primary)
-                val recommendedResult = tryFetchFromEndpoint(client, baseUrl, RECOMMENDED_ENDPOINT)
-                if (recommendedResult.isSuccess) {
-                    return@withContext recommendedResult
-                }
-
-                // Failed
-                val error = recommendedResult.exceptionOrNull()?.message ?: "Unknown error"
-                Result.failure(Exception("Failed to fetch fee estimates: $error"))
+                tryFetchFromEndpoint(client, baseUrl, RECOMMENDED_ENDPOINT)
             } catch (e: Exception) {
                 if (BuildConfig.DEBUG) Log.e(TAG, "Error fetching fee estimates", e)
                 Result.failure(e)
@@ -87,13 +72,9 @@ class FeeEstimationService {
             builder.proxy(proxy)
             // Prevent local DNS resolution — send hostname through SOCKS5 proxy
             // so Tor resolves it at the exit node, avoiding DNS leaks.
-            builder.dns(
-                object : Dns {
-                    override fun lookup(hostname: String): List<InetAddress> {
-                        return listOf(InetAddress.getByAddress(hostname, byteArrayOf(0, 0, 0, 0)))
-                    }
-                },
-            )
+            builder.dns { hostname ->
+                listOf(InetAddress.getByAddress(hostname, byteArrayOf(0, 0, 0, 0)))
+            }
         }
 
         return builder.build()
@@ -116,17 +97,19 @@ class FeeEstimationService {
 
             val response = client.newCall(request).execute()
 
-            if (!response.isSuccessful) {
-                return Result.failure(Exception("HTTP ${response.code}: ${response.message}"))
-            }
+            response.use {
+                if (!it.isSuccessful) {
+                    return Result.failure(Exception("HTTP ${it.code}: ${it.message}"))
+                }
 
-            val body = response.body?.string()
-            if (body.isNullOrEmpty()) {
-                return Result.failure(Exception("Empty response body"))
-            }
+                val body = it.body.string()
+                if (body.isEmpty()) {
+                    return Result.failure(Exception("Empty response body"))
+                }
 
-            val estimates = parseResponse(body)
-            Result.success(estimates)
+                val estimates = parseResponse(body)
+                Result.success(estimates)
+            }
         } catch (e: Exception) {
             if (BuildConfig.DEBUG) Log.e(TAG, "Error fetching from $endpoint", e)
             Result.failure(e)

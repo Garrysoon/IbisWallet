@@ -4,7 +4,6 @@ import android.util.Log
 import github.aeonbtc.ibiswallet.BuildConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import okhttp3.Dns
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
@@ -41,14 +40,10 @@ class BtcPriceService {
             .readTimeout(TOR_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             .writeTimeout(TOR_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             .proxy(Proxy(Proxy.Type.SOCKS, InetSocketAddress(TOR_PROXY_HOST, TOR_PROXY_PORT)))
-            .dns(
-                object : Dns {
-                    override fun lookup(hostname: String): List<InetAddress> {
-                        // Send hostname through SOCKS5 proxy for Tor resolution, avoiding DNS leaks
-                        return listOf(InetAddress.getByAddress(hostname, byteArrayOf(0, 0, 0, 0)))
-                    }
-                },
-            )
+            .dns { hostname ->
+                // Send hostname through SOCKS5 proxy for Tor resolution, avoiding DNS leaks
+                listOf(InetAddress.getByAddress(hostname, byteArrayOf(0, 0, 0, 0)))
+            }
             .build()
     }
 
@@ -67,26 +62,28 @@ class BtcPriceService {
 
                 val response = client.newCall(request).execute()
 
-                if (!response.isSuccessful) {
-                    if (BuildConfig.DEBUG) Log.e(TAG, "Mempool price fetch failed: ${response.code}")
-                    return@withContext null
-                }
+                response.use {
+                    if (!it.isSuccessful) {
+                        if (BuildConfig.DEBUG) Log.e(TAG, "Mempool price fetch failed: ${it.code}")
+                        return@withContext null
+                    }
 
-                val body = response.body?.string()
-                if (body.isNullOrEmpty()) {
-                    if (BuildConfig.DEBUG) Log.e(TAG, "Mempool price response empty")
-                    return@withContext null
-                }
+                    val body = it.body.string()
+                    if (body.isEmpty()) {
+                        if (BuildConfig.DEBUG) Log.e(TAG, "Mempool price response empty")
+                        return@withContext null
+                    }
 
-                val json = JSONObject(body)
-                val price = json.optDouble("USD", -1.0)
+                    val json = JSONObject(body)
+                    val price = json.optDouble("USD", -1.0)
 
-                if (price > 0) {
-                    if (BuildConfig.DEBUG) Log.d(TAG, "Mempool price: $price USD")
-                    price
-                } else {
-                    if (BuildConfig.DEBUG) Log.e(TAG, "Invalid price from Mempool")
-                    null
+                    if (price > 0) {
+                        if (BuildConfig.DEBUG) Log.d(TAG, "Mempool price: $price USD")
+                        price
+                    } else {
+                        if (BuildConfig.DEBUG) Log.e(TAG, "Invalid price from Mempool")
+                        null
+                    }
                 }
             } catch (e: Exception) {
                 if (BuildConfig.DEBUG) Log.e(TAG, "Error fetching from Mempool", e)
@@ -109,26 +106,28 @@ class BtcPriceService {
 
                 val response = torClient.newCall(request).execute()
 
-                if (!response.isSuccessful) {
-                    if (BuildConfig.DEBUG) Log.e(TAG, "Mempool onion price fetch failed: ${response.code}")
-                    return@withContext null
-                }
+                response.use {
+                    if (!it.isSuccessful) {
+                        if (BuildConfig.DEBUG) Log.e(TAG, "Mempool onion price fetch failed: ${it.code}")
+                        return@withContext null
+                    }
 
-                val body = response.body?.string()
-                if (body.isNullOrEmpty()) {
-                    if (BuildConfig.DEBUG) Log.e(TAG, "Mempool onion price response empty")
-                    return@withContext null
-                }
+                    val body = it.body.string()
+                    if (body.isEmpty()) {
+                        if (BuildConfig.DEBUG) Log.e(TAG, "Mempool onion price response empty")
+                        return@withContext null
+                    }
 
-                val json = JSONObject(body)
-                val price = json.optDouble("USD", -1.0)
+                    val json = JSONObject(body)
+                    val price = json.optDouble("USD", -1.0)
 
-                if (price > 0) {
-                    if (BuildConfig.DEBUG) Log.d(TAG, "Mempool onion price: $price USD")
-                    price
-                } else {
-                    if (BuildConfig.DEBUG) Log.e(TAG, "Invalid price from Mempool onion")
-                    null
+                    if (price > 0) {
+                        if (BuildConfig.DEBUG) Log.d(TAG, "Mempool onion price: $price USD")
+                        price
+                    } else {
+                        if (BuildConfig.DEBUG) Log.e(TAG, "Invalid price from Mempool onion")
+                        null
+                    }
                 }
             } catch (e: Exception) {
                 if (BuildConfig.DEBUG) Log.e(TAG, "Error fetching from Mempool onion", e)
@@ -151,28 +150,30 @@ class BtcPriceService {
 
                 val response = client.newCall(request).execute()
 
-                if (!response.isSuccessful) {
-                    if (BuildConfig.DEBUG) Log.e(TAG, "CoinGecko price fetch failed: ${response.code}")
-                    return@withContext null
-                }
+                response.use {
+                    if (!it.isSuccessful) {
+                        if (BuildConfig.DEBUG) Log.e(TAG, "CoinGecko price fetch failed: ${it.code}")
+                        return@withContext null
+                    }
 
-                val body = response.body?.string()
-                if (body.isNullOrEmpty()) {
-                    if (BuildConfig.DEBUG) Log.e(TAG, "CoinGecko price response empty")
-                    return@withContext null
-                }
+                    val body = it.body.string()
+                    if (body.isEmpty()) {
+                        if (BuildConfig.DEBUG) Log.e(TAG, "CoinGecko price response empty")
+                        return@withContext null
+                    }
 
-                // Response format: {"bitcoin":{"usd":12345.67}}
-                val json = JSONObject(body)
-                val bitcoin = json.optJSONObject("bitcoin")
-                val price = bitcoin?.optDouble("usd", -1.0) ?: -1.0
+                    // Response format: {"bitcoin":{"usd":12345.67}}
+                    val json = JSONObject(body)
+                    val bitcoin = json.optJSONObject("bitcoin")
+                    val price = bitcoin?.optDouble("usd", -1.0) ?: -1.0
 
-                if (price > 0) {
-                    if (BuildConfig.DEBUG) Log.d(TAG, "CoinGecko price: $price USD")
-                    price
-                } else {
-                    if (BuildConfig.DEBUG) Log.e(TAG, "Invalid price from CoinGecko")
-                    null
+                    if (price > 0) {
+                        if (BuildConfig.DEBUG) Log.d(TAG, "CoinGecko price: $price USD")
+                        price
+                    } else {
+                        if (BuildConfig.DEBUG) Log.e(TAG, "Invalid price from CoinGecko")
+                        null
+                    }
                 }
             } catch (e: Exception) {
                 if (BuildConfig.DEBUG) Log.e(TAG, "Error fetching from CoinGecko", e)

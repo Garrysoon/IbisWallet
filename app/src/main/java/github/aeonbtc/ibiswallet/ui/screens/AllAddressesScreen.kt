@@ -1,8 +1,6 @@
 package github.aeonbtc.ibiswallet.ui.screens
 
 import android.graphics.Bitmap
-import androidx.core.graphics.createBitmap
-import androidx.core.graphics.set
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -10,7 +8,9 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -67,9 +67,6 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.google.zxing.BarcodeFormat
-import com.google.zxing.EncodeHintType
-import com.google.zxing.qrcode.QRCodeWriter
 import github.aeonbtc.ibiswallet.data.local.SecureStorage
 import github.aeonbtc.ibiswallet.data.model.KeychainType
 import github.aeonbtc.ibiswallet.data.model.WalletAddress
@@ -84,8 +81,7 @@ import github.aeonbtc.ibiswallet.ui.theme.ErrorRed
 import github.aeonbtc.ibiswallet.ui.theme.SuccessGreen
 import github.aeonbtc.ibiswallet.ui.theme.TextSecondary
 import github.aeonbtc.ibiswallet.util.SecureClipboard
-import java.text.NumberFormat
-import java.util.Locale
+import github.aeonbtc.ibiswallet.util.generateQrBitmap
 
 private const val ADDRESS_DISPLAY_LIMIT = 20
 
@@ -98,12 +94,21 @@ fun AllAddressesScreen(
     usedAddresses: List<WalletAddress>,
     denomination: String = SecureStorage.DENOMINATION_BTC,
     privacyMode: Boolean = false,
+    accentColor: Color = BitcoinOrange,
+    labelAccentColor: Color = AccentTeal,
+    addressEdgeCharacters: Int? = null,
+    addressMaxLines: Int = 3,
+    useMultilineTruncatedAddress: Boolean = false,
+    changeTabHelperText: String? = null,
+    emptyChangeMessage: String? = null,
     onSaveLabel: (address: String, label: String) -> Unit = { _, _ -> },
     onDeleteLabel: (address: String) -> Unit = { },
 ) {
     var selectedTab by remember { mutableIntStateOf(0) }
     var showAllUsed by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
+    var receiveDisplayCount by remember { mutableIntStateOf(ADDRESS_DISPLAY_LIMIT) }
+    var changeDisplayCount by remember { mutableIntStateOf(ADDRESS_DISPLAY_LIMIT) }
     val tabs = listOf("Receive", "Change", "Used")
     val useSats = denomination == SecureStorage.DENOMINATION_SATS
 
@@ -115,7 +120,7 @@ fun AllAddressesScreen(
     // Generate QR code when showing
     LaunchedEffect(showQrForAddress) {
         showQrForAddress?.let { address ->
-            qrBitmap = generateQrCode(address)
+            qrBitmap = generateQrBitmap(address)
         }
     }
 
@@ -131,7 +136,7 @@ fun AllAddressesScreen(
                     showQrForAddress = null
                     qrBitmap = null
                 }) {
-                    Text("Close", color = BitcoinOrange)
+                    Text("Close", color = accentColor)
                 }
             },
             title = {
@@ -186,11 +191,11 @@ fun AllAddressesScreen(
         }
     }
 
-    // Receive/Change: oldest-first, capped at 20; search bypasses the cap
+    // Receive/Change: oldest-first, capped at displayCount; search bypasses the cap
     val displayedReceiveAddresses =
-        remember(receiveAddresses, searchQuery) {
+        remember(receiveAddresses, searchQuery, receiveDisplayCount) {
             if (searchQuery.isBlank()) {
-                receiveAddresses.take(ADDRESS_DISPLAY_LIMIT)
+                receiveAddresses.take(receiveDisplayCount)
             } else {
                 val query = searchQuery.lowercase()
                 receiveAddresses.filter { addr ->
@@ -200,9 +205,9 @@ fun AllAddressesScreen(
             }
         }
     val displayedChangeAddresses =
-        remember(changeAddresses, searchQuery) {
+        remember(changeAddresses, searchQuery, changeDisplayCount) {
             if (searchQuery.isBlank()) {
-                changeAddresses.take(ADDRESS_DISPLAY_LIMIT)
+                changeAddresses.take(changeDisplayCount)
             } else {
                 val query = searchQuery.lowercase()
                 changeAddresses.filter { addr ->
@@ -275,6 +280,8 @@ fun AllAddressesScreen(
                         selectedTab = index
                         showAllUsed = false
                         searchQuery = ""
+                        receiveDisplayCount = ADDRESS_DISPLAY_LIMIT
+                        changeDisplayCount = ADDRESS_DISPLAY_LIMIT
                     },
                     label = {
                         Text(
@@ -286,7 +293,7 @@ fun AllAddressesScreen(
                     modifier = Modifier.weight(1f),
                     colors =
                         FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = BitcoinOrange,
+                            selectedContainerColor = accentColor,
                             selectedLabelColor = MaterialTheme.colorScheme.onPrimary,
                         ),
                 )
@@ -325,12 +332,29 @@ fun AllAddressesScreen(
                     unfocusedContainerColor = DarkCard,
                     focusedContainerColor = DarkCard,
                     unfocusedBorderColor = DarkCard,
-                    focusedBorderColor = BitcoinOrange,
+                    focusedBorderColor = accentColor,
                 ),
             modifier = Modifier.fillMaxWidth(),
         )
 
         Spacer(modifier = Modifier.height(12.dp))
+
+        if (selectedTab == 1 && !changeTabHelperText.isNullOrBlank()) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(8.dp),
+                colors = CardDefaults.cardColors(containerColor = DarkCard),
+            ) {
+                Text(
+                    text = changeTabHelperText,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextSecondary,
+                    modifier = Modifier.padding(12.dp),
+                )
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+        }
 
         if (currentAddresses.isEmpty()) {
             Box(
@@ -339,13 +363,14 @@ fun AllAddressesScreen(
             ) {
                 Text(
                     text =
-                        if (selectedTab == 2 && searchQuery.isNotBlank()) {
-                            "No matching addresses"
-                        } else {
-                            "No addresses"
+                        when {
+                            searchQuery.isNotBlank() -> "No matching addresses"
+                            selectedTab == 1 && !emptyChangeMessage.isNullOrBlank() -> emptyChangeMessage
+                            else -> "No addresses"
                         },
                     style = MaterialTheme.typography.bodyLarge,
                     color = TextSecondary,
+                    textAlign = TextAlign.Center,
                 )
             }
         } else {
@@ -354,11 +379,16 @@ fun AllAddressesScreen(
                 state = if (selectedTab == 0) receiveListState else rememberLazyListState(),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                items(currentAddresses) { address ->
+                items(currentAddresses, key = { it.address }) { address ->
                     AddressCard(
                         address = address,
                         useSats = useSats,
                         privacyMode = privacyMode,
+                        accentColor = accentColor,
+                        labelAccentColor = labelAccentColor,
+                        addressEdgeCharacters = addressEdgeCharacters,
+                        addressMaxLines = addressMaxLines,
+                        useMultilineTruncatedAddress = useMultilineTruncatedAddress,
                         isUsedTab = selectedTab == 2,
                         onShowQr = { showQrForAddress = address.address },
                         onCopy = { /* Handled inside AddressCard */ },
@@ -367,16 +397,49 @@ fun AllAddressesScreen(
                     )
                 }
 
+                // Show 20 more button for Receive tab
+                if (selectedTab == 0 && searchQuery.isBlank() && receiveAddresses.size > receiveDisplayCount) {
+                    item {
+                        TextButton(
+                            onClick = { receiveDisplayCount += ADDRESS_DISPLAY_LIMIT },
+                            modifier = Modifier.fillMaxWidth().defaultMinSize(minHeight = 1.dp),
+                            contentPadding = PaddingValues(top = 0.dp, bottom = 8.dp),
+                        ) {
+                            Text(
+                                text = "Show 20 more",
+                                color = accentColor,
+                            )
+                        }
+                    }
+                }
+
+                // Show 20 more button for Change tab
+                if (selectedTab == 1 && searchQuery.isBlank() && changeAddresses.size > changeDisplayCount) {
+                    item {
+                        TextButton(
+                            onClick = { changeDisplayCount += ADDRESS_DISPLAY_LIMIT },
+                            modifier = Modifier.fillMaxWidth().defaultMinSize(minHeight = 1.dp),
+                            contentPadding = PaddingValues(top = 0.dp, bottom = 8.dp),
+                        ) {
+                            Text(
+                                text = "Show 20 more",
+                                color = accentColor,
+                            )
+                        }
+                    }
+                }
+
                 // Show All button for Used tab
                 if (selectedTab == 2 && hasMoreUsedAddresses) {
                     item {
                         TextButton(
                             onClick = { showAllUsed = true },
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier.fillMaxWidth().defaultMinSize(minHeight = 1.dp),
+                            contentPadding = PaddingValues(top = 0.dp, bottom = 8.dp),
                         ) {
                             Text(
                                 text = "Show All (${filteredUsedAddresses.size - ADDRESS_DISPLAY_LIMIT} more)",
-                                color = BitcoinOrange,
+                                color = accentColor,
                             )
                         }
                     }
@@ -391,6 +454,11 @@ private fun AddressCard(
     address: WalletAddress,
     useSats: Boolean,
     privacyMode: Boolean = false,
+    accentColor: Color = BitcoinOrange,
+    labelAccentColor: Color = AccentTeal,
+    addressEdgeCharacters: Int? = null,
+    addressMaxLines: Int = 3,
+    useMultilineTruncatedAddress: Boolean = false,
     isUsedTab: Boolean = false,
     onShowQr: () -> Unit,
     onCopy: () -> Unit,
@@ -419,6 +487,13 @@ private fun AddressCard(
 
     val typeName = if (address.keychain == KeychainType.EXTERNAL) "Receive" else "Change"
     val hasBalance = address.balanceSats > 0UL
+    val displayAddress = remember(address.address, addressEdgeCharacters, useMultilineTruncatedAddress) {
+        formatDisplayedAddress(
+            address = address.address,
+            edgeCharacters = addressEdgeCharacters,
+            multiline = useMultilineTruncatedAddress,
+        )
+    }
 
     // Determine card background color
     val cardColor =
@@ -457,7 +532,7 @@ private fun AddressCard(
                 Text(
                     text = "$typeName #${address.index + 1u}",
                     style = MaterialTheme.typography.labelMedium,
-                    color = BitcoinOrange,
+                    color = accentColor,
                 )
 
                 if (isEditingLabel) {
@@ -542,14 +617,14 @@ private fun AddressCard(
                             shape = RoundedCornerShape(8.dp),
                             colors =
                                 CardDefaults.cardColors(
-                                    containerColor = if (hasLabel) AccentTeal.copy(alpha = 0.15f) else DarkSurface,
+                                    containerColor = if (hasLabel) labelAccentColor.copy(alpha = 0.15f) else DarkSurface,
                                 ),
-                            border = BorderStroke(1.dp, if (hasLabel) AccentTeal else BorderColor),
+                            border = BorderStroke(1.dp, if (hasLabel) labelAccentColor else BorderColor),
                         ) {
                             Text(
                                 text = address.label ?: "+ Label",
                                 style = MaterialTheme.typography.labelMedium,
-                                color = if (hasLabel) AccentTeal else TextSecondary,
+                                color = if (hasLabel) labelAccentColor else TextSecondary,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
@@ -581,11 +656,11 @@ private fun AddressCard(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    text = address.address,
+                    text = displayAddress,
                     style = MaterialTheme.typography.bodyMedium,
                     fontFamily = FontFamily.Monospace,
                     color = MaterialTheme.colorScheme.onBackground,
-                    maxLines = 3,
+                    maxLines = addressMaxLines,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
                 )
@@ -627,7 +702,7 @@ private fun AddressCard(
                     Icon(
                         imageVector = Icons.Default.ContentCopy,
                         contentDescription = "Copy",
-                        tint = if (showCopied) BitcoinOrange else TextSecondary,
+                        tint = if (showCopied) accentColor else TextSecondary,
                         modifier = Modifier.size(16.dp),
                     )
                 }
@@ -637,7 +712,7 @@ private fun AddressCard(
                 Text(
                     text = "Copied to clipboard!",
                     style = MaterialTheme.typography.bodySmall,
-                    color = BitcoinOrange,
+                    color = accentColor,
                 )
             }
 
@@ -655,7 +730,7 @@ private fun AddressCard(
                         color = TextSecondary,
                     )
                     Text(
-                        text = if (privacyMode) HIDDEN_AMOUNT else formatAmount(address.balanceSats, useSats),
+                        text = if (privacyMode) HIDDEN_AMOUNT else formatAmount(address.balanceSats, useSats, includeUnit = true),
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onBackground,
                     )
@@ -678,39 +753,20 @@ private fun AddressCard(
     }
 }
 
+private fun formatDisplayedAddress(
+    address: String,
+    edgeCharacters: Int?,
+    multiline: Boolean = false,
+): String {
+    if (edgeCharacters == null || edgeCharacters <= 0) return address
+    val minimumLengthToShorten = edgeCharacters * 2
+    if (address.length <= minimumLengthToShorten) return address
+    return if (multiline) {
+        "${address.take(edgeCharacters)}...\n${address.takeLast(edgeCharacters)}"
+    } else {
+        "${address.take(edgeCharacters)}...${address.takeLast(edgeCharacters)}"
+    }
+}
+
 private const val HIDDEN_AMOUNT = "****"
 
-private fun formatAmount(
-    sats: ULong,
-    useSats: Boolean,
-): String {
-    return if (useSats) {
-        "${NumberFormat.getNumberInstance(Locale.US).format(sats.toLong())} sats"
-    } else {
-        val btc = sats.toDouble() / 100_000_000.0
-        "${String.format(Locale.US, "%.8f", btc)} BTC"
-    }
-}
-
-private fun generateQrCode(content: String): Bitmap? {
-    return try {
-        val hints =
-            hashMapOf<EncodeHintType, Any>().apply {
-                put(EncodeHintType.MARGIN, 1)
-            }
-        val qrCodeWriter = QRCodeWriter()
-        val bitMatrix = qrCodeWriter.encode(content, BarcodeFormat.QR_CODE, 512, 512, hints)
-        val width = bitMatrix.width
-        val height = bitMatrix.height
-        val bitmap = createBitmap(width, height, Bitmap.Config.RGB_565)
-        for (x in 0 until width) {
-            for (y in 0 until height) {
-                bitmap[x, y] =
-                    if (bitMatrix[x, y]) android.graphics.Color.BLACK else android.graphics.Color.WHITE
-            }
-        }
-        bitmap
-    } catch (_: Exception) {
-        null
-    }
-}

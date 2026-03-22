@@ -137,6 +137,24 @@ object ElectrumSeedUtil {
     }
 
     /**
+     * Derive a standard BIP39 seed using PBKDF2-HMAC-SHA512 with salt
+     * "mnemonic" + normalized passphrase.
+     */
+    fun bip39MnemonicToSeed(mnemonic: String, passphrase: String? = null): ByteArray {
+        val normalizedMnemonic = Normalizer.normalize(mnemonic.trim(), Normalizer.Form.NFKD)
+        val normalizedPassphrase = Normalizer.normalize(passphrase.orEmpty(), Normalizer.Form.NFKD)
+        val salt = "mnemonic$normalizedPassphrase"
+        val spec = PBEKeySpec(
+            normalizedMnemonic.toCharArray(),
+            salt.toByteArray(Charsets.UTF_8),
+            2048,
+            512,
+        )
+        val factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA512")
+        return factory.generateSecret(spec).encoded
+    }
+
+    /**
      * Derive the master BIP32 key from a root seed.
      * Returns (privateKey: 32 bytes, chainCode: 32 bytes).
      */
@@ -230,6 +248,32 @@ object ElectrumSeedUtil {
             chainCode = currentChainCode,
             privateKey = currentKey,
         )
+    }
+
+    /**
+     * Derive the compressed public key at the provided derivation path.
+     */
+    fun deriveCompressedPublicKey(seed: ByteArray, path: String): ByteArray {
+        val (masterKey, masterChainCode) = masterKeyFromSeed(seed)
+        val segments = parsePath(path)
+        var currentKey = masterKey
+        var currentChainCode = masterChainCode
+
+        for (segment in segments) {
+            val (childKey, childChainCode) = if (segment >= 0x80000000L) {
+                deriveHardenedChild(currentKey, currentChainCode, segment)
+            } else {
+                deriveNormalChild(currentKey, currentChainCode, segment)
+            }
+            currentKey = childKey
+            currentChainCode = childChainCode
+        }
+
+        return publicKeyFromPrivate(currentKey)
+    }
+
+    fun deriveCompressedPublicKeyHex(seed: ByteArray, path: String): String {
+        return deriveCompressedPublicKey(seed, path).toHexString()
     }
 
     /**
@@ -355,7 +399,7 @@ object ElectrumSeedUtil {
     /**
      * Derive the compressed public key (33 bytes) from a 32-byte private key.
      */
-    private fun publicKeyFromPrivate(privateKey: ByteArray): ByteArray {
+    internal fun publicKeyFromPrivate(privateKey: ByteArray): ByteArray {
         val k = BigInteger(1, privateKey)
         val (x, y) = ecMultiply(k)
         val prefix = if (y.testBit(0)) 0x03.toByte() else 0x02.toByte()

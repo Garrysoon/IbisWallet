@@ -1,5 +1,7 @@
 package github.aeonbtc.ibiswallet.ui.screens
 
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
@@ -25,7 +27,7 @@ private const val MAX_PIN_LENGTH = 12
 @Composable
 fun LockScreen(
     securityMethod: SecureStorage.SecurityMethod,
-    onPinEntered: (String) -> Boolean,
+    onPinEntered: suspend (String) -> Boolean,
     onBiometricRequest: () -> Unit,
     isBiometricAvailable: Boolean = false,
     storedPinLength: Int? = null,
@@ -75,10 +77,13 @@ fun LockScreen(
             modifier =
                 Modifier
                     .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .imePadding()
+                    .navigationBarsPadding()
                     .padding(24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Spacer(modifier = Modifier.height(48.dp))
+            Spacer(modifier = Modifier.height(24.dp))
 
             Text(
                 text =
@@ -97,7 +102,7 @@ fun LockScreen(
                 modifier =
                     Modifier
                         .fillMaxWidth()
-                        .height(52.dp),
+                        .heightIn(min = 52.dp),
                 contentAlignment = Alignment.Center,
             ) {
                 if (pin.isNotEmpty()) {
@@ -120,7 +125,7 @@ fun LockScreen(
 
             // Error message - fixed height to prevent layout jumps
             Box(
-                modifier = Modifier.height(24.dp),
+                modifier = Modifier.heightIn(min = 24.dp),
                 contentAlignment = Alignment.Center,
             ) {
                 if (error != null) {
@@ -233,13 +238,15 @@ private fun NumberPad(
             listOf("", "0", ""),
         )
 
+    val keypadButtonSize = 64.dp
+
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         numbers.forEachIndexed { rowIndex, row ->
             Row(
-                horizontalArrangement = Arrangement.spacedBy(24.dp),
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 row.forEachIndexed { colIndex, number ->
@@ -251,7 +258,7 @@ private fun NumberPad(
                                 // actually clears input and triggers biometric prompt
                                 Button(
                                     onClick = onClearWithBiometricClick,
-                                    modifier = Modifier.size(72.dp),
+                                    modifier = Modifier.size(keypadButtonSize),
                                     shape = CircleShape,
                                     colors =
                                         ButtonDefaults.buttonColors(
@@ -263,7 +270,7 @@ private fun NumberPad(
                                     Text(
                                         text = "C",
                                         style = MaterialTheme.typography.headlineMedium,
-                                        fontSize = 28.sp,
+                                        fontSize = 24.sp,
                                     )
                                 }
                             } else if (onBiometricClick != null) {
@@ -271,7 +278,7 @@ private fun NumberPad(
                                     onClick = onBiometricClick,
                                     modifier =
                                         Modifier
-                                            .size(72.dp)
+                                            .size(keypadButtonSize)
                                             .clip(CircleShape)
                                             .background(DarkCard),
                                 ) {
@@ -279,11 +286,11 @@ private fun NumberPad(
                                         imageVector = Icons.Default.Fingerprint,
                                         contentDescription = "Biometric",
                                         tint = BitcoinOrange,
-                                        modifier = Modifier.size(32.dp),
+                                        modifier = Modifier.size(28.dp),
                                     )
                                 }
                             } else {
-                                Spacer(modifier = Modifier.size(72.dp))
+                                Spacer(modifier = Modifier.size(keypadButtonSize))
                             }
                         }
                         // Bottom-right: confirm button (when available) stacked with backspace
@@ -292,7 +299,7 @@ private fun NumberPad(
                                 onClick = onBackspaceClick,
                                 modifier =
                                     Modifier
-                                        .size(72.dp)
+                                        .size(keypadButtonSize)
                                         .clip(CircleShape)
                                         .background(DarkCard),
                             ) {
@@ -300,7 +307,7 @@ private fun NumberPad(
                                     imageVector = Icons.AutoMirrored.Filled.Backspace,
                                     contentDescription = "Backspace",
                                     tint = TextSecondary,
-                                    modifier = Modifier.size(28.dp),
+                                    modifier = Modifier.size(24.dp),
                                 )
                             }
                         }
@@ -308,7 +315,7 @@ private fun NumberPad(
                         number.isNotEmpty() -> {
                             Button(
                                 onClick = { onNumberClick(number) },
-                                modifier = Modifier.size(72.dp),
+                                modifier = Modifier.size(keypadButtonSize),
                                 shape = CircleShape,
                                 colors =
                                     ButtonDefaults.buttonColors(
@@ -320,13 +327,13 @@ private fun NumberPad(
                                 Text(
                                     text = number,
                                     style = MaterialTheme.typography.headlineMedium,
-                                    fontSize = 28.sp,
+                                    fontSize = 24.sp,
                                 )
                             }
                         }
                         // Empty space
                         else -> {
-                            Spacer(modifier = Modifier.size(72.dp))
+                            Spacer(modifier = Modifier.size(keypadButtonSize))
                         }
                     }
                 }
@@ -342,8 +349,9 @@ private fun NumberPad(
                 enabled = onConfirmClick != null,
                 modifier =
                     Modifier
-                        .width(240.dp)
-                        .height(48.dp),
+                        .fillMaxWidth()
+                        .widthIn(max = 240.dp)
+                        .heightIn(min = 48.dp),
                 shape = RoundedCornerShape(8.dp),
                 colors =
                     ButtonDefaults.buttonColors(

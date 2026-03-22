@@ -5,7 +5,7 @@ package github.aeonbtc.ibiswallet.data.model
  * Determines key stretching algorithm and derivation paths.
  */
 enum class SeedFormat {
-    /** Standard BIP39 mnemonic — PBKDF2 with "mnemonic" salt, BIP44/49/84/86 paths */
+    /** Standard BIP39 mnemonic — PBKDF2 with "mnemonic" salt, BIP44/84/86 paths */
     BIP39,
     /** Electrum v2+ Standard — PBKDF2 with "electrum" salt, P2PKH at m/ */
     ELECTRUM_STANDARD,
@@ -27,12 +27,6 @@ enum class AddressType(
         description = "P2PKH - Legacy addresses start with '1'",
         defaultPath = "m/44'/0'/0'/0",
         accountPath = "44'/0'/0'",
-    ),
-    NESTED_SEGWIT(
-        displayName = "Wrapped",
-        description = "P2SH-P2WPKH - Wrapped SegWit addresses start with '3'",
-        defaultPath = "m/49'/0'/0'/0",
-        accountPath = "49'/0'/0'",
     ),
     SEGWIT(
         displayName = "SegWit",
@@ -57,6 +51,7 @@ data class StoredWallet(
     val addressType: AddressType,
     val derivationPath: String,
     val isWatchOnly: Boolean = false,
+    val isLocked: Boolean = false,
     val network: WalletNetwork = WalletNetwork.BITCOIN,
     val createdAt: Long = System.currentTimeMillis(),
     val masterFingerprint: String? = null, // Master key fingerprint (8 hex chars) for watch-only wallets
@@ -158,9 +153,6 @@ data class ConfirmationTime(
  */
 enum class WalletNetwork {
     BITCOIN,
-    TESTNET,
-    SIGNET,
-    REGTEST,
 }
 
 /**
@@ -335,6 +327,7 @@ data class PsbtDetails(
 data class DryRunResult(
     val feeSats: Long,
     val changeSats: Long,
+    val changeAddress: String? = null,
     val hasChange: Boolean,
     val numInputs: Int,
     val txVBytes: Double,
@@ -350,6 +343,7 @@ data class DryRunResult(
             DryRunResult(
                 feeSats = 0L,
                 changeSats = 0L,
+                changeAddress = null,
                 hasChange = false,
                 numInputs = 0,
                 txVBytes = 0.0,

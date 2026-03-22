@@ -21,6 +21,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import github.aeonbtc.ibiswallet.ui.theme.BitcoinOrange
 import github.aeonbtc.ibiswallet.ui.theme.BorderColor
@@ -42,12 +43,11 @@ fun SquareToggle(
     uncheckedColor: Color = DarkSurfaceVariant,
     uncheckedBorderColor: Color = BorderColor,
     uncheckedThumbColor: Color = TextSecondary,
+    trackWidth: Dp = 44.dp,
+    trackHeight: Dp = 24.dp,
+    thumbSize: Dp = 18.dp,
+    thumbPadding: Dp = 3.dp,
 ) {
-    val trackWidth = 44.dp
-    val trackHeight = 24.dp
-    val thumbSize = 18.dp
-    val thumbPadding = 3.dp
-
     // Animate thumb position
     val thumbOffset by animateDpAsState(
         targetValue = if (checked) trackWidth - thumbSize - thumbPadding * 2 else 0.dp,
@@ -129,6 +129,10 @@ fun SquareToggleGreen(
     onCheckedChange: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
+    trackWidth: Dp = 44.dp,
+    trackHeight: Dp = 24.dp,
+    thumbSize: Dp = 18.dp,
+    thumbPadding: Dp = 3.dp,
 ) {
     SquareToggle(
         checked = checked,
@@ -136,5 +140,9 @@ fun SquareToggleGreen(
         modifier = modifier,
         enabled = enabled,
         checkedColor = SuccessGreen,
+        trackWidth = trackWidth,
+        trackHeight = trackHeight,
+        thumbSize = thumbSize,
+        thumbPadding = thumbPadding,
     )
 }

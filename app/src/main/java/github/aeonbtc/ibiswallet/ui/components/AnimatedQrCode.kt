@@ -1,6 +1,5 @@
 package github.aeonbtc.ibiswallet.ui.components
 
-import android.graphics.Bitmap
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.compose.foundation.Image
@@ -30,22 +29,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import androidx.core.graphics.createBitmap
-import androidx.core.graphics.set
-import com.google.zxing.BarcodeFormat
-import com.google.zxing.EncodeHintType
-import com.google.zxing.qrcode.QRCodeWriter
-import com.google.zxing.qrcode.decoder.ErrorCorrectionLevel
 import com.sparrowwallet.hummingbird.UREncoder
 import com.sparrowwallet.hummingbird.registry.CryptoPSBT
 import github.aeonbtc.ibiswallet.ui.theme.TextSecondary
+import github.aeonbtc.ibiswallet.util.generateQrBitmap
 import kotlinx.coroutines.delay
 
 /**
@@ -238,11 +231,17 @@ fun AnimatedQrCode(
 }
 
 /**
- * Animated QR code component for generic byte data, encoded as ur:bytes.
+ * Animated QR code component for generic byte data, encoded as BBQr.
  * Used for exporting BIP 329 labels via animated QR codes.
  *
  * For small data that fits in a single QR frame, displays a static QR code.
- * For larger data, creates fountain-coded UR parts and cycles through them.
+ * For larger data, splits into deterministic BBQr parts and cycles through them.
+ *
+ * BBQr advantages over BC-UR for labels:
+ * - Zlib compression (~30-45% smaller for JSONL text)
+ * - More data per QR frame (~1,062 bytes vs 120)
+ * - Deterministic progress (no fountain code overhead)
+ * - Interoperable with Sparrow, LabelBase, Nunchuk, Coldcard Q
  */
 @Composable
 fun AnimatedQrCodeBytes(
@@ -254,37 +253,34 @@ fun AnimatedQrCodeBytes(
     val context = LocalContext.current
     var showEnlarged by remember { mutableStateOf(false) }
 
-    // CBOR-encode the bytes and create a ur:bytes UR
-    val encoder =
+    // Split data into BBQr parts with Zlib compression
+    val bbqrParts =
         remember(data) {
-            val cborBytes = github.aeonbtc.ibiswallet.util.Bip329Labels.cborEncodeByteString(data)
-            val ur = com.sparrowwallet.hummingbird.UR("bytes", cborBytes)
-            UREncoder(ur, 120, 10, 0)
+            github.aeonbtc.ibiswallet.util.Bbqr.split(
+                data = data,
+                fileType = github.aeonbtc.ibiswallet.util.Bbqr.FILE_TYPE_JSON,
+            ).parts
         }
 
-    val totalParts =
-        remember(encoder) {
-            encoder.seqLen
-        }
-
-    var currentPart by remember { mutableStateOf(encoder.nextPart()) }
-    var partIndex by remember { mutableIntStateOf(1) }
+    val totalParts = bbqrParts.size
+    var partIndex by remember { mutableIntStateOf(0) }
 
     val isAnimated = totalParts > 1
 
     if (isAnimated) {
-        LaunchedEffect(encoder) {
+        LaunchedEffect(bbqrParts) {
             while (true) {
                 delay(frameDelayMs)
-                currentPart = encoder.nextPart()
-                partIndex = ((partIndex) % totalParts) + 1
+                partIndex = (partIndex + 1) % totalParts
             }
         }
     }
 
+    val currentPart = bbqrParts[partIndex]
+
     val qrBitmap =
         remember(currentPart) {
-            generateQrBitmap(currentPart.uppercase())
+            generateQrBitmap(currentPart)
         }
 
     // Boost screen brightness while QR is displayed
@@ -350,7 +346,7 @@ fun AnimatedQrCodeBytes(
                     if (isAnimated) {
                         Spacer(modifier = Modifier.height(12.dp))
                         Text(
-                            text = "Part $partIndex of $totalParts",
+                            text = "Part ${partIndex + 1} of $totalParts",
                             style = MaterialTheme.typography.bodyMedium,
                             color = TextSecondary,
                         )
@@ -395,7 +391,7 @@ fun AnimatedQrCodeBytes(
         if (isAnimated) {
             Spacer(modifier = Modifier.height(8.dp))
             Text(
-                text = "Part $partIndex of $totalParts",
+                text = "Part ${partIndex + 1} of $totalParts",
                 style = MaterialTheme.typography.bodySmall,
                 color = TextSecondary,
             )
@@ -410,38 +406,3 @@ fun AnimatedQrCodeBytes(
     }
 }
 
-/**
- * Generate a QR code bitmap for the given string content.
- * Uses Error Correction Level L — fountain coding in BC-UR handles redundancy,
- * so lower EC keeps module count down for easier scanning.
- */
-private fun generateQrBitmap(content: String): Bitmap? {
-    return try {
-        val size = 512
-        val qrCodeWriter = QRCodeWriter()
-        val hints =
-            mapOf(
-                EncodeHintType.MARGIN to 1,
-                EncodeHintType.ERROR_CORRECTION to ErrorCorrectionLevel.L,
-            )
-        val bitMatrix =
-            qrCodeWriter.encode(
-                content,
-                BarcodeFormat.QR_CODE,
-                size,
-                size,
-                hints,
-            )
-
-        val bitmap = createBitmap(size, size)
-        for (x in 0 until size) {
-            for (y in 0 until size) {
-                bitmap[x, y] =
-                    if (bitMatrix[x, y]) Color.Black.toArgb() else Color.White.toArgb()
-            }
-        }
-        bitmap
-    } catch (_: Exception) {
-        null
-    }
-}

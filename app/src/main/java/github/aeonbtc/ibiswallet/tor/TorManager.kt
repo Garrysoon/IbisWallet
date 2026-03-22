@@ -18,19 +18,33 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.torproject.jni.TorService
+import java.lang.ref.WeakReference
 
 /**
- * Manages the Tor service lifecycle and state
+ * Manages the Tor service lifecycle and state.
+ *
+ * This manager is app-scoped because both Layer 1 and Layer 2 bind the same
+ * Tor Android service and should share a single lifecycle + state flow.
  */
-class TorManager(private val context: Context) {
+class TorManager private constructor(context: Context) {
     companion object {
         private const val TAG = "TorManager"
         private const val SOCKS_PORT = 9050
         private const val SOCKS_PROBE_RETRIES = 4
         private const val SOCKS_PROBE_TIMEOUT_MS = 500
         private const val SOCKS_PROBE_INTERVAL_MS = 250L
+
+        @Volatile
+        private var instance: TorManager? = null
+
+        fun getInstance(context: Context): TorManager {
+            return instance ?: synchronized(this) {
+                instance ?: TorManager(context.applicationContext).also { instance = it }
+            }
+        }
     }
 
+    private val appContextRef = WeakReference(context.applicationContext)
     private val _torState = MutableStateFlow(TorState())
     val torState: StateFlow<TorState> = _torState.asStateFlow()
 
@@ -112,6 +126,7 @@ class TorManager(private val context: Context) {
      */
     @Synchronized
     fun start() {
+        val appContext = appContextRef.get() ?: return
         if (_torState.value.status == TorStatus.CONNECTED ||
             _torState.value.status == TorStatus.CONNECTING ||
             _torState.value.status == TorStatus.STARTING
@@ -130,7 +145,7 @@ class TorManager(private val context: Context) {
         // Register status receiver
         val filter = IntentFilter(TorService.ACTION_STATUS)
         ContextCompat.registerReceiver(
-            context,
+            appContext,
             statusReceiver,
             filter,
             ContextCompat.RECEIVER_NOT_EXPORTED,
@@ -138,8 +153,8 @@ class TorManager(private val context: Context) {
         isReceiverRegistered = true
 
         // Bind to Tor service
-        val intent = Intent(context, TorService::class.java)
-        context.bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
+        val intent = Intent(appContext, TorService::class.java)
+        appContext.bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
         isBound = true
     }
 
@@ -148,20 +163,21 @@ class TorManager(private val context: Context) {
      */
     @Synchronized
     fun stop() {
+        val appContext = appContextRef.get()
         if (BuildConfig.DEBUG) Log.d(TAG, "Stopping Tor service")
 
-        if (isBound) {
+        if (isBound && appContext != null) {
             try {
-                context.unbindService(serviceConnection)
+                appContext.unbindService(serviceConnection)
             } catch (e: Exception) {
                 if (BuildConfig.DEBUG) Log.e(TAG, "Error unbinding Tor service", e)
             }
             isBound = false
         }
 
-        if (isReceiverRegistered) {
+        if (isReceiverRegistered && appContext != null) {
             try {
-                context.unregisterReceiver(statusReceiver)
+                appContext.unregisterReceiver(statusReceiver)
             } catch (e: Exception) {
                 if (BuildConfig.DEBUG) Log.e(TAG, "Error unregistering Tor status receiver", e)
             }
@@ -244,16 +260,17 @@ class TorManager(private val context: Context) {
      * of Tor usage.
      */
     fun wipeTorData() {
+        val appContext = appContextRef.get() ?: return
         // Stop Tor if running
         stop()
         // The tor-android library stores data in <filesDir>/app_torservice/
         try {
-            val torDataDir = java.io.File(context.filesDir, "app_torservice")
+            val torDataDir = java.io.File(appContext.filesDir, "app_torservice")
             if (torDataDir.exists()) {
                 torDataDir.deleteRecursively()
             }
             // Also check the cache directory for any Tor temp files
-            val torCacheDir = java.io.File(context.cacheDir, "tor")
+            val torCacheDir = java.io.File(appContext.cacheDir, "tor")
             if (torCacheDir.exists()) {
                 torCacheDir.deleteRecursively()
             }

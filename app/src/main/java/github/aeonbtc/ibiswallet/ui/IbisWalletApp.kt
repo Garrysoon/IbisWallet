@@ -2,8 +2,15 @@
 
 package github.aeonbtc.ibiswallet.ui
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.biometric.BiometricManager
+import androidx.biometric.BiometricPrompt
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -13,11 +20,18 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.spring
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.awaitHorizontalTouchSlopOrCancellation
+import androidx.compose.foundation.gestures.horizontalDrag
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -31,7 +45,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Menu
-import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -42,19 +56,20 @@ import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -66,10 +81,20 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.util.VelocityTracker
+import kotlin.math.abs
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import androidx.core.content.ContextCompat
+import androidx.fragment.app.FragmentActivity
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
@@ -79,119 +104,293 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import github.aeonbtc.ibiswallet.R
 import github.aeonbtc.ibiswallet.data.local.SecureStorage
+import github.aeonbtc.ibiswallet.data.model.LiquidTxSource
 import github.aeonbtc.ibiswallet.data.model.SyncProgress
+import github.aeonbtc.ibiswallet.data.model.WalletLayer
 import github.aeonbtc.ibiswallet.navigation.Screen
 import github.aeonbtc.ibiswallet.navigation.bottomNavItems
 import github.aeonbtc.ibiswallet.tor.TorStatus
+import github.aeonbtc.ibiswallet.ui.components.AppLaunchLoadingScreen
 import github.aeonbtc.ibiswallet.ui.components.CertificateDialog
 import github.aeonbtc.ibiswallet.ui.components.DrawerContent
 import github.aeonbtc.ibiswallet.ui.components.DrawerItem
+import github.aeonbtc.ibiswallet.ui.components.IbisButton
+import github.aeonbtc.ibiswallet.ui.components.LayerSwitcher
 import github.aeonbtc.ibiswallet.ui.components.WalletSelectorDropdown
 import github.aeonbtc.ibiswallet.ui.components.WalletSelectorPanel
 import github.aeonbtc.ibiswallet.ui.screens.AboutScreen
 import github.aeonbtc.ibiswallet.ui.screens.AllAddressesScreen
 import github.aeonbtc.ibiswallet.ui.screens.AllUtxosScreen
+import github.aeonbtc.ibiswallet.ui.screens.BackupRestoreScreen
 import github.aeonbtc.ibiswallet.ui.screens.BalanceScreen
 import github.aeonbtc.ibiswallet.ui.screens.BroadcastTransactionScreen
+import github.aeonbtc.ibiswallet.ui.screens.CombinedServerConfigScreen
+import github.aeonbtc.ibiswallet.ui.screens.CurrentServerCard
 import github.aeonbtc.ibiswallet.ui.screens.ElectrumConfigScreen
+import github.aeonbtc.ibiswallet.ui.screens.FullBackupPreview
 import github.aeonbtc.ibiswallet.ui.screens.GenerateWalletScreen
 import github.aeonbtc.ibiswallet.ui.screens.ImportWalletScreen
 import github.aeonbtc.ibiswallet.ui.screens.KeyMaterialInfo
+import github.aeonbtc.ibiswallet.ui.screens.Layer2OptionsScreen
+import github.aeonbtc.ibiswallet.ui.screens.LiquidBalanceScreen
+import github.aeonbtc.ibiswallet.ui.screens.LiquidCurrentServerCard
+import github.aeonbtc.ibiswallet.ui.screens.LiquidReceiveScreen
+import github.aeonbtc.ibiswallet.ui.screens.LiquidSendScreen
+import github.aeonbtc.ibiswallet.ui.screens.LiquidServerConfigScreen
+import github.aeonbtc.ibiswallet.ui.screens.LockScreen
 import github.aeonbtc.ibiswallet.ui.screens.ManageWalletsScreen
 import github.aeonbtc.ibiswallet.ui.screens.PsbtScreen
 import github.aeonbtc.ibiswallet.ui.screens.ReceiveScreen
 import github.aeonbtc.ibiswallet.ui.screens.SecurityScreen
 import github.aeonbtc.ibiswallet.ui.screens.SendScreen
+import github.aeonbtc.ibiswallet.ui.screens.ServerConfigSection
 import github.aeonbtc.ibiswallet.ui.screens.SettingsScreen
+import github.aeonbtc.ibiswallet.ui.screens.SwapScreen
 import github.aeonbtc.ibiswallet.ui.screens.SweepPrivateKeyScreen
 import github.aeonbtc.ibiswallet.ui.screens.WalletInfo
-import github.aeonbtc.ibiswallet.ui.screens.parseBip21Uri
+import github.aeonbtc.ibiswallet.ui.screens.formatAmount
 import github.aeonbtc.ibiswallet.ui.theme.BitcoinOrange
 import github.aeonbtc.ibiswallet.ui.theme.BorderColor
 import github.aeonbtc.ibiswallet.ui.theme.DarkBackground
-import github.aeonbtc.ibiswallet.ui.theme.DarkCard
 import github.aeonbtc.ibiswallet.ui.theme.DarkSurface
 import github.aeonbtc.ibiswallet.ui.theme.ErrorRed
+import github.aeonbtc.ibiswallet.ui.theme.LiquidTeal
 import github.aeonbtc.ibiswallet.ui.theme.SuccessGreen
 import github.aeonbtc.ibiswallet.ui.theme.TextSecondary
-import github.aeonbtc.ibiswallet.ui.theme.TextTertiary
 import github.aeonbtc.ibiswallet.ui.theme.TorPurple
-import github.aeonbtc.ibiswallet.viewmodel.SendScreenDraft
+import github.aeonbtc.ibiswallet.util.Bip329LabelCounts
+import github.aeonbtc.ibiswallet.util.Bip329LabelScope
+import github.aeonbtc.ibiswallet.util.WalletNotificationHelper
+import github.aeonbtc.ibiswallet.util.getNfcAvailability
+import github.aeonbtc.ibiswallet.util.resolveLayer2SendDraft
+import github.aeonbtc.ibiswallet.util.resolveSendRoute
+import github.aeonbtc.ibiswallet.viewmodel.LiquidEvent
+import github.aeonbtc.ibiswallet.viewmodel.LiquidViewModel
 import github.aeonbtc.ibiswallet.viewmodel.WalletEvent
 import github.aeonbtc.ibiswallet.viewmodel.WalletViewModel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
+
+private enum class WalletAuthPurpose {
+    OPEN_WALLET,
+    DISABLE_LOCK,
+}
+
+private data class PendingWalletUnlock(
+    val walletId: String,
+    val walletName: String,
+    val isLocked: Boolean,
+    val purpose: WalletAuthPurpose,
+    val targetLayer: WalletLayer,
+    val navigateToBalance: Boolean,
+    val securityMethod: SecureStorage.SecurityMethod,
+)
+
+private sealed class SwipeAction {
+    data class NavigateTab(val route: String) : SwipeAction()
+    data class SwitchWallet(val walletId: String) : SwipeAction()
+    data class SwitchLayer(val layer: WalletLayer) : SwipeAction()
+}
+
+private data class PendingSwipe(
+    val action: SwipeAction,
+    val direction: Int,
+    val screenWidth: Float,
+    val id: Long = System.nanoTime(),
+)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun IbisWalletApp(
     viewModel: WalletViewModel = viewModel(),
+    liquidViewModel: LiquidViewModel = viewModel(),
     onLockApp: () -> Unit = {},
+    appUnlockCounter: Int = 0,
 ) {
     val navController = rememberNavController()
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    val secureStorage = remember(context) { SecureStorage.getInstance(context) }
     val snackbarHostState = remember { SnackbarHostState() }
+    val walletSettingsRefreshVersion by viewModel.settingsRefreshVersion.collectAsStateWithLifecycle()
+    val liquidSettingsRefreshVersion by liquidViewModel.settingsRefreshVersion.collectAsStateWithLifecycle()
+    var walletNotificationsEnabled by remember(walletSettingsRefreshVersion) {
+        mutableStateOf(viewModel.isWalletNotificationsEnabled())
+    }
+    val initialSyncComplete by viewModel.initialSyncComplete.collectAsStateWithLifecycle()
+    val initialLiquidSyncComplete by liquidViewModel.initialLiquidSyncComplete.collectAsStateWithLifecycle()
 
-    val walletState by viewModel.walletState.collectAsState()
-    val uiState by viewModel.uiState.collectAsState()
-    val serversState by viewModel.serversState.collectAsState()
-    val torState by viewModel.torState.collectAsState()
-    val autoSwitchServer by viewModel.autoSwitchServer.collectAsState()
-    val denomination by viewModel.denominationState.collectAsState()
-    val mempoolServer by viewModel.mempoolServerState.collectAsState()
-    val feeSource by viewModel.feeSourceState.collectAsState()
-    val feeEstimationState by viewModel.feeEstimationState.collectAsState()
-    val minFeeRate by viewModel.minFeeRate.collectAsState()
-    val priceSource by viewModel.priceSourceState.collectAsState()
-    val btcPrice by viewModel.btcPriceState.collectAsState()
-    val syncingWalletId by viewModel.syncingWalletId.collectAsState()
-    val sendScreenDraft by viewModel.sendScreenDraft.collectAsState()
-    val privacyMode by viewModel.privacyMode.collectAsState()
-    val psbtState by viewModel.psbtState.collectAsState()
-    val certDialogState by viewModel.certDialogState.collectAsState()
-    val dryRunResult by viewModel.dryRunResult.collectAsState()
-    val isDuressMode by viewModel.isDuressMode.collectAsState()
-    val pendingBitcoinUri by viewModel.pendingBitcoinUri.collectAsState()
+    val walletState by viewModel.walletState.collectAsStateWithLifecycle()
+    val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val serversState by viewModel.serversState.collectAsStateWithLifecycle()
+    val torState by viewModel.torState.collectAsStateWithLifecycle()
+    val layer1Denomination by viewModel.denominationState.collectAsStateWithLifecycle()
+    val feeEstimationState by viewModel.feeEstimationState.collectAsStateWithLifecycle()
+    val minFeeRate by viewModel.minFeeRate.collectAsStateWithLifecycle()
+    val btcPrice by viewModel.btcPriceState.collectAsStateWithLifecycle()
+    val autoSwitchServer by viewModel.autoSwitchServer.collectAsStateWithLifecycle()
+    val syncingWalletId by viewModel.syncingWalletId.collectAsStateWithLifecycle()
+    val privacyMode by viewModel.privacyMode.collectAsStateWithLifecycle()
+    val swipeMode by viewModel.swipeMode.collectAsStateWithLifecycle()
+    val certDialogState by viewModel.certDialogState.collectAsStateWithLifecycle()
+    val liquidCertDialogState by liquidViewModel.certDialogState.collectAsStateWithLifecycle()
+    val isDuressMode by viewModel.isDuressMode.collectAsStateWithLifecycle()
+    val pendingSendInput by viewModel.pendingSendInput.collectAsStateWithLifecycle()
+    val allWalletAddresses by viewModel.allWalletAddresses.collectAsStateWithLifecycle()
+    val walletLastFullSyncTimes by viewModel.walletLastFullSyncTimes.collectAsStateWithLifecycle()
 
-    // Global labels version counter - bumped when labels may have changed
-    // (wallet imported with backup labels, wallet switched, sync completed)
-    var labelsVersion by remember { mutableIntStateOf(0) }
+    // Layer 2 (Liquid) state
+    val isLayer2Enabled by liquidViewModel.isLayer2Enabled.collectAsStateWithLifecycle()
+    val activeLayer by liquidViewModel.activeLayer.collectAsStateWithLifecycle()
+    val liquidState by liquidViewModel.liquidState.collectAsStateWithLifecycle()
+    val loadedLiquidWalletId by liquidViewModel.loadedWalletId.collectAsStateWithLifecycle()
+    val liquidServersState by liquidViewModel.liquidServersState.collectAsStateWithLifecycle()
+    val liquidEnabledWallets by liquidViewModel.liquidEnabledWallets.collectAsStateWithLifecycle()
+    val layer2Denomination by liquidViewModel.denominationState.collectAsStateWithLifecycle()
+    val liquidExplorer by liquidViewModel.liquidExplorer.collectAsStateWithLifecycle()
+    val isLiquidConnected by liquidViewModel.isLiquidConnected.collectAsStateWithLifecycle()
+    val isLiquidConnecting by liquidViewModel.isLiquidConnecting.collectAsStateWithLifecycle()
+    val isLiquidTorEnabled by liquidViewModel.isLiquidTorEnabled.collectAsStateWithLifecycle()
+    val liquidAutoSwitch by liquidViewModel.liquidAutoSwitchServer.collectAsStateWithLifecycle()
+    val liquidTorState by liquidViewModel.torState.collectAsStateWithLifecycle()
+    val boltzApiSource by liquidViewModel.boltzApiSource.collectAsStateWithLifecycle()
+    val sideSwapApiSource by liquidViewModel.sideSwapApiSource.collectAsStateWithLifecycle()
+    val liquidBlockHeight by liquidViewModel.liquidBlockHeight.collectAsStateWithLifecycle()
+    val liquidConnectionError by liquidViewModel.liquidConnectionError.collectAsStateWithLifecycle()
+    val swapAvailable = boltzApiSource != SecureStorage.BOLTZ_API_DISABLED ||
+        sideSwapApiSource != SecureStorage.SIDESWAP_API_DISABLED
+
+    // Liquid is available for the active wallet when:
+    // - Global Layer 2 toggle is ON
+    // - Per-wallet Liquid toggle is ON
+    // - Wallet is not watch-only (needs seed for Liquid derivation)
+    val activeWalletObj = walletState.activeWallet
+    val isLiquidAvailable = remember(isLayer2Enabled, activeWalletObj, liquidEnabledWallets) {
+        isLayer2Enabled &&
+            activeWalletObj != null &&
+            !activeWalletObj.isWatchOnly &&
+            (liquidEnabledWallets[activeWalletObj.id]
+                ?: liquidViewModel.isLiquidEnabledForWallet(activeWalletObj.id))
+    }
+
+    val initialWalletId = remember(secureStorage) { secureStorage.getActiveWalletId() }
+    var pendingMainWalletId by remember { mutableStateOf(initialWalletId) }
+    var pendingMainLayer by remember {
+        mutableStateOf(
+            initialWalletId?.let { walletId ->
+                runCatching { WalletLayer.valueOf(secureStorage.getActiveLayer(walletId)) }
+                    .getOrDefault(WalletLayer.LAYER1)
+            } ?: WalletLayer.LAYER1,
+        )
+    }
 
     // Wallet selector dropdown state
     var walletSelectorExpanded by remember { mutableStateOf(false) }
+    var hasCompletedInitialMainLoad by remember { mutableStateOf(false) }
 
     // PIN setup active state — hides bottom bar so Next/Confirm buttons are visible
     var isPinSetupActive by remember { mutableStateOf(false) }
 
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentDestination = navBackStackEntry?.destination
-
-    // Handle incoming bitcoin: URI from external intent
-    LaunchedEffect(pendingBitcoinUri) {
-        val uri = pendingBitcoinUri ?: return@LaunchedEffect
-        viewModel.consumePendingBitcoinUri()
-        val bip21 = parseBip21Uri(uri)
-        val useSats = denomination == SecureStorage.DENOMINATION_SATS
-        val amountStr = bip21.amount?.let { btcAmount ->
-            when {
-                useSats -> (btcAmount * 100_000_000).toLong().toString()
-                else -> String.format(java.util.Locale.US, "%.8f", btcAmount)
-                    .trimEnd('0').trimEnd('.')
+    val postNotificationsPermissionLauncher =
+        rememberLauncherForActivityResult(
+            contract = ActivityResultContracts.RequestPermission(),
+        ) { granted ->
+            if (granted) {
+                viewModel.setWalletNotificationsEnabled(true)
+                walletNotificationsEnabled = true
+            } else {
+                viewModel.setWalletNotificationsEnabled(false)
+                walletNotificationsEnabled = false
+                scope.launch {
+                    snackbarHostState.showSnackbar("Android notification permission denied")
+                }
             }
-        } ?: ""
-        viewModel.updateSendScreenDraft(
-            SendScreenDraft(
-                recipientAddress = bip21.address,
-                amountInput = amountStr,
-                label = bip21.label ?: "",
-            ),
+        }
+
+    fun canRequestNotificationsNow(): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS,
+            ) == PackageManager.PERMISSION_GRANTED
+
+    fun updateWalletNotificationsEnabled(enabled: Boolean) {
+        viewModel.setWalletNotificationsEnabled(enabled)
+        walletNotificationsEnabled = enabled
+    }
+
+    fun postWalletNotification(
+        key: String,
+        title: String,
+        body: String,
+    ) {
+        if (!walletNotificationsEnabled) return
+        WalletNotificationHelper.notifyWalletActivity(
+            context = context,
+            notificationId = key.hashCode(),
+            title = title,
+            body = body,
         )
+    }
+
+    LaunchedEffect(Unit) {
+        WalletNotificationHelper.ensureChannels(context)
+    }
+
+    val handleParsedSendInput: (String) -> Unit = { input ->
+        val resolution =
+            resolveSendRoute(
+                input = input,
+                layer1UseSats = layer1Denomination == SecureStorage.DENOMINATION_SATS,
+                layer2UseSats = layer2Denomination == SecureStorage.DENOMINATION_SATS,
+                isLiquidAvailable = isLiquidAvailable,
+            )
+        if (isLiquidAvailable) {
+            liquidViewModel.setActiveLayer(resolution.route, walletState.activeWallet?.id)
+        }
+        if (resolution.route == WalletLayer.LAYER2) {
+            liquidViewModel.updateSendDraft(resolution.draft)
+        } else {
+            viewModel.updateSendScreenDraft(resolution.draft)
+        }
         navController.navigate(Screen.Send.route) {
             popUpTo(navController.graph.findStartDestination().id) {
                 inclusive = false
             }
+            launchSingleTop = true
         }
+    }
+
+    val handleLayer2SendInput: (String) -> Unit = { input ->
+        if (isLiquidAvailable) {
+            liquidViewModel.setActiveLayer(WalletLayer.LAYER2, walletState.activeWallet?.id)
+            liquidViewModel.updateSendDraft(
+                resolveLayer2SendDraft(
+                    input = input,
+                    layer2UseSats = layer2Denomination == SecureStorage.DENOMINATION_SATS,
+                ),
+            )
+            navController.navigate(Screen.Send.route) {
+                popUpTo(navController.graph.findStartDestination().id) {
+                    inclusive = false
+                }
+                launchSingleTop = true
+            }
+        } else {
+            handleParsedSendInput(input)
+        }
+    }
+
+    // Handle incoming send payload from external intent or NFC
+    LaunchedEffect(pendingSendInput) {
+        val input = pendingSendInput ?: return@LaunchedEffect
+        viewModel.consumePendingSendInput()
+        handleParsedSendInput(input)
     }
 
     // Close wallet picker and reset PIN setup state when navigating to a different screen
@@ -209,12 +408,24 @@ fun IbisWalletApp(
                 Screen.Receive.route,
                 Screen.Balance.route,
                 Screen.Send.route,
+                Screen.Swap.route,
             )
 
     // Check if we're on a sub-screen that should show back button in main TopAppBar
     val isSubScreenWithTopBar =
         currentDestination?.route in
             listOf(
+                Screen.AllAddresses.route,
+                Screen.AllUtxos.route,
+            )
+
+    val requiresActiveWalletAuth =
+        currentDestination?.route in
+            listOf(
+                Screen.Receive.route,
+                Screen.Balance.route,
+                Screen.Send.route,
+                Screen.Swap.route,
                 Screen.AllAddresses.route,
                 Screen.AllUtxos.route,
             )
@@ -229,43 +440,16 @@ fun IbisWalletApp(
 
     // Security state - tracks whether app lock is enabled for the lock icon
     var isSecurityEnabled by remember { mutableStateOf(viewModel.isSecurityEnabled()) }
+    val activity = remember(context) { context as? FragmentActivity }
+    var pendingWalletUnlock by remember { mutableStateOf<PendingWalletUnlock?>(null) }
+    var authorizedLockedWalletId by remember { mutableStateOf<String?>(null) }
+    var lastProcessedAppUnlockCounter by remember { mutableIntStateOf(0) }
+    var showServerStatusDialog by remember { mutableStateOf(false) }
+    var hideFullSyncDialog by remember { mutableStateOf(false) }
 
-    // Connection status dialog state
-    var showConnectionStatusDialog by remember { mutableStateOf(false) }
     val electrumConfig = viewModel.getElectrumConfig()
-
-    // Connection status dialog
-    if (showConnectionStatusDialog) {
-        ConnectionStatusDialog(
-            isConnected = uiState.isConnected,
-            isConnecting = uiState.isConnecting,
-            serverName = electrumConfig?.name,
-            serverUrl = electrumConfig?.url,
-            serverPort = electrumConfig?.port,
-            useSsl = electrumConfig?.useSsl ?: false,
-            isOnion = electrumConfig?.isOnionAddress() ?: false,
-            serverVersion = uiState.serverVersion,
-            isTorActive = torState.status == TorStatus.CONNECTED,
-            blockHeight = walletState.blockHeight,
-            onDismiss = { showConnectionStatusDialog = false },
-            onConnect = {
-                serversState.activeServerId?.let { viewModel.connectToServer(it) }
-            },
-            onDisconnect = {
-                viewModel.disconnect()
-            },
-            onConfigureServer = {
-                showConnectionStatusDialog = false
-                navController.navigate(Screen.ElectrumConfig.route)
-            },
-        )
-    }
-
-    // Full sync progress dialog - shows automatically during full scan
-    if (walletState.isFullSyncing) {
-        FullSyncProgressDialog(
-            syncProgress = walletState.syncProgress,
-        )
+    val liquidElectrumConfig = liquidServersState.servers.find {
+        it.id == liquidServersState.activeServerId
     }
 
     // Certificate TOFU dialog
@@ -276,9 +460,33 @@ fun IbisWalletApp(
             onReject = { viewModel.rejectCertificate() },
         )
     }
+    if (certDialogState == null) {
+        liquidCertDialogState?.let { state ->
+            CertificateDialog(
+                state = state,
+                onAccept = { liquidViewModel.acceptCertificate() },
+                onReject = { liquidViewModel.rejectCertificate() },
+            )
+        }
+    }
+
+    LaunchedEffect(walletState.isFullSyncing) {
+        if (!walletState.isFullSyncing) {
+            hideFullSyncDialog = false
+        }
+    }
+
+    if (walletState.isFullSyncing && !hideFullSyncDialog) {
+        FullSyncProgressDialog(
+            walletName = walletState.activeWallet?.name,
+            progress = walletState.syncProgress,
+            onCancel = { viewModel.cancelFullSync() },
+            onClose = { hideFullSyncDialog = true },
+        )
+    }
 
     // Existing wallet names for auto-naming on import/generate screens
-    val existingWalletNames = walletState.wallets.map { it.name }
+    val existingWalletNames = remember(walletState.wallets) { walletState.wallets.map { it.name } }
 
     // Filter wallets based on duress mode:
     // - In duress mode: show only the duress wallet
@@ -296,24 +504,211 @@ fun IbisWalletApp(
     // Build wallet list for ManageWallets screen from filtered wallets
     val activeWalletId = walletState.activeWallet?.id
     val wallets =
-        filteredWallets.map { storedWallet ->
-            val isWatchAddress = storedWallet.derivationPath == "single" && storedWallet.isWatchOnly
-            val isPrivateKey = storedWallet.derivationPath == "single" && !storedWallet.isWatchOnly
-            WalletInfo(
-                id = storedWallet.id,
-                name = storedWallet.name,
-                type = storedWallet.addressType.name.lowercase(),
-                typeDescription = storedWallet.addressType.displayName,
-                derivationPath = storedWallet.derivationPath,
-                isActive = storedWallet.id == activeWalletId,
-                isWatchOnly = storedWallet.isWatchOnly,
-                isWatchAddress = isWatchAddress,
-                isPrivateKey = isPrivateKey,
-                lastFullSyncTime = viewModel.getLastFullSyncTime(storedWallet.id),
-                masterFingerprint = storedWallet.masterFingerprint,
-                gapLimit = storedWallet.gapLimit,
-            )
+        remember(filteredWallets, activeWalletId) {
+            filteredWallets.map { storedWallet ->
+                val isWatchAddress = storedWallet.derivationPath == "single" && storedWallet.isWatchOnly
+                val isPrivateKey = storedWallet.derivationPath == "single" && !storedWallet.isWatchOnly
+                WalletInfo(
+                    id = storedWallet.id,
+                    name = storedWallet.name,
+                    type = storedWallet.addressType.name.lowercase(),
+                    typeDescription = storedWallet.addressType.displayName,
+                    derivationPath = storedWallet.derivationPath,
+                    isActive = storedWallet.id == activeWalletId,
+                    isWatchOnly = storedWallet.isWatchOnly,
+                    isLocked = storedWallet.isLocked,
+                    isWatchAddress = isWatchAddress,
+                    isPrivateKey = isPrivateKey,
+                    lastFullSyncTime = walletLastFullSyncTimes[storedWallet.id],
+                    masterFingerprint = storedWallet.masterFingerprint,
+                    gapLimit = storedWallet.gapLimit,
+                )
+            }
         }
+
+    fun completeWalletSelection(request: PendingWalletUnlock) {
+        authorizedLockedWalletId = if (request.isLocked) request.walletId else null
+        pendingMainWalletId = request.walletId
+        pendingMainLayer = request.targetLayer
+        liquidViewModel.setActiveLayer(request.targetLayer)
+        if (request.walletId != activeWalletId) {
+            viewModel.switchWallet(request.walletId)
+        }
+        if (request.navigateToBalance) {
+            navController.navigate(Screen.Balance.route) {
+                popUpTo(navController.graph.findStartDestination().id) {
+                    inclusive = false
+                }
+                launchSingleTop = true
+            }
+        }
+    }
+
+    fun requestWalletSelection(walletId: String, navigateToBalance: Boolean = false) {
+        val wallet = filteredWallets.find { it.id == walletId } ?: return
+        val targetLayer =
+            runCatching { WalletLayer.valueOf(secureStorage.getActiveLayer(walletId)) }
+                .getOrDefault(WalletLayer.LAYER1)
+        val request =
+            PendingWalletUnlock(
+                walletId = walletId,
+                walletName = wallet.name,
+                isLocked = wallet.isLocked,
+                purpose = WalletAuthPurpose.OPEN_WALLET,
+                targetLayer = targetLayer,
+                navigateToBalance = navigateToBalance,
+                securityMethod = viewModel.getSecurityMethod(),
+            )
+
+        val needsAuth = wallet.isLocked && authorizedLockedWalletId != walletId
+        if (!needsAuth) {
+            completeWalletSelection(request)
+            return
+        }
+
+        if (request.securityMethod == SecureStorage.SecurityMethod.NONE) {
+            scope.launch {
+                snackbarHostState.showSnackbar("Set up PIN or biometric to open locked wallets")
+            }
+            return
+        }
+
+        pendingWalletUnlock = request
+    }
+
+    fun requestDisableWalletLock(walletId: String) {
+        val wallet = filteredWallets.find { it.id == walletId } ?: return
+        val request =
+            PendingWalletUnlock(
+                walletId = walletId,
+                walletName = wallet.name,
+                isLocked = wallet.isLocked,
+                purpose = WalletAuthPurpose.DISABLE_LOCK,
+                targetLayer = pendingMainLayer,
+                navigateToBalance = false,
+                securityMethod = viewModel.getSecurityMethod(),
+            )
+
+        if (request.securityMethod == SecureStorage.SecurityMethod.NONE) {
+            viewModel.setWalletLocked(walletId, false)
+            if (authorizedLockedWalletId == walletId) {
+                authorizedLockedWalletId = null
+            }
+            return
+        }
+
+        pendingWalletUnlock = request
+    }
+
+    fun completeWalletAuth(request: PendingWalletUnlock) {
+        when (request.purpose) {
+            WalletAuthPurpose.OPEN_WALLET -> completeWalletSelection(request)
+            WalletAuthPurpose.DISABLE_LOCK -> {
+                if (authorizedLockedWalletId == request.walletId) {
+                    authorizedLockedWalletId = null
+                }
+                viewModel.setWalletLocked(request.walletId, false)
+            }
+        }
+    }
+
+    fun cancelWalletUnlock(request: PendingWalletUnlock) {
+        pendingWalletUnlock = null
+        if (request.purpose == WalletAuthPurpose.OPEN_WALLET &&
+            request.walletId == activeWalletId &&
+            currentDestination?.route != Screen.ManageWallets.route
+        ) {
+            navController.navigate(Screen.ManageWallets.route) {
+                launchSingleTop = true
+            }
+        }
+    }
+
+    LaunchedEffect(appUnlockCounter, activeWalletId, walletState.activeWallet?.isLocked) {
+        val activeWallet = walletState.activeWallet ?: return@LaunchedEffect
+        if (appUnlockCounter == 0 || appUnlockCounter == lastProcessedAppUnlockCounter) return@LaunchedEffect
+        if (activeWallet.isLocked) {
+            authorizedLockedWalletId = activeWallet.id
+        }
+        lastProcessedAppUnlockCounter = appUnlockCounter
+    }
+
+    LaunchedEffect(activeWalletId, walletState.activeWallet?.isLocked, authorizedLockedWalletId, requiresActiveWalletAuth) {
+        val activeWallet = walletState.activeWallet ?: return@LaunchedEffect
+        if (!requiresActiveWalletAuth) return@LaunchedEffect
+        if (!activeWallet.isLocked) return@LaunchedEffect
+        if (pendingMainWalletId != null && pendingMainWalletId != activeWallet.id) return@LaunchedEffect
+        if (authorizedLockedWalletId == activeWallet.id || pendingWalletUnlock?.walletId == activeWallet.id) return@LaunchedEffect
+        requestWalletSelection(activeWallet.id)
+    }
+
+    pendingWalletUnlock?.let { request ->
+        if (request.securityMethod == SecureStorage.SecurityMethod.PIN) {
+            LockScreen(
+                securityMethod = SecureStorage.SecurityMethod.PIN,
+                storedPinLength = secureStorage.getStoredPinLength(),
+                isBiometricAvailable = false,
+                onBiometricRequest = {},
+                onPinEntered = { pin ->
+                    if (secureStorage.verifyPin(pin)) {
+                        pendingWalletUnlock = null
+                        completeWalletAuth(request)
+                        true
+                    } else {
+                        false
+                    }
+                },
+            )
+            return
+        }
+    }
+
+    LaunchedEffect(pendingWalletUnlock?.walletId, pendingWalletUnlock?.securityMethod) {
+        val request = pendingWalletUnlock ?: return@LaunchedEffect
+        if (request.securityMethod != SecureStorage.SecurityMethod.BIOMETRIC) return@LaunchedEffect
+        if (activity == null) {
+            pendingWalletUnlock = null
+            snackbarHostState.showSnackbar("Biometric unlock is unavailable here")
+            return@LaunchedEffect
+        }
+        val prompt =
+            BiometricPrompt(
+                activity,
+                ContextCompat.getMainExecutor(activity),
+                object : BiometricPrompt.AuthenticationCallback() {
+                    override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                        super.onAuthenticationSucceeded(result)
+                        pendingWalletUnlock = null
+                        completeWalletAuth(request)
+                    }
+
+                    override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                        super.onAuthenticationError(errorCode, errString)
+                        cancelWalletUnlock(request)
+                    }
+                },
+            )
+        val promptInfo =
+            BiometricPrompt.PromptInfo.Builder()
+                .setTitle(
+                    if (request.purpose == WalletAuthPurpose.DISABLE_LOCK) {
+                        "Disable Wallet Lock"
+                    } else {
+                        "Unlock Wallet"
+                    },
+                )
+                .setSubtitle(
+                    if (request.purpose == WalletAuthPurpose.DISABLE_LOCK) {
+                        "Authenticate to disable lock on ${request.walletName}"
+                    } else {
+                        "Authenticate to open ${request.walletName}"
+                    },
+                )
+                .setNegativeButtonText("Cancel")
+                .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
+                .build()
+        prompt.authenticate(promptInfo)
+    }
 
     // Get string resources for use in event handling
     val walletAddedMessage = stringResource(R.string.wallet_added)
@@ -326,7 +721,6 @@ fun IbisWalletApp(
                     snackbarHostState.showSnackbar("Error: ${event.message}")
                 }
                 is WalletEvent.WalletImported -> {
-                    labelsVersion++
                     Toast.makeText(context, walletAddedMessage, Toast.LENGTH_SHORT).show()
                     navController.navigate(Screen.Balance.route) {
                         popUpTo(navController.graph.findStartDestination().id) {
@@ -354,27 +748,439 @@ fun IbisWalletApp(
                     Toast.makeText(context, "Exported ${event.count} labels (BIP 329)", Toast.LENGTH_SHORT).show()
                 }
                 is WalletEvent.Bip329LabelsImported -> {
-                    labelsVersion++
                     Toast.makeText(context, "Imported ${event.count} labels", Toast.LENGTH_SHORT).show()
+                }
+                is WalletEvent.FeeBumped -> {
+                    Toast.makeText(context, "Replacement transaction broadcast successfully", Toast.LENGTH_SHORT).show()
+                }
+                is WalletEvent.CpfpCreated -> {
+                    Toast.makeText(context, "CPFP transaction broadcast successfully", Toast.LENGTH_SHORT).show()
+                }
+                is WalletEvent.TransactionRedirected -> {
+                    Toast.makeText(context, "Transaction redirected to your wallet", Toast.LENGTH_SHORT).show()
                 }
                 is WalletEvent.SyncCompleted,
                 is WalletEvent.WalletSwitched,
                 is WalletEvent.LabelsRestored,
                 -> {
-                    // Refresh labels - labels may have been restored from backup,
-                    // changed due to wallet switch, or updated after sync
-                    labelsVersion++
+                    if (event is WalletEvent.LabelsRestored) {
+                        liquidViewModel.refreshCachedWalletState()
+                    }
                 }
                 // Other success events - no notification needed, UI updates reflect the change
                 is WalletEvent.Connected,
-                is WalletEvent.FeeBumped,
-                is WalletEvent.CpfpCreated,
                 is WalletEvent.WalletDeleted,
                 is WalletEvent.ServerDeleted,
                 is WalletEvent.AddressGenerated,
                 -> { }
             }
         }
+    }
+
+    LaunchedEffect(isLiquidAvailable) {
+        liquidViewModel.setLiquidContextActive(isLiquidAvailable)
+    }
+
+    LaunchedEffect(isLiquidAvailable) {
+        if (!isLiquidAvailable) return@LaunchedEffect
+        liquidViewModel.events.collect { event ->
+            when (event) {
+                is LiquidEvent.Error -> {
+                    snackbarHostState.showSnackbar("Liquid error: ${event.message}")
+                }
+                is LiquidEvent.TransactionSent -> {
+                    liquidViewModel.clearSendDraft()
+                    Toast.makeText(context, "L-BTC transaction sent successfully", Toast.LENGTH_SHORT).show()
+                }
+                is LiquidEvent.LightningReceived -> {
+                    postWalletNotification(
+                        key = "lightning-received-${event.txid}",
+                        title = "Lightning swap received",
+                        body = walletState.activeWallet?.name ?: "Wallet activity received",
+                    )
+                    Toast.makeText(context, "Lightning swap received", Toast.LENGTH_SHORT).show()
+                }
+                is LiquidEvent.LightningSent -> {
+                    liquidViewModel.clearSendDraft()
+                    Toast.makeText(context, "Lightning payment sent successfully", Toast.LENGTH_SHORT).show()
+                }
+                is LiquidEvent.SwapCompleted -> {
+                    postWalletNotification(
+                        key = "swap-completed-${event.swapId}",
+                        title = "Swap completed",
+                        body = walletState.activeWallet?.name ?: "Wallet activity updated",
+                    )
+                    Toast.makeText(context, "Swap completed", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
+    LaunchedEffect(
+        walletState.activeWallet?.id,
+        walletState.transactions,
+        walletNotificationsEnabled,
+        initialSyncComplete,
+    ) {
+        if (!initialSyncComplete) return@LaunchedEffect
+        val walletId = walletState.activeWallet?.id ?: return@LaunchedEffect
+        val currentTransactions = walletState.transactions
+        if (currentTransactions.isEmpty()) return@LaunchedEffect
+
+        val persistedTxids = secureStorage.getNotifiedTxids(walletId)
+        val currentTxids = currentTransactions.map { it.txid }.toSet()
+
+        val newIncomingTransactions =
+            currentTransactions.filter { tx ->
+                tx.amountSats > 0 && tx.txid !in persistedTxids
+            }
+
+        secureStorage.saveNotifiedTxids(walletId, persistedTxids + currentTxids)
+
+        if (!walletNotificationsEnabled || newIncomingTransactions.isEmpty()) {
+            return@LaunchedEffect
+        }
+
+        newIncomingTransactions.forEach { tx ->
+            val amountText =
+                formatAmount(
+                    sats = tx.amountSats.toULong(),
+                    useSats = layer1Denomination == SecureStorage.DENOMINATION_SATS,
+                    includeUnit = true,
+                )
+            postWalletNotification(
+                key = "l1-receive-${walletId}-${tx.txid}",
+                title = "Bitcoin received",
+                body = "$amountText in ${walletState.activeWallet?.name ?: "Wallet"}",
+            )
+        }
+    }
+
+    LaunchedEffect(
+        loadedLiquidWalletId,
+        liquidState.transactions,
+        walletNotificationsEnabled,
+        initialLiquidSyncComplete,
+    ) {
+        if (!initialLiquidSyncComplete) return@LaunchedEffect
+        val walletId = loadedLiquidWalletId ?: return@LaunchedEffect
+        val currentTransactions = liquidState.transactions
+        if (currentTransactions.isEmpty()) return@LaunchedEffect
+
+        val persistedTxids = secureStorage.getNotifiedLiquidTxids(walletId)
+        val currentTxids = currentTransactions.map { it.txid }.toSet()
+
+        val newIncomingTransactions =
+            currentTransactions.filter { tx ->
+                tx.balanceSatoshi > 0 &&
+                    tx.type == github.aeonbtc.ibiswallet.data.model.LiquidTxType.RECEIVE &&
+                    tx.source == LiquidTxSource.NATIVE &&
+                    tx.txid !in persistedTxids
+            }
+
+        secureStorage.saveNotifiedLiquidTxids(walletId, persistedTxids + currentTxids)
+
+        if (!walletNotificationsEnabled || newIncomingTransactions.isEmpty()) {
+            return@LaunchedEffect
+        }
+
+        newIncomingTransactions.forEach { tx ->
+            val amountText =
+                formatAmount(
+                    sats = tx.balanceSatoshi.toULong(),
+                    useSats = layer2Denomination == SecureStorage.DENOMINATION_SATS,
+                    includeUnit = true,
+                )
+            postWalletNotification(
+                key = "l2-receive-${walletId}-${tx.txid}",
+                title = "Liquid received",
+                body = "$amountText in ${walletState.activeWallet?.name ?: "Wallet"}",
+            )
+        }
+    }
+
+    // ── Layer 2 (Liquid) wallet lifecycle ──
+    // Load/unload the Liquid wallet when:
+    // - The active Bitcoin wallet changes
+    // - Layer 2 is enabled/disabled
+    // - Per-wallet Liquid toggle changes
+    LaunchedEffect(walletState.activeWallet?.id, isLayer2Enabled) {
+        val activeWallet = walletState.activeWallet ?: return@LaunchedEffect
+        val walletId = activeWallet.id
+
+        if (!isLayer2Enabled) {
+            liquidViewModel.unloadLiquidWallet()
+            return@LaunchedEffect
+        }
+
+        // Check per-wallet Liquid toggle (only BIP39 wallets can use Liquid)
+        if (activeWallet.isWatchOnly || !liquidViewModel.isLiquidEnabledForWallet(walletId)) {
+            liquidViewModel.unloadLiquidWallet()
+            return@LaunchedEffect
+        }
+
+        // Load (or initialize on first use) the Liquid wallet from cached state,
+        // letting the repository fetch key material lazily if needed.
+        liquidViewModel.loadLiquidWallet(walletId)
+        if (boltzApiSource != SecureStorage.BOLTZ_API_DISABLED) {
+            liquidViewModel.requestBoltzWarmupAtAppStart()
+        }
+    }
+
+    val activeMainWalletId = walletState.activeWallet?.id
+    val isPendingLayerReady =
+        when (pendingMainLayer) {
+            WalletLayer.LAYER1 -> activeLayer == WalletLayer.LAYER1
+            WalletLayer.LAYER2 ->
+                if (!isLiquidAvailable) {
+                    true
+                } else {
+                    activeLayer == WalletLayer.LAYER2 &&
+                        loadedLiquidWalletId == pendingMainWalletId &&
+                        (liquidState.isInitialized || liquidState.error != null)
+                }
+        }
+    val shouldBlockMainContent =
+        pendingMainWalletId != null &&
+            uiState.error == null &&
+            (
+                activeMainWalletId != pendingMainWalletId ||
+                    (
+                        !hasCompletedInitialMainLoad ||
+                            pendingMainLayer != WalletLayer.LAYER2
+                    ) &&
+                    !isPendingLayerReady
+            )
+
+    LaunchedEffect(pendingMainWalletId, shouldBlockMainContent, uiState.error) {
+        if (pendingMainWalletId != null && (!shouldBlockMainContent || uiState.error != null)) {
+            pendingMainWalletId = null
+        }
+    }
+
+    LaunchedEffect(shouldBlockMainContent) {
+        if (!shouldBlockMainContent) {
+            hasCompletedInitialMainLoad = true
+        }
+    }
+
+    if (shouldBlockMainContent && !hasCompletedInitialMainLoad) {
+        AppLaunchLoadingScreen()
+        return
+    }
+
+    val isElectrumTorBootstrapping =
+        uiState.isConnecting &&
+            electrumConfig?.isOnionAddress() == true &&
+            torState.status != TorStatus.CONNECTED
+    val isLiquidTorBootstrapping =
+        isLiquidConnecting &&
+            liquidElectrumConfig?.isOnionAddress() == true &&
+            liquidTorState.status != TorStatus.CONNECTED
+    val electrumStatusColor =
+        when {
+            isElectrumTorBootstrapping -> TorPurple
+            uiState.isConnecting -> BitcoinOrange
+            uiState.isConnected -> SuccessGreen
+            else -> ErrorRed
+        }
+    val liquidStatusColor =
+        when {
+            isLiquidTorBootstrapping -> TorPurple
+            isLiquidConnecting -> BitcoinOrange
+            isLiquidConnected -> SuccessGreen
+            else -> ErrorRed
+        }
+    val headerStatusChromeColor =
+        when {
+            isLiquidAvailable && uiState.isConnected && isLiquidConnected -> SuccessGreen
+            isLiquidAvailable && (isLiquidConnecting || uiState.isConnecting) -> BitcoinOrange
+            isLiquidAvailable && (uiState.isConnected || isLiquidConnected) -> SuccessGreen
+            uiState.isConnecting -> BitcoinOrange
+            else -> electrumStatusColor
+        }
+
+    @Composable
+    fun StatusDot(color: Color) {
+        Box(
+            modifier =
+                Modifier
+                    .size(5.dp)
+                    .clip(CircleShape)
+                    .background(color),
+        )
+    }
+
+    @Composable
+    fun HeaderSettingsCog(onClick: () -> Unit) {
+        Icon(
+            imageVector = Icons.Default.Settings,
+            contentDescription = "Open server settings",
+            tint = TextSecondary,
+            modifier =
+                Modifier
+                    .size(18.dp)
+                    .clickable(onClick = onClick),
+        )
+    }
+
+    if (showServerStatusDialog) {
+        Dialog(
+            onDismissRequest = { showServerStatusDialog = false },
+            properties = DialogProperties(usePlatformDefaultWidth = false),
+        ) {
+            Surface(
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                shape = RoundedCornerShape(12.dp),
+                color = DarkSurface,
+                border = BorderStroke(1.dp, BorderColor),
+            ) {
+                Column(
+                    modifier =
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp)
+                            .verticalScroll(rememberScrollState()),
+                ) {
+                    CurrentServerCard(
+                        server = electrumConfig,
+                        isConnecting = uiState.isConnecting,
+                        isConnected = uiState.isConnected,
+                        error = uiState.error,
+                        serverVersion = uiState.serverVersion,
+                        blockHeight = walletState.blockHeight,
+                        torState = torState,
+                        isOnionServer = electrumConfig?.isOnionAddress() == true,
+                        headerTitle = "Bitcoin",
+                        headerTrailingContent = {
+                            HeaderSettingsCog(
+                                onClick = {
+                                    showServerStatusDialog = false
+                                    navController.navigate(Screen.ElectrumConfig.route) {
+                                        launchSingleTop = true
+                                    }
+                                },
+                            )
+                        },
+                        onConnect = { serversState.activeServerId?.let(viewModel::connectToServer) },
+                        onDisconnect = { viewModel.disconnect() },
+                        onCancelConnection = { viewModel.cancelConnection() },
+                        onAddServer = {
+                            showServerStatusDialog = false
+                            navController.navigate(Screen.ElectrumConfig.route) {
+                                launchSingleTop = true
+                            }
+                        },
+                    )
+
+                    if (isLiquidAvailable) {
+                        Spacer(modifier = Modifier.height(16.dp))
+                        LiquidCurrentServerCard(
+                            server = liquidElectrumConfig,
+                            isConnecting = isLiquidConnecting,
+                            isConnected = isLiquidConnected,
+                            error = liquidConnectionError,
+                            blockHeight = liquidBlockHeight,
+                            torState = liquidTorState,
+                            isOnionServer = liquidElectrumConfig?.isOnionAddress() == true,
+                            headerTitle = "Liquid",
+                            headerTrailingContent = {
+                                HeaderSettingsCog(
+                                    onClick = {
+                                        showServerStatusDialog = false
+                                        navController.navigate(Screen.LiquidServerConfig.route) {
+                                            launchSingleTop = true
+                                        }
+                                    },
+                                )
+                            },
+                            onConnect = { liquidServersState.activeServerId?.let(liquidViewModel::connectToLiquidServer) },
+                            onDisconnect = { liquidViewModel.disconnectLiquidServer() },
+                            onCancelConnection = { liquidViewModel.cancelLiquidConnection() },
+                            onAddServer = {
+                                showServerStatusDialog = false
+                                navController.navigate(Screen.LiquidServerConfig.route) {
+                                    launchSingleTop = true
+                                }
+                            },
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+                    IbisButton(
+                        onClick = { showServerStatusDialog = false },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("Close")
+                    }
+                }
+            }
+        }
+    }
+
+    @Composable
+    fun ServerConfigRoute(initialSection: ServerConfigSection) {
+        val activeLiquidServer = liquidServersState.servers.find { it.id == liquidServersState.activeServerId }
+
+        CombinedServerConfigScreen(
+            onBack = { navController.popBackStack() },
+            initialSection = initialSection,
+            showLiquidSection = isLiquidAvailable,
+            bitcoinContent = { contentModifier ->
+                ElectrumConfigScreen(
+                    modifier = contentModifier,
+                    onBack = { navController.popBackStack() },
+                    showHeader = false,
+                    isConnecting = uiState.isConnecting,
+                    isConnected = uiState.isConnected,
+                    error = uiState.error,
+                    savedServers = serversState.servers,
+                    activeServerId = serversState.activeServerId,
+                    onSaveServer = { config -> viewModel.saveServer(config) },
+                    onDeleteServer = { serverId -> viewModel.deleteServer(serverId) },
+                    onConnectToServer = { serverId -> viewModel.connectToServer(serverId) },
+                    onDisconnect = { viewModel.disconnect() },
+                    onCancelConnection = { viewModel.cancelConnection() },
+                    autoSwitchServer = autoSwitchServer,
+                    onAutoSwitchServerChange = { enabled -> viewModel.setAutoSwitchServer(enabled) },
+                    torState = torState,
+                    isTorEnabled = viewModel.isTorEnabled(),
+                    onTorEnabledChange = { enabled -> viewModel.setTorEnabled(enabled) },
+                    isActiveServerOnion = serversState.servers
+                        .find { it.id == serversState.activeServerId }
+                        ?.isOnionAddress() == true,
+                    serverVersion = uiState.serverVersion,
+                    blockHeight = walletState.blockHeight,
+                )
+            },
+            liquidContent = { contentModifier ->
+                LiquidServerConfigScreen(
+                    modifier = contentModifier,
+                    onBack = { navController.popBackStack() },
+                    showHeader = false,
+                    isConnecting = isLiquidConnecting,
+                    isConnected = isLiquidConnected,
+                    error = liquidConnectionError,
+                    blockHeight = liquidBlockHeight,
+                    savedServers = liquidServersState.servers,
+                    activeServerId = liquidServersState.activeServerId,
+                    onSaveServer = { config -> liquidViewModel.saveLiquidServer(config) },
+                    onDeleteServer = { id -> liquidViewModel.removeLiquidServer(id) },
+                    onConnectToServer = { id -> liquidViewModel.connectToLiquidServer(id) },
+                    torState = liquidTorState,
+                    isTorEnabled = isLiquidTorEnabled,
+                    onTorEnabledChange = { liquidViewModel.setLiquidTorEnabled(it) },
+                    isActiveServerOnion = activeLiquidServer?.isOnionAddress() == true,
+                    onDisconnect = { liquidViewModel.disconnectLiquidServer() },
+                    onCancelConnection = { liquidViewModel.cancelLiquidConnection() },
+                    autoSwitchServer = liquidAutoSwitch,
+                    onAutoSwitchServerChange = { liquidViewModel.setLiquidAutoSwitchServer(it) },
+                )
+            },
+        )
     }
 
     ModalNavigationDrawer(
@@ -395,8 +1201,14 @@ fun IbisWalletApp(
                         DrawerItem.Settings -> {
                             navController.navigate(Screen.Settings.route)
                         }
+                        DrawerItem.Layer2Options -> {
+                            navController.navigate(Screen.Layer2Options.route)
+                        }
                         DrawerItem.Security -> {
                             navController.navigate(Screen.Security.route)
+                        }
+                        DrawerItem.BackupRestore -> {
+                            navController.navigate(Screen.BackupRestore.route)
                         }
                         DrawerItem.About -> {
                             navController.navigate(Screen.About.route)
@@ -413,26 +1225,12 @@ fun IbisWalletApp(
             topBar = {
                 if (isMainScreen || isSubScreenWithTopBar) {
                     TopAppBar(
+                        expandedHeight = if (isMainScreen) 40.dp else TopAppBarDefaults.TopAppBarExpandedHeight,
                         title = {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
-                                if (isSubScreenWithTopBar) {
-                                    Text(
-                                        text = subScreenTitle,
-                                        style = MaterialTheme.typography.titleLarge,
-                                        color = MaterialTheme.colorScheme.onBackground,
-                                    )
-                                } else {
-                                    WalletSelectorDropdown(
-                                        activeWallet = walletState.activeWallet,
-                                        wallets = filteredWallets,
-                                        expanded = walletSelectorExpanded,
-                                        onToggle = { walletSelectorExpanded = !walletSelectorExpanded },
-                                    )
-                                }
                                 if (isMainScreen && isSecurityEnabled) {
-                                    Spacer(modifier = Modifier.width(4.dp))
                                     IconButton(
                                         onClick = onLockApp,
                                         modifier = Modifier.size(32.dp),
@@ -444,6 +1242,20 @@ fun IbisWalletApp(
                                             modifier = Modifier.size(22.dp),
                                         )
                                     }
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                }
+                                if (isSubScreenWithTopBar) {
+                                    Text(
+                                        text = subScreenTitle,
+                                        style = MaterialTheme.typography.titleLarge,
+                                        color = MaterialTheme.colorScheme.onBackground,
+                                    )
+                                } else {
+                                    WalletSelectorDropdown(
+                                        activeWallet = walletState.activeWallet,
+                                        expanded = walletSelectorExpanded,
+                                        onToggle = { walletSelectorExpanded = !walletSelectorExpanded },
+                                    )
                                 }
                             }
                         },
@@ -474,14 +1286,99 @@ fun IbisWalletApp(
                         },
                         actions = {
                             if (isMainScreen) {
-                                // Connection status indicator only on main screens
-                                ConnectionStatusIndicator(
-                                    isConnected = uiState.isConnected,
-                                    isConnecting = uiState.isConnecting,
-                                    torStatus = torState.status,
-                                    isOnionServer = electrumConfig?.isOnionAddress() ?: false,
-                                    onClick = { showConnectionStatusDialog = true },
-                                )
+                                Row(
+                                    modifier =
+                                        Modifier
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .border(
+                                                width = 1.dp,
+                                                color = headerStatusChromeColor,
+                                                shape = RoundedCornerShape(8.dp),
+                                            )
+                                            .background(headerStatusChromeColor.copy(alpha = 0.15f))
+                                            .clickable(onClick = { showServerStatusDialog = true })
+                                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    if (isLiquidAvailable) {
+                                        // Bitcoin status
+                                        if (uiState.isConnecting) {
+                                            CircularProgressIndicator(
+                                                modifier = Modifier.size(8.dp),
+                                                color = electrumStatusColor,
+                                                strokeWidth = 1.5.dp,
+                                            )
+                                        } else {
+                                            StatusDot(color = electrumStatusColor)
+                                        }
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text(
+                                            text =
+                                                when {
+                                                    isElectrumTorBootstrapping -> "Starting Tor"
+                                                    uiState.isConnecting -> "Connecting"
+                                                    uiState.isConnected -> "Bitcoin"
+                                                    else -> "Bitcoin"
+                                                },
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = electrumStatusColor,
+                                            maxLines = 1,
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = "|",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = TextSecondary,
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        // Liquid status
+                                        if (isLiquidConnecting) {
+                                            CircularProgressIndicator(
+                                                modifier = Modifier.size(8.dp),
+                                                color = liquidStatusColor,
+                                                strokeWidth = 1.5.dp,
+                                            )
+                                        } else {
+                                            StatusDot(color = liquidStatusColor)
+                                        }
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text(
+                                            text =
+                                                when {
+                                                    isLiquidTorBootstrapping -> "Starting Tor"
+                                                    isLiquidConnecting -> "Connecting"
+                                                    isLiquidConnected -> "Liquid"
+                                                    else -> "Liquid"
+                                                },
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = liquidStatusColor,
+                                            maxLines = 1,
+                                        )
+                                    } else {
+                                        if (uiState.isConnecting) {
+                                            CircularProgressIndicator(
+                                                modifier = Modifier.size(8.dp),
+                                                color = electrumStatusColor,
+                                                strokeWidth = 1.5.dp,
+                                            )
+                                        } else {
+                                            StatusDot(color = electrumStatusColor)
+                                        }
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text =
+                                                when {
+                                                    isElectrumTorBootstrapping -> "Starting Tor"
+                                                    uiState.isConnecting -> "Connecting"
+                                                    uiState.isConnected -> "Connected"
+                                                    else -> "Disconnected"
+                                                },
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = electrumStatusColor,
+                                            maxLines = 1,
+                                        )
+                                    }
+                                }
                             }
                         },
                         colors =
@@ -542,12 +1439,152 @@ fun IbisWalletApp(
                 }
             },
         ) { innerPadding ->
-            Box(modifier = Modifier.padding(innerPadding)) {
+            val swipeOffset = remember { Animatable(0f) }
+            var suppressNavTransition by remember { mutableStateOf(false) }
+            var pendingSwipe by remember { mutableStateOf<PendingSwipe?>(null) }
+
+            LaunchedEffect(pendingSwipe) {
+                val swipe = pendingSwipe ?: return@LaunchedEffect
+                val action = swipe.action
+
+                swipeOffset.snapTo(-swipe.direction * swipe.screenWidth)
+                if (action is SwipeAction.NavigateTab) suppressNavTransition = true
+
+                when (action) {
+                    is SwipeAction.NavigateTab -> {
+                        navController.navigate(action.route) {
+                            popUpTo(navController.graph.findStartDestination().id) { inclusive = false }
+                        }
+                        delay(50)
+                    }
+                    is SwipeAction.SwitchWallet -> {
+                        requestWalletSelection(action.walletId, navigateToBalance = false)
+                        withTimeoutOrNull(1500) {
+                            viewModel.walletState.first { it.activeWallet?.id == action.walletId }
+                        }
+                        delay(50)
+                    }
+                    is SwipeAction.SwitchLayer -> {
+                        liquidViewModel.setActiveLayer(action.layer, walletState.activeWallet?.id)
+                        withTimeoutOrNull(500) {
+                            liquidViewModel.activeLayer.first { it == action.layer }
+                        }
+                        delay(50)
+                    }
+                }
+
+                if (action is SwipeAction.NavigateTab) suppressNavTransition = false
+                swipeOffset.animateTo(0f, tween(150))
+            }
+
+            Box(
+                modifier = Modifier
+                    .padding(innerPadding)
+                    .graphicsLayer {
+                        translationX = swipeOffset.value
+                        val progress = if (size.width > 0) abs(swipeOffset.value) / size.width else 0f
+                        alpha = 1f - progress * 0.25f
+                    }
+                    .then(
+                        if (swipeMode != SecureStorage.SWIPE_MODE_DISABLED && isMainScreen) {
+                            Modifier.pointerInput(swipeMode, currentDestination?.route, activeLayer, filteredWallets, activeWalletId, isLayer2Enabled) {
+                                val screenWidth = size.width.toFloat()
+                                val threshold = screenWidth * 0.15f
+                                val velocityThreshold = 600f
+                                val route = currentDestination?.route
+                                val walletIds = filteredWallets.map { it.id }
+                                val walletIdx = walletIds.indexOf(activeWalletId)
+
+                                fun canSwipe(dragPositive: Boolean): Boolean = when (swipeMode) {
+                                    SecureStorage.SWIPE_MODE_SEND_RECEIVE -> {
+                                        val screens = listOf(Screen.Receive.route, Screen.Balance.route, Screen.Send.route)
+                                        val idx = screens.indexOf(route)
+                                        if (dragPositive) idx > 0 else idx in 0 until screens.lastIndex
+                                    }
+                                    SecureStorage.SWIPE_MODE_WALLETS ->
+                                        if (dragPositive) walletIdx > 0 else walletIdx in 0 until walletIds.lastIndex
+                                    SecureStorage.SWIPE_MODE_LAYERS ->
+                                        isLayer2Enabled && if (dragPositive) activeLayer == WalletLayer.LAYER2 else activeLayer == WalletLayer.LAYER1
+                                    else -> false
+                                }
+
+                                fun resolveAction(direction: Int): SwipeAction? {
+                                    val fwd = direction > 0
+                                    return when (swipeMode) {
+                                        SecureStorage.SWIPE_MODE_SEND_RECEIVE -> {
+                                            val screens = listOf(Screen.Receive.route, Screen.Balance.route, Screen.Send.route)
+                                            val idx = screens.indexOf(route)
+                                            val t = if (fwd && idx > 0) screens[idx - 1] else if (!fwd && idx < screens.lastIndex) screens[idx + 1] else null
+                                            t?.let { SwipeAction.NavigateTab(it) }
+                                        }
+                                        SecureStorage.SWIPE_MODE_WALLETS -> {
+                                            val t = if (fwd && walletIdx > 0) walletIdx - 1 else if (!fwd && walletIdx < walletIds.lastIndex) walletIdx + 1 else null
+                                            t?.let { SwipeAction.SwitchWallet(walletIds[it]) }
+                                        }
+                                        SecureStorage.SWIPE_MODE_LAYERS -> {
+                                            if (!isLayer2Enabled) return null
+                                            val t = if (fwd && activeLayer == WalletLayer.LAYER2) WalletLayer.LAYER1 else if (!fwd && activeLayer == WalletLayer.LAYER1) WalletLayer.LAYER2 else null
+                                            t?.let { SwipeAction.SwitchLayer(it) }
+                                        }
+                                        else -> null
+                                    }
+                                }
+
+                                awaitEachGesture {
+                                    val down = awaitFirstDown(requireUnconsumed = false)
+                                    val tracker = VelocityTracker()
+                                    tracker.addPosition(down.uptimeMillis, down.position)
+                                    var total = 0f
+
+                                    val drag = awaitHorizontalTouchSlopOrCancellation(down.id) { change, over ->
+                                        change.consume()
+                                        total += over
+                                        tracker.addPosition(change.uptimeMillis, change.position)
+                                        scope.launch { swipeOffset.snapTo(total) }
+                                    }
+
+                                    if (drag != null) {
+                                        val ok = horizontalDrag(drag.id) { change ->
+                                            val delta = change.positionChange().x
+                                            val moving = total + delta
+                                            total += if (!canSwipe(moving > 0) && abs(moving) > abs(total)) delta * 0.15f else delta
+                                            change.consume()
+                                            tracker.addPosition(change.uptimeMillis, change.position)
+                                            scope.launch { swipeOffset.snapTo(total) }
+                                        }
+
+                                        val velocity = tracker.calculateVelocity().x
+                                        val positive = total > 0
+                                        val committed = ok && canSwipe(positive) &&
+                                            (abs(total) > threshold || (abs(velocity) > velocityThreshold && velocity * total > 0))
+                                        val direction = if (positive) 1 else -1
+                                        val action = if (committed) resolveAction(direction) else null
+
+                                        if (action != null) {
+                                            scope.launch {
+                                                swipeOffset.animateTo(direction * screenWidth, tween(150))
+                                                pendingSwipe = PendingSwipe(action, direction, screenWidth)
+                                            }
+                                        } else {
+                                            scope.launch { swipeOffset.animateTo(0f, spring(dampingRatio = 0.65f, stiffness = 400f)) }
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            Modifier
+                        },
+                    ),
+            ) {
                 NavHost(
                     navController = navController,
                     startDestination = Screen.Balance.route,
-                    enterTransition = { fadeIn(animationSpec = tween(200)) },
-                    exitTransition = { fadeOut(animationSpec = tween(200)) },
+                    enterTransition = {
+                        if (suppressNavTransition) fadeIn(tween(0)) else fadeIn(tween(200))
+                    },
+                    exitTransition = {
+                        if (suppressNavTransition) fadeOut(tween(0)) else fadeOut(tween(200))
+                    },
                     popEnterTransition = { fadeIn(animationSpec = tween(200)) },
                     popExitTransition = { fadeOut(animationSpec = tween(200)) },
                 ) {
@@ -556,98 +1593,217 @@ fun IbisWalletApp(
                         LaunchedEffect(Unit) {
                             viewModel.fetchBtcPrice()
                         }
+                        val lightningInvoiceState by liquidViewModel.lightningInvoiceState.collectAsStateWithLifecycle()
+                        val lightningInvoiceLimits by liquidViewModel.lightningInvoiceLimits.collectAsStateWithLifecycle()
 
-                        ReceiveScreen(
-                            walletState = walletState,
-                            denomination = denomination,
-                            btcPrice = btcPrice,
-                            privacyMode = privacyMode,
-                            onGenerateAddress = { viewModel.getNewAddress() },
-                            onSaveLabel = { address, label -> viewModel.saveAddressLabel(address, label) },
-                            onShowAllAddresses = { navController.navigate(Screen.AllAddresses.route) },
-                            onShowAllUtxos = { navController.navigate(Screen.AllUtxos.route) },
-                        )
+                        if (isLiquidAvailable) {
+                            Column(modifier = Modifier.fillMaxSize()) {
+                                LayerSwitcher(
+                                    activeLayer = activeLayer,
+                                    onLayerSelected = { layer ->
+                                        liquidViewModel.setActiveLayer(layer, walletState.activeWallet?.id)
+                                    },
+                                    isSwapEnabled = swapAvailable,
+                                    onSwap = { navController.navigate(Screen.Swap.route) },
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                                )
+                                Box(modifier = Modifier.weight(1f)) {
+                                    if (activeLayer == WalletLayer.LAYER2) {
+                                        LiquidReceiveScreen(
+                                            liquidAddress = liquidState.currentAddress,
+                                            currentAddressLabel = liquidState.currentAddressLabel,
+                                            denomination = layer2Denomination,
+                                            btcPrice = btcPrice,
+                                            privacyMode = privacyMode,
+                                            boltzEnabled = liquidViewModel.isBoltzEnabled(),
+                                            lightningInvoiceState = lightningInvoiceState,
+                                            lightningInvoiceLimits = lightningInvoiceLimits,
+                                            onEnsureLiquidAddress = { liquidViewModel.ensureLiquidAddress() },
+                                            onGenerateLiquidAddress = { liquidViewModel.generateFreshLiquidAddress() },
+                                            onSaveLiquidAddressLabel = { address, label ->
+                                                activeWalletId?.let { walletId ->
+                                                    liquidViewModel.saveLiquidAddressLabel(walletId, address, label)
+                                                }
+                                            },
+                                            onShowAllAddresses = { navController.navigate(Screen.AllAddresses.route) },
+                                            onShowAllUtxos = { navController.navigate(Screen.AllUtxos.route) },
+                                            onCreateLightningInvoice = { sats, label ->
+                                                liquidViewModel.createLightningInvoice(sats, label)
+                                            },
+                                            onWarmLightningInvoice = {
+                                                liquidViewModel.requestBoltzLightningWarmup()
+                                            },
+                                            onFetchLightningLimits = { liquidViewModel.fetchLightningInvoiceLimits() },
+                                            onResetLightningInvoice = { liquidViewModel.resetLightningInvoice() },
+                                        )
+                                    } else {
+                                        ReceiveScreen(
+                                            walletState = walletState,
+                                            denomination = layer1Denomination,
+                                            btcPrice = btcPrice,
+                                            privacyMode = privacyMode,
+                                            onGenerateAddress = { viewModel.getNewAddress() },
+                                            onSaveLabel = { address, label -> viewModel.saveAddressLabel(address, label) },
+                                            onShowAllAddresses = { navController.navigate(Screen.AllAddresses.route) },
+                                            onShowAllUtxos = { navController.navigate(Screen.AllUtxos.route) },
+                                        )
+                                    }
+                                }
+                            }
+                        } else {
+                            ReceiveScreen(
+                                walletState = walletState,
+                                denomination = layer1Denomination,
+                                btcPrice = btcPrice,
+                                privacyMode = privacyMode,
+                                onGenerateAddress = { viewModel.getNewAddress() },
+                                onSaveLabel = { address, label -> viewModel.saveAddressLabel(address, label) },
+                                onShowAllAddresses = { navController.navigate(Screen.AllAddresses.route) },
+                                onShowAllUtxos = { navController.navigate(Screen.AllUtxos.route) },
+                            )
+                        }
                     }
                     composable(Screen.Balance.route) {
                         // Fetch price when entering Balance screen
                         LaunchedEffect(Unit) {
                             viewModel.fetchBtcPrice()
                         }
+                        val addressLabels by viewModel.addressLabels.collectAsStateWithLifecycle()
+                        val transactionLabels by viewModel.transactionLabels.collectAsStateWithLifecycle()
+                        val liquidTransactionLabels by liquidViewModel.liquidTransactionLabels.collectAsStateWithLifecycle()
 
-                        // Labels are refreshed when labelsVersion changes (global counter
-                        // bumped on wallet import, wallet switch, sync, or manual label save)
-                        val transactionLabels = remember(labelsVersion) { viewModel.getAllTransactionLabels() }
-                        val addressLabels = remember(labelsVersion) { viewModel.getAllAddressLabels() }
+                        val toggleLayer1Denomination = {
+                            val next = if (layer1Denomination == SecureStorage.DENOMINATION_SATS) {
+                                SecureStorage.DENOMINATION_BTC
+                            } else {
+                                SecureStorage.DENOMINATION_SATS
+                            }
+                            viewModel.setDenomination(next)
+                        }
+                        val toggleLayer2Denomination = {
+                            val next = if (layer2Denomination == SecureStorage.DENOMINATION_SATS) {
+                                SecureStorage.DENOMINATION_BTC
+                            } else {
+                                SecureStorage.DENOMINATION_SATS
+                            }
+                            liquidViewModel.setDenomination(next)
+                        }
+                        val handleScanQrResult: (String) -> Unit = { code ->
+                            handleParsedSendInput(code.trim())
+                        }
+                        val handleLayer2ScanQrResult: (String) -> Unit = { code ->
+                            handleLayer2SendInput(code.trim())
+                        }
 
-                        BalanceScreen(
-                            walletState = walletState,
-                            denomination = denomination,
-                            mempoolUrl = viewModel.getMempoolUrl(),
-                            mempoolServer = viewModel.getMempoolServer(),
-                            btcPrice = btcPrice,
-                            privacyMode = privacyMode,
-                            onTogglePrivacy = { viewModel.togglePrivacyMode() },
-                            onToggleDenomination = {
-                                val next = if (denomination == SecureStorage.DENOMINATION_SATS) {
-                                    SecureStorage.DENOMINATION_BTC
-                                } else {
-                                    SecureStorage.DENOMINATION_SATS
-                                }
-                                viewModel.setDenomination(next)
-                            },
-                            addressLabels = addressLabels,
-                            transactionLabels = transactionLabels,
-                            feeEstimationState = feeEstimationState,
-                            canBumpFee = { txid -> viewModel.canBumpFee(txid) },
-                            canCpfp = { txid -> viewModel.canCpfp(txid) },
-                            onBumpFee = { txid, feeRate -> viewModel.bumpFee(txid, feeRate) },
-                            onCpfp = { txid, feeRate -> viewModel.cpfp(txid, feeRate) },
-                            onSaveTransactionLabel = { txid, label ->
-                                viewModel.saveTransactionLabel(txid, label)
-                                labelsVersion++
-                            },
-                            onFetchTxVsize = { txid -> viewModel.fetchTransactionVsize(txid) },
-                            onRefreshFees = { viewModel.fetchFeeEstimates() },
-                            onSync = { viewModel.sync() },
-                            onManageWallets = { navController.navigate(Screen.ManageWallets.route) },
-                            onScanQrResult = { code ->
-                                val bip21 = parseBip21Uri(code)
-                                val useSats = denomination == SecureStorage.DENOMINATION_SATS
-                                val amountStr = bip21.amount?.let { btcAmount ->
-                                    if (useSats) {
-                                        (btcAmount * 100_000_000).toLong().toString()
-                                    } else {
-                                        String.format(java.util.Locale.US, "%.8f", btcAmount)
-                                            .trimEnd('0').trimEnd('.')
-                                    }
-                                } ?: ""
-                                viewModel.updateSendScreenDraft(
-                                    SendScreenDraft(
-                                        recipientAddress = bip21.address,
-                                        amountInput = amountStr,
-                                        label = bip21.label ?: "",
-                                    ),
+                        if (isLiquidAvailable) {
+                            Column(modifier = Modifier.fillMaxSize()) {
+                                LayerSwitcher(
+                                    activeLayer = activeLayer,
+                                    onLayerSelected = { layer ->
+                                        liquidViewModel.setActiveLayer(layer, walletState.activeWallet?.id)
+                                    },
+                                    isSwapEnabled = swapAvailable,
+                                    onSwap = { navController.navigate(Screen.Swap.route) },
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
                                 )
-                                navController.navigate(Screen.Send.route) {
-                                    popUpTo(navController.graph.findStartDestination().id) {
-                                        inclusive = false
+                                Box(modifier = Modifier.weight(1f)) {
+                                    if (activeLayer == WalletLayer.LAYER2) {
+                                        LiquidBalanceScreen(
+                                            denomination = layer2Denomination,
+                                            btcPrice = btcPrice,
+                                            privacyMode = privacyMode,
+                                            liquidExplorer = liquidExplorer,
+                                            liquidExplorerUrl = liquidViewModel.getLiquidExplorerUrl(),
+                                            onTogglePrivacy = { viewModel.togglePrivacyMode() },
+                                            liquidTransactionLabels = liquidTransactionLabels,
+                                            lookupPendingLightningPayment = { txid ->
+                                                liquidViewModel.getPendingLightningPaymentSessionForTxid(txid)
+                                            },
+                                            onSaveLiquidTransactionLabel = { txid, label ->
+                                                activeWalletId?.let { walletId ->
+                                                    liquidViewModel.saveLiquidTransactionLabel(walletId, txid, label)
+                                                }
+                                            },
+                                            onToggleDenomination = toggleLayer2Denomination,
+                                            onScanQrResult = handleLayer2ScanQrResult,
+                                            liquidState = liquidState,
+                                            onSyncLiquid = { liquidViewModel.syncLiquidWallet() },
+                                        )
+                                    } else {
+                                        BalanceScreen(
+                                            walletState = walletState,
+                                            denomination = layer1Denomination,
+                                            mempoolUrl = viewModel.getMempoolUrl(),
+                                            mempoolServer = viewModel.getMempoolServer(),
+                                            btcPrice = btcPrice,
+                                            privacyMode = privacyMode,
+                                            onTogglePrivacy = { viewModel.togglePrivacyMode() },
+                                            onToggleDenomination = toggleLayer1Denomination,
+                                            addressLabels = addressLabels,
+                                            transactionLabels = transactionLabels,
+                                            feeEstimationState = feeEstimationState,
+                                            minFeeRate = minFeeRate,
+                                            canBumpFee = { txid -> viewModel.canBumpFee(txid) },
+                                            canCpfp = { txid -> viewModel.canCpfp(txid) },
+                                            onBumpFee = { txid, feeRate -> viewModel.bumpFee(txid, feeRate) },
+                                            onCpfp = { txid, feeRate -> viewModel.cpfp(txid, feeRate) },
+                                            onRedirectTransaction = { txid, feeRate ->
+                                                viewModel.redirectTransaction(txid, feeRate)
+                                            },
+                                            onSaveTransactionLabel = { txid, label ->
+                                                viewModel.saveTransactionLabel(txid, label)
+                                            },
+                                            onFetchTxVsize = { txid -> viewModel.fetchTransactionVsize(txid) },
+                                            onRefreshFees = { viewModel.fetchFeeEstimates() },
+                                            onSync = { viewModel.sync() },
+                                            onManageWallets = { navController.navigate(Screen.ManageWallets.route) },
+                                            onScanQrResult = handleScanQrResult,
+                                        )
                                     }
                                 }
-                            },
-                        )
+                            }
+                        } else {
+                            BalanceScreen(
+                                walletState = walletState,
+                                denomination = layer1Denomination,
+                                mempoolUrl = viewModel.getMempoolUrl(),
+                                mempoolServer = viewModel.getMempoolServer(),
+                                btcPrice = btcPrice,
+                                privacyMode = privacyMode,
+                                onTogglePrivacy = { viewModel.togglePrivacyMode() },
+                                onToggleDenomination = toggleLayer1Denomination,
+                                addressLabels = addressLabels,
+                                transactionLabels = transactionLabels,
+                                feeEstimationState = feeEstimationState,
+                                minFeeRate = minFeeRate,
+                                canBumpFee = { txid -> viewModel.canBumpFee(txid) },
+                                canCpfp = { txid -> viewModel.canCpfp(txid) },
+                                onBumpFee = { txid, feeRate -> viewModel.bumpFee(txid, feeRate) },
+                                onCpfp = { txid, feeRate -> viewModel.cpfp(txid, feeRate) },
+                                onRedirectTransaction = { txid, feeRate ->
+                                    viewModel.redirectTransaction(txid, feeRate)
+                                },
+                                onSaveTransactionLabel = { txid, label ->
+                                    viewModel.saveTransactionLabel(txid, label)
+                                },
+                                onFetchTxVsize = { txid -> viewModel.fetchTransactionVsize(txid) },
+                                onRefreshFees = { viewModel.fetchFeeEstimates() },
+                                onSync = { viewModel.sync() },
+                                onManageWallets = { navController.navigate(Screen.ManageWallets.route) },
+                                onScanQrResult = handleScanQrResult,
+                            )
+                        }
                     }
                     composable(Screen.Send.route) {
-                        val utxos = viewModel.getAllUtxos()
+                        val utxos by viewModel.allUtxos.collectAsStateWithLifecycle()
+                        val layer1SendDraft by viewModel.sendScreenDraft.collectAsStateWithLifecycle()
+                        val dryRunResult by viewModel.dryRunResult.collectAsStateWithLifecycle()
+                        val layer2SendDraft by liquidViewModel.sendDraft.collectAsStateWithLifecycle()
+                        val liquidSendState by liquidViewModel.sendState.collectAsStateWithLifecycle()
+                        val liquidUtxos by liquidViewModel.allLiquidUtxos.collectAsStateWithLifecycle()
 
                         // Collect preSelectedUtxo directly here to ensure fresh value
-                        val currentPreSelectedUtxo by viewModel.preSelectedUtxo.collectAsState()
-
-                        // Get all wallet addresses for self-transfer detection
-                        val allWalletAddresses =
-                            remember(walletState) {
-                                val (receive, change, used) = viewModel.getAllAddresses()
-                                (receive.map { it.address } + change.map { it.address } + used.map { it.address }).toSet()
-                            }
+                        val currentPreSelectedUtxo by viewModel.preSelectedUtxo.collectAsStateWithLifecycle()
 
                         // Fetch fee estimates and price when entering Send screen
                         LaunchedEffect(Unit) {
@@ -655,77 +1811,276 @@ fun IbisWalletApp(
                             viewModel.fetchBtcPrice()
                         }
 
-                        SendScreen(
-                            walletState = walletState,
-                            uiState = uiState,
-                            denomination = denomination,
-                            utxos = utxos,
-                            walletAddresses = allWalletAddresses,
-                            feeEstimationState = feeEstimationState,
-                            minFeeRate = minFeeRate,
-                            preSelectedUtxo = currentPreSelectedUtxo,
-                            spendUnconfirmed = viewModel.getSpendUnconfirmed(),
-                            btcPrice = btcPrice,
-                            privacyMode = privacyMode,
-                            isWatchOnly = walletState.activeWallet?.isWatchOnly == true,
-                            draft = sendScreenDraft,
-                            dryRunResult = dryRunResult,
-                            onEstimateFee = { address, amount, feeRate, selectedUtxos, isMaxSend ->
-                                viewModel.estimateFee(address, amount, feeRate, selectedUtxos, isMaxSend)
-                            },
-                            onEstimateFeeMulti = { recipients, feeRate, selectedUtxos ->
-                                viewModel.estimateFeeMulti(recipients, feeRate, selectedUtxos)
-                            },
-                            onClearDryRun = { viewModel.clearDryRunResult() },
-                            onRefreshFees = { viewModel.fetchFeeEstimates() },
-                            onClearPreSelectedUtxo = { viewModel.clearPreSelectedUtxo() },
-                            onUpdateDraft = { draft -> viewModel.updateSendScreenDraft(draft) },
-                            onSend = { address, amount, feeRate, selectedUtxos, label, isMaxSend, precomputedFeeSats ->
-                                viewModel.sendBitcoin(
-                                    address,
-                                    amount,
-                                    feeRate,
-                                    selectedUtxos,
-                                    label,
-                                    isMaxSend,
-                                    precomputedFeeSats,
+                        val handleLayer1RecipientInput: (String) -> Boolean = { input ->
+                            if (!isLiquidAvailable || input.isBlank()) {
+                                false
+                            } else {
+                                val resolution =
+                                    resolveSendRoute(
+                                        input = input,
+                                        layer1UseSats = layer1Denomination == SecureStorage.DENOMINATION_SATS,
+                                        layer2UseSats = layer2Denomination == SecureStorage.DENOMINATION_SATS,
+                                        isLiquidAvailable = true,
+                                    )
+                                if (resolution.route == WalletLayer.LAYER2) {
+                                    handleParsedSendInput(input)
+                                    true
+                                } else {
+                                    false
+                                }
+                            }
+                        }
+
+                        if (isLiquidAvailable) {
+                            Column(modifier = Modifier.fillMaxSize()) {
+                                LayerSwitcher(
+                                    activeLayer = activeLayer,
+                                    onLayerSelected = { layer ->
+                                        liquidViewModel.setActiveLayer(layer, walletState.activeWallet?.id)
+                                    },
+                                    isSwapEnabled = swapAvailable,
+                                    onSwap = { navController.navigate(Screen.Swap.route) },
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
                                 )
-                            },
-                            onSendMulti = { recipients, feeRate, selectedUtxos, label, precomputedFeeSats ->
-                                viewModel.sendBitcoinMulti(
-                                    recipients,
-                                    feeRate,
-                                    selectedUtxos,
-                                    label,
-                                    precomputedFeeSats,
-                                )
-                            },
-                            onCreatePsbt = {
-                                    address,
-                                    amount,
-                                    feeRate,
-                                    selectedUtxos,
-                                    label,
-                                    isMaxSend,
-                                    precomputedFeeSats,
-                                ->
-                                viewModel.createPsbt(
-                                    address,
-                                    amount,
-                                    feeRate,
-                                    selectedUtxos,
-                                    label,
-                                    isMaxSend,
-                                    precomputedFeeSats,
-                                )
-                            },
-                            onCreatePsbtMulti = { recipients, feeRate, selectedUtxos, label, precomputedFeeSats ->
-                                viewModel.createPsbtMulti(recipients, feeRate, selectedUtxos, label, precomputedFeeSats)
-                            },
-                            onNavigateToBroadcast = {
-                                navController.navigate(Screen.BroadcastTransaction.route)
-                            },
-                        )
+                                Box(modifier = Modifier.weight(1f)) {
+                                    key(activeLayer) {
+                                        if (activeLayer == WalletLayer.LAYER2) {
+                                            LiquidSendScreen(
+                                                denomination = layer2Denomination,
+                                                btcPrice = btcPrice,
+                                                privacyMode = privacyMode,
+                                                boltzEnabled = liquidViewModel.isBoltzEnabled(),
+                                                isWatchOnly = walletState.activeWallet?.isWatchOnly == true,
+                                                liquidState = liquidState,
+                                                liquidUtxos = liquidUtxos,
+                                                spendUnconfirmed = viewModel.getSpendUnconfirmed(),
+                                                draft = layer2SendDraft,
+                                                liquidSendState = liquidSendState,
+                                                onUpdateDraft = { draft -> liquidViewModel.updateSendDraft(draft) },
+                                                onPreviewLiquidSend = { address, amountSats, feeRate, selectedUtxos, isMaxSend, label ->
+                                                    liquidViewModel.previewLiquidSend(
+                                                        address = address,
+                                                        amountSats = amountSats,
+                                                        feeRate = feeRate,
+                                                        selectedUtxos = selectedUtxos,
+                                                        isMaxSend = isMaxSend,
+                                                        label = label,
+                                                    )
+                                                },
+                                                onPreviewLiquidSendMulti = { recipients, feeRate, selectedUtxos, label ->
+                                                    liquidViewModel.previewLiquidSendMulti(
+                                                        recipients = recipients,
+                                                        feeRate = feeRate,
+                                                        selectedUtxos = selectedUtxos,
+                                                        label = label,
+                                                    )
+                                                },
+                                                onPreviewLightningPayment = { paymentInput, kind, amountSats, feeRate, selectedUtxos, label ->
+                                                    liquidViewModel.previewLightningPayment(
+                                                        paymentInput = paymentInput,
+                                                        kind = kind,
+                                                        amountSats = amountSats,
+                                                        feeRate = feeRate,
+                                                        selectedUtxos = selectedUtxos,
+                                                        label = label,
+                                                    )
+                                                },
+                                                onSendLBTC = { address, amountSats, feeRate, selectedUtxos, isMaxSend, label ->
+                                                    liquidViewModel.sendLBTC(
+                                                        address = address,
+                                                        amountSats = amountSats,
+                                                        feeRate = feeRate,
+                                                        selectedUtxos = selectedUtxos,
+                                                        isMaxSend = isMaxSend,
+                                                        label = label,
+                                                    )
+                                                },
+                                                onSendLBTCMulti = { recipients, feeRate, selectedUtxos, label ->
+                                                    liquidViewModel.sendLBTCMulti(
+                                                        recipients = recipients,
+                                                        feeRate = feeRate,
+                                                        selectedUtxos = selectedUtxos,
+                                                        label = label,
+                                                    )
+                                                },
+                                                onResolveLightningPayment = { paymentInput, kind, amountSats, feeRate, selectedUtxos, label ->
+                                                    liquidViewModel.resolveLightningPaymentReview(
+                                                        paymentInput = paymentInput,
+                                                        kind = kind,
+                                                        amountSats = amountSats,
+                                                        feeRate = feeRate,
+                                                        selectedUtxos = selectedUtxos,
+                                                        label = label,
+                                                    )
+                                                },
+                                                onConfirmLightningPayment = { selectedUtxos, label ->
+                                                    liquidViewModel.confirmLightningPayment(
+                                                        selectedUtxos = selectedUtxos,
+                                                        label = label,
+                                                    )
+                                                },
+                                                onClearDraft = { liquidViewModel.clearSendDraft() },
+                                                onResetSend = { liquidViewModel.resetSendState() },
+                                            )
+                                        } else {
+                                            SendScreen(
+                                                walletState = walletState,
+                                                uiState = uiState,
+                                                denomination = layer1Denomination,
+                                                utxos = utxos,
+                                                walletAddresses = allWalletAddresses,
+                                                feeEstimationState = feeEstimationState,
+                                                minFeeRate = minFeeRate,
+                                                preSelectedUtxo = currentPreSelectedUtxo,
+                                                spendUnconfirmed = viewModel.getSpendUnconfirmed(),
+                                                btcPrice = btcPrice,
+                                                privacyMode = privacyMode,
+                                                isWatchOnly = walletState.activeWallet?.isWatchOnly == true,
+                                                draft = layer1SendDraft,
+                                                dryRunResult = dryRunResult,
+                                                onEstimateFee = { address, amount, feeRate, selectedUtxos, isMaxSend ->
+                                                    viewModel.estimateFee(address, amount, feeRate, selectedUtxos, isMaxSend)
+                                                },
+                                                onEstimateFeeMulti = { recipients, feeRate, selectedUtxos ->
+                                                    viewModel.estimateFeeMulti(recipients, feeRate, selectedUtxos)
+                                                },
+                                                onClearDryRun = { viewModel.clearDryRunResult() },
+                                                onRefreshFees = { viewModel.fetchFeeEstimates() },
+                                                onClearPreSelectedUtxo = { viewModel.clearPreSelectedUtxo() },
+                                                onUpdateDraft = { draft -> viewModel.updateSendScreenDraft(draft) },
+                                                onHandleScannedInput = { code ->
+                                                    handleParsedSendInput(code)
+                                                    true
+                                                },
+                                                onHandleRecipientInput = handleLayer1RecipientInput,
+                                                onSend = { address, amount, feeRate, selectedUtxos, label, isMaxSend, precomputedFeeSats ->
+                                                    viewModel.sendBitcoin(
+                                                        address,
+                                                        amount,
+                                                        feeRate,
+                                                        selectedUtxos,
+                                                        label,
+                                                        isMaxSend,
+                                                        precomputedFeeSats,
+                                                    )
+                                                },
+                                            onSendMulti = { recipients, feeRate, selectedUtxos, label, precomputedFeeSats ->
+                                                viewModel.sendBitcoinMulti(
+                                                    recipients,
+                                                    feeRate,
+                                                    selectedUtxos,
+                                                    label,
+                                                    precomputedFeeSats,
+                                                )
+                                            },
+                                            onCreatePsbt = {
+                                                    address,
+                                                    amount,
+                                                    feeRate,
+                                                    selectedUtxos,
+                                                    label,
+                                                    isMaxSend,
+                                                    precomputedFeeSats,
+                                                ->
+                                                viewModel.createPsbt(
+                                                    address,
+                                                    amount,
+                                                    feeRate,
+                                                    selectedUtxos,
+                                                    label,
+                                                    isMaxSend,
+                                                    precomputedFeeSats,
+                                                )
+                                            },
+                                            onCreatePsbtMulti = { recipients, feeRate, selectedUtxos, label, precomputedFeeSats ->
+                                                viewModel.createPsbtMulti(recipients, feeRate, selectedUtxos, label, precomputedFeeSats)
+                                            },
+                                            onNavigateToBroadcast = {
+                                                navController.navigate(Screen.BroadcastTransaction.route)
+                                            },
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        } else {
+                            SendScreen(
+                                walletState = walletState,
+                                uiState = uiState,
+                                denomination = layer1Denomination,
+                                utxos = utxos,
+                                walletAddresses = allWalletAddresses,
+                                feeEstimationState = feeEstimationState,
+                                minFeeRate = minFeeRate,
+                                preSelectedUtxo = currentPreSelectedUtxo,
+                                spendUnconfirmed = viewModel.getSpendUnconfirmed(),
+                                btcPrice = btcPrice,
+                                privacyMode = privacyMode,
+                                isWatchOnly = walletState.activeWallet?.isWatchOnly == true,
+                                draft = layer1SendDraft,
+                                dryRunResult = dryRunResult,
+                                onEstimateFee = { address, amount, feeRate, selectedUtxos, isMaxSend ->
+                                    viewModel.estimateFee(address, amount, feeRate, selectedUtxos, isMaxSend)
+                                },
+                                onEstimateFeeMulti = { recipients, feeRate, selectedUtxos ->
+                                    viewModel.estimateFeeMulti(recipients, feeRate, selectedUtxos)
+                                },
+                                onClearDryRun = { viewModel.clearDryRunResult() },
+                                onRefreshFees = { viewModel.fetchFeeEstimates() },
+                                onClearPreSelectedUtxo = { viewModel.clearPreSelectedUtxo() },
+                                onUpdateDraft = { draft -> viewModel.updateSendScreenDraft(draft) },
+                                onHandleScannedInput = { code ->
+                                    handleParsedSendInput(code)
+                                    true
+                                },
+                                onHandleRecipientInput = handleLayer1RecipientInput,
+                                onSend = { address, amount, feeRate, selectedUtxos, label, isMaxSend, precomputedFeeSats ->
+                                    viewModel.sendBitcoin(
+                                        address,
+                                        amount,
+                                        feeRate,
+                                        selectedUtxos,
+                                        label,
+                                        isMaxSend,
+                                        precomputedFeeSats,
+                                    )
+                                },
+                                onSendMulti = { recipients, feeRate, selectedUtxos, label, precomputedFeeSats ->
+                                    viewModel.sendBitcoinMulti(
+                                        recipients,
+                                        feeRate,
+                                        selectedUtxos,
+                                        label,
+                                        precomputedFeeSats,
+                                    )
+                                },
+                                onCreatePsbt = {
+                                        address,
+                                        amount,
+                                        feeRate,
+                                        selectedUtxos,
+                                        label,
+                                        isMaxSend,
+                                        precomputedFeeSats,
+                                    ->
+                                    viewModel.createPsbt(
+                                        address,
+                                        amount,
+                                        feeRate,
+                                        selectedUtxos,
+                                        label,
+                                        isMaxSend,
+                                        precomputedFeeSats,
+                                    )
+                                },
+                                onCreatePsbtMulti = { recipients, feeRate, selectedUtxos, label, precomputedFeeSats ->
+                                    viewModel.createPsbtMulti(recipients, feeRate, selectedUtxos, label, precomputedFeeSats)
+                                },
+                                onNavigateToBroadcast = {
+                                    navController.navigate(Screen.BroadcastTransaction.route)
+                                },
+                            )
+                        }
                     }
                     composable(
                         route = Screen.ManageWallets.route,
@@ -764,34 +2119,163 @@ fun IbisWalletApp(
                                 }
                             },
                             onDeleteWallet = { wallet ->
-                                viewModel.deleteWallet(wallet.id)
+                                scope.launch {
+                                    liquidViewModel.deleteWalletData(wallet.id)
+                                    viewModel.deleteWallet(wallet.id)
+                                }
                             },
                             onSelectWallet = { wallet ->
-                                viewModel.switchWallet(wallet.id)
-                                navController.navigate(Screen.Balance.route) {
-                                    popUpTo(navController.graph.findStartDestination().id) {
-                                        inclusive = false
-                                    }
-                                    launchSingleTop = true
-                                }
+                                requestWalletSelection(wallet.id, navigateToBalance = true)
                             },
                             onExportWallet = { walletId, uri, includeLabels, includeServerSettings, password ->
                                 viewModel.exportWallet(walletId, uri, includeLabels, includeServerSettings, password)
                             },
-                            onExportBip329Labels = { walletId, uri ->
-                                viewModel.exportBip329Labels(walletId, uri)
+                            onExportBip329Labels = { walletId, uri, labelScope ->
+                                scope.launch {
+                                    try {
+                                        val content =
+                                            when (labelScope) {
+                                                Bip329LabelScope.BITCOIN ->
+                                                    viewModel.getBitcoinBip329LabelsContent(walletId)
+                                                Bip329LabelScope.LIQUID ->
+                                                    liquidViewModel.getLiquidBip329LabelsContent(walletId)
+                                                Bip329LabelScope.BOTH ->
+                                                    listOf(
+                                                        viewModel.getBitcoinBip329LabelsContent(
+                                                            walletId,
+                                                            includeNetworkTag = true,
+                                                        ),
+                                                        liquidViewModel.getLiquidBip329LabelsContent(walletId),
+                                                    ).filter { it.isNotBlank() }.joinToString("\n")
+                                            }
+                                        if (content.isBlank()) {
+                                            snackbarHostState.showSnackbar("No labels to export")
+                                            return@launch
+                                        }
+
+                                        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                            context.contentResolver.openOutputStream(uri)?.use { stream ->
+                                                stream.write(content.toByteArray(Charsets.UTF_8))
+                                            } ?: throw IllegalStateException("Could not open output stream")
+                                        }
+
+                                        val lineCount = content.lines().count { it.isNotBlank() }
+                                        snackbarHostState.showSnackbar("Exported $lineCount labels (BIP 329)")
+                                    } catch (e: Exception) {
+                                        snackbarHostState.showSnackbar("Export failed: ${e.message}")
+                                    }
+                                }
                             },
-                            onImportBip329Labels = { walletId, uri ->
-                                viewModel.importBip329Labels(walletId, uri)
+                            onImportBip329Labels = { walletId, uri, labelScope ->
+                                scope.launch {
+                                    try {
+                                        val content =
+                                            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                                context.contentResolver.openInputStream(uri)?.use {
+                                                    it.readBytes().toString(Charsets.UTF_8)
+                                                } ?: throw IllegalStateException("Could not read file")
+                                            }
+                                        val imported =
+                                            when (labelScope) {
+                                                Bip329LabelScope.BITCOIN ->
+                                                    viewModel.importBitcoinBip329LabelsFromContent(
+                                                        walletId,
+                                                        content,
+                                                        Bip329LabelScope.BITCOIN,
+                                                    )
+                                                Bip329LabelScope.LIQUID ->
+                                                    liquidViewModel.importLiquidBip329LabelsFromContent(
+                                                        walletId,
+                                                        content,
+                                                        Bip329LabelScope.LIQUID,
+                                                    )
+                                                Bip329LabelScope.BOTH ->
+                                                    viewModel.importBitcoinBip329LabelsFromContent(
+                                                        walletId,
+                                                        content,
+                                                        Bip329LabelScope.BOTH,
+                                                    ) +
+                                                        liquidViewModel.importLiquidBip329LabelsFromContent(
+                                                            walletId,
+                                                            content,
+                                                            Bip329LabelScope.BOTH,
+                                                        )
+                                            }
+                                        if (imported == 0) {
+                                            snackbarHostState.showSnackbar("No labels imported")
+                                            return@launch
+                                        }
+                                        snackbarHostState.showSnackbar("Imported $imported labels (BIP 329)")
+                                    } catch (e: Exception) {
+                                        snackbarHostState.showSnackbar("Import failed: ${e.message}")
+                                    }
+                                }
                             },
-                            onImportBip329LabelsFromContent = { walletId, content ->
-                                viewModel.importBip329LabelsFromContent(walletId, content)
+                            onImportBip329LabelsFromContent = { walletId, content, labelScope ->
+                                scope.launch {
+                                    try {
+                                        val imported =
+                                            when (labelScope) {
+                                                Bip329LabelScope.BITCOIN ->
+                                                    viewModel.importBitcoinBip329LabelsFromContent(
+                                                        walletId,
+                                                        content,
+                                                        Bip329LabelScope.BITCOIN,
+                                                    )
+                                                Bip329LabelScope.LIQUID ->
+                                                    liquidViewModel.importLiquidBip329LabelsFromContent(
+                                                        walletId,
+                                                        content,
+                                                        Bip329LabelScope.LIQUID,
+                                                    )
+                                                Bip329LabelScope.BOTH ->
+                                                    viewModel.importBitcoinBip329LabelsFromContent(
+                                                        walletId,
+                                                        content,
+                                                        Bip329LabelScope.BOTH,
+                                                    ) +
+                                                        liquidViewModel.importLiquidBip329LabelsFromContent(
+                                                            walletId,
+                                                            content,
+                                                            Bip329LabelScope.BOTH,
+                                                        )
+                                            }
+                                        if (imported == 0) {
+                                            snackbarHostState.showSnackbar("No labels imported")
+                                            return@launch
+                                        }
+                                        snackbarHostState.showSnackbar("Imported $imported labels (BIP 329)")
+                                    } catch (e: Exception) {
+                                        snackbarHostState.showSnackbar("Import failed: ${e.message}")
+                                    }
+                                }
                             },
-                            onGetBip329LabelsContent = { walletId ->
-                                viewModel.getBip329LabelsContent(walletId)
+                            onGetBip329LabelsContent = { walletId, labelScope ->
+                                when (labelScope) {
+                                    Bip329LabelScope.BITCOIN ->
+                                        viewModel.getBitcoinBip329LabelsContent(walletId)
+                                    Bip329LabelScope.LIQUID ->
+                                        liquidViewModel.getLiquidBip329LabelsContent(walletId)
+                                    Bip329LabelScope.BOTH ->
+                                        listOf(
+                                            viewModel.getBitcoinBip329LabelsContent(
+                                                walletId,
+                                                includeNetworkTag = true,
+                                            ),
+                                            liquidViewModel.getLiquidBip329LabelsContent(walletId),
+                                        ).filter { it.isNotBlank() }.joinToString("\n")
+                                }
                             },
                             onGetLabelCounts = { walletId ->
-                                viewModel.getLabelCounts(walletId)
+                                val (bitcoinAddressCount, bitcoinTransactionCount) = viewModel.getLabelCounts(walletId)
+                                val (liquidAddressCount, liquidTransactionCount) =
+                                    liquidViewModel.getLiquidLabelCounts(walletId)
+                                Bip329LabelCounts(
+                                    bitcoinAddressCount = bitcoinAddressCount,
+                                    bitcoinTransactionCount = bitcoinTransactionCount,
+                                    liquidAddressCount = liquidAddressCount,
+                                    liquidTransactionCount = liquidTransactionCount,
+                                )
                             },
                             onEditWallet = { walletId, newName, newGapLimit, newFingerprint ->
                                 viewModel.editWallet(walletId, newName, newGapLimit, newFingerprint)
@@ -800,9 +2284,45 @@ fun IbisWalletApp(
                                 viewModel.reorderWallets(orderedIds)
                             },
                             onFullSync = { wallet ->
+                                if (!wallet.isWatchOnly && liquidViewModel.isLiquidEnabledForWallet(wallet.id)) {
+                                    liquidViewModel.requestFullSync(wallet.id)
+                                }
                                 viewModel.fullSync(wallet.id)
                             },
                             syncingWalletId = syncingWalletId,
+                            // Layer 2
+                            layer2Enabled = isLayer2Enabled,
+                            isLiquidEnabledForWallet = { walletId ->
+                                // Read from the reactive map (triggers recomposition on change)
+                                liquidEnabledWallets[walletId]
+                                    ?: liquidViewModel.isLiquidEnabledForWallet(walletId)
+                            },
+                            onSetLiquidEnabledForWallet = { walletId, enabled ->
+                                liquidViewModel.setLiquidEnabledForWallet(walletId, enabled)
+                                // If this is the active wallet, load/unload Liquid wallet immediately
+                                if (walletId == walletState.activeWallet?.id && isLayer2Enabled) {
+                                    if (enabled) {
+                                        liquidViewModel.loadLiquidWallet(walletId)
+                                    } else {
+                                        liquidViewModel.unloadLiquidWallet()
+                                    }
+                                }
+                            },
+                            isWalletLockAvailable = isSecurityEnabled,
+                            onSetWalletLocked = { walletId, locked ->
+                                if (locked && !isSecurityEnabled) {
+                                    scope.launch {
+                                        snackbarHostState.showSnackbar("Set up PIN or biometric first")
+                                    }
+                                } else if (!locked) {
+                                    requestDisableWalletLock(walletId)
+                                } else {
+                                    if (walletId == activeWalletId) {
+                                        authorizedLockedWalletId = null
+                                    }
+                                    viewModel.setWalletLocked(walletId, true)
+                                }
+                            },
                         )
                     }
                     composable(
@@ -883,7 +2403,7 @@ fun IbisWalletApp(
                             )
                         },
                     ) {
-                        val sweepState by viewModel.sweepState.collectAsState()
+                        val sweepState by viewModel.sweepState.collectAsStateWithLifecycle()
                         SweepPrivateKeyScreen(
                             sweepState = sweepState,
                             isConnected = uiState.isConnected,
@@ -914,27 +2434,7 @@ fun IbisWalletApp(
                             )
                         },
                     ) {
-                        ElectrumConfigScreen(
-                            onBack = { navController.popBackStack() },
-                            isConnecting = uiState.isConnecting,
-                            isConnected = uiState.isConnected,
-                            error = uiState.error,
-                            savedServers = serversState.servers,
-                            activeServerId = serversState.activeServerId,
-                            onSaveServer = { config -> viewModel.saveServer(config) },
-                            onDeleteServer = { serverId -> viewModel.deleteServer(serverId) },
-                            onConnectToServer = { serverId -> viewModel.connectToServer(serverId) },
-                            onDisconnect = { viewModel.disconnect() },
-                            onCancelConnection = { viewModel.cancelConnection() },
-                            autoSwitchServer = autoSwitchServer,
-                            onAutoSwitchServerChange = { enabled -> viewModel.setAutoSwitchServer(enabled) },
-                            torState = torState,
-                            isTorEnabled = viewModel.isTorEnabled(),
-                            onTorEnabledChange = { enabled -> viewModel.setTorEnabled(enabled) },
-                            isActiveServerOnion = viewModel.getElectrumConfig()?.isOnionAddress() == true,
-                            serverVersion = uiState.serverVersion,
-                            blockHeight = walletState.blockHeight,
-                        )
+                        ServerConfigRoute(initialSection = ServerConfigSection.BITCOIN)
                     }
                     composable(
                         route = Screen.Settings.route,
@@ -953,28 +2453,61 @@ fun IbisWalletApp(
                             )
                         },
                     ) {
-                        var customMempoolUrl by remember { mutableStateOf(viewModel.getCustomMempoolUrl()) }
-                        var customFeeSourceUrl by remember { mutableStateOf(viewModel.getCustomFeeSourceUrl()) }
-                        var spendUnconfirmed by remember { mutableStateOf(viewModel.getSpendUnconfirmed()) }
-                        var nfcEnabled by remember { mutableStateOf(viewModel.isNfcEnabled()) }
-                        val hasNfcHardware = remember { android.nfc.NfcAdapter.getDefaultAdapter(context) != null }
+                        val feeSource by viewModel.feeSourceState.collectAsStateWithLifecycle()
+                        val priceSource by viewModel.priceSourceState.collectAsStateWithLifecycle()
+                        val mempoolServer by viewModel.mempoolServerState.collectAsStateWithLifecycle()
+                        var customMempoolUrl by remember(walletSettingsRefreshVersion) {
+                            mutableStateOf(viewModel.getCustomMempoolUrl())
+                        }
+                        var customFeeSourceUrl by remember(walletSettingsRefreshVersion) {
+                            mutableStateOf(viewModel.getCustomFeeSourceUrl())
+                        }
+                        var spendUnconfirmed by remember(walletSettingsRefreshVersion) {
+                            mutableStateOf(viewModel.getSpendUnconfirmed())
+                        }
+                        var nfcEnabled by remember(walletSettingsRefreshVersion) {
+                            mutableStateOf(viewModel.isNfcEnabled())
+                        }
+                        val nfcAvailability = context.getNfcAvailability(nfcEnabled)
 
                         SettingsScreen(
-                            currentDenomination = denomination,
+                            currentDenomination = if (isLiquidAvailable && activeLayer == WalletLayer.LAYER2) {
+                                layer2Denomination
+                            } else {
+                                layer1Denomination
+                            },
                             onDenominationChange = { newDenomination ->
-                                viewModel.setDenomination(newDenomination)
+                                if (isLiquidAvailable && activeLayer == WalletLayer.LAYER2) {
+                                    liquidViewModel.setDenomination(newDenomination)
+                                } else {
+                                    viewModel.setDenomination(newDenomination)
+                                }
                             },
                             spendUnconfirmed = spendUnconfirmed,
                             onSpendUnconfirmedChange = { enabled ->
                                 viewModel.setSpendUnconfirmed(enabled)
                                 spendUnconfirmed = enabled
                             },
+                            walletNotificationsEnabled = walletNotificationsEnabled,
+                            onWalletNotificationsEnabledChange = { enabled ->
+                                if (!enabled) {
+                                    updateWalletNotificationsEnabled(false)
+                                } else if (canRequestNotificationsNow()) {
+                                    updateWalletNotificationsEnabled(true)
+                                } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                    postNotificationsPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                } else {
+                                    updateWalletNotificationsEnabled(true)
+                                }
+                            },
                             nfcEnabled = nfcEnabled,
                             onNfcEnabledChange = { enabled ->
                                 viewModel.setNfcEnabled(enabled)
                                 nfcEnabled = enabled
                             },
-                            hasNfcHardware = hasNfcHardware,
+                            hasNfcHardware = nfcAvailability.hasHardware,
+                            isSystemNfcEnabled = nfcAvailability.isSystemEnabled,
+                            supportsNfcBroadcast = nfcAvailability.supportsHce,
                             currentFeeSource = feeSource,
                             onFeeSourceChange = { newSource ->
                                 val wasOnion = viewModel.isFeeSourceOnion()
@@ -1024,7 +2557,66 @@ fun IbisWalletApp(
                                 customMempoolUrl = newUrl
                                 viewModel.setCustomMempoolUrl(newUrl)
                             },
+                            currentSwipeMode = swipeMode,
+                            onSwipeModeChange = { mode ->
+                                viewModel.setSwipeMode(mode)
+                            },
+                            isLiquidAvailable = isLayer2Enabled,
                             torStatus = torState.status,
+                            onOpenBitcoinElectrum = {
+                                navController.navigate(Screen.ElectrumConfig.route) {
+                                    launchSingleTop = true
+                                }
+                            },
+                            onBack = { navController.popBackStack() },
+                        )
+                    }
+                    composable(
+                        route = Screen.Layer2Options.route,
+                        enterTransition = { slideInHorizontally(initialOffsetX = { it }, animationSpec = tween(300)) },
+                        exitTransition = { slideOutHorizontally(targetOffsetX = { it }, animationSpec = tween(300)) },
+                        popEnterTransition = {
+                            slideInHorizontally(
+                                initialOffsetX = { -it },
+                                animationSpec = tween(300),
+                            )
+                        },
+                        popExitTransition = {
+                            slideOutHorizontally(
+                                targetOffsetX = { it },
+                                animationSpec = tween(300),
+                            )
+                        },
+                    ) {
+                        var customLiquidExplorerUrl by remember(liquidSettingsRefreshVersion) {
+                            mutableStateOf(liquidViewModel.getCustomLiquidExplorerUrl())
+                        }
+                        Layer2OptionsScreen(
+                            layer2Enabled = isLayer2Enabled,
+                            onLayer2EnabledChange = { liquidViewModel.setLayer2Enabled(it) },
+                            currentBoltzApiSource = boltzApiSource,
+                            onBoltzApiSourceChange = { newSource ->
+                                liquidViewModel.setBoltzApiSource(newSource)
+                            },
+                            currentSideSwapApiSource = sideSwapApiSource,
+                            onSideSwapApiSourceChange = { newSource ->
+                                liquidViewModel.setSideSwapApiSource(newSource)
+                            },
+                            currentLiquidExplorer = liquidExplorer,
+                            onLiquidExplorerChange = { newExplorer ->
+                                liquidViewModel.setLiquidExplorer(newExplorer)
+                            },
+                            customLiquidExplorerUrl = customLiquidExplorerUrl,
+                            onCustomLiquidExplorerUrlSave = { newUrl ->
+                                customLiquidExplorerUrl = newUrl
+                                liquidViewModel.setCustomLiquidExplorerUrl(newUrl)
+                            },
+                            layer2TorStatus = liquidTorState.status,
+                            onOpenLiquidElectrum = {
+                                navController.navigate(Screen.LiquidServerConfig.route) {
+                                    launchSingleTop = true
+                                }
+                            },
                             onBack = { navController.popBackStack() },
                         )
                     }
@@ -1052,15 +2644,14 @@ fun IbisWalletApp(
                         var duressEnabled by remember { mutableStateOf(viewModel.isDuressEnabled()) }
                         var autoWipeThreshold by remember { mutableStateOf(viewModel.getAutoWipeThreshold()) }
                         var cloakModeEnabled by remember { mutableStateOf(viewModel.isCloakModeEnabled()) }
-                        val isDuressMode by viewModel.isDuressMode.collectAsState()
-
+                        val isDuressMode by viewModel.isDuressMode.collectAsStateWithLifecycle()
                         // Check if device has biometric hardware
-                        val biometricManager = androidx.biometric.BiometricManager.from(context)
+                        val biometricManager = BiometricManager.from(context)
                         val isBiometricAvailable =
                             biometricManager.canAuthenticate(
-                                androidx.biometric.BiometricManager.Authenticators.BIOMETRIC_STRONG or
-                                    androidx.biometric.BiometricManager.Authenticators.BIOMETRIC_WEAK,
-                            ) == androidx.biometric.BiometricManager.BIOMETRIC_SUCCESS
+                                BiometricManager.Authenticators.BIOMETRIC_STRONG or
+                                    BiometricManager.Authenticators.BIOMETRIC_WEAK,
+                            ) == BiometricManager.BIOMETRIC_SUCCESS
 
                         SecurityScreen(
                             currentSecurityMethod = securityMethod,
@@ -1117,13 +2708,10 @@ fun IbisWalletApp(
                                     )
                                 }
                             },
-                            onSetupDuress = { pin, mnemonic, passphrase, customDerivationPath, addressType ->
+                            onSetupDuress = { pin, config ->
                                 viewModel.setupDuress(
                                     pin = pin,
-                                    mnemonic = mnemonic,
-                                    passphrase = passphrase,
-                                    customDerivationPath = customDerivationPath,
-                                    addressType = addressType,
+                                    config = config,
                                     onSuccess = { duressEnabled = true },
                                     onError = { errorMsg ->
                                         scope.launch {
@@ -1190,6 +2778,78 @@ fun IbisWalletApp(
                         )
                     }
                     composable(
+                        route = Screen.BackupRestore.route,
+                        enterTransition = { slideInHorizontally(initialOffsetX = { it }, animationSpec = tween(300)) },
+                        exitTransition = { slideOutHorizontally(targetOffsetX = { it }, animationSpec = tween(300)) },
+                        popEnterTransition = {
+                            slideInHorizontally(
+                                initialOffsetX = { -it },
+                                animationSpec = tween(300),
+                            )
+                        },
+                        popExitTransition = {
+                            slideOutHorizontally(
+                                targetOffsetX = { it },
+                                animationSpec = tween(300),
+                            )
+                        },
+                    ) {
+                        val backupWallets = remember { viewModel.getBackupWalletEntries() }
+                        val backupLoading by viewModel.uiState.collectAsStateWithLifecycle()
+                        val resultMessage by viewModel.fullBackupResultMessage.collectAsStateWithLifecycle()
+
+                        BackupRestoreScreen(
+                            wallets = backupWallets,
+                            onBack = { navController.popBackStack() },
+                            onExportFullBackup = { uri, walletIds, includeLabels, includeServers, includeAppSettings, password ->
+                                viewModel.exportFullBackup(uri, walletIds, includeLabels, includeServers, includeAppSettings, password)
+                            },
+                            onParseFullBackup = { uri, password ->
+                                val json = viewModel.parseFullBackup(uri, password)
+                                val walletsArr = json.optJSONArray("wallets")
+                                val walletNames = (0 until (walletsArr?.length() ?: 0)).map { i ->
+                                    walletsArr!!.getJSONObject(i).optJSONObject("wallet")?.optString("name", "Unnamed") ?: "Unnamed"
+                                }
+                                val hasLabels = (0 until (walletsArr?.length() ?: 0)).any { i ->
+                                    walletsArr!!.getJSONObject(i).has("labels")
+                                }
+                                FullBackupPreview(
+                                    walletNames = walletNames,
+                                    walletCount = walletsArr?.length() ?: 0,
+                                    hasLabels = hasLabels,
+                                    hasServers = json.has("electrumServers"),
+                                    hasLiquidServers = json.has("liquidServers"),
+                                    hasAppSettings = json.has("appSettings"),
+                                    exportedAt = json.optString("exportedAt", "Unknown"),
+                                )
+                            },
+                            onImportFullBackup = { uri, password, importWallets, importLabels, importServers, importAppSettings ->
+                                scope.launch {
+                                    try {
+                                        val json = viewModel.parseFullBackup(uri, password)
+                                        val restored =
+                                            viewModel.importFullBackup(
+                                                json,
+                                                importWallets,
+                                                importLabels,
+                                                importServers,
+                                                importAppSettings,
+                                            )
+                                        if (restored && importAppSettings) {
+                                            viewModel.reloadRestoredAppSettings()
+                                            liquidViewModel.reloadRestoredSettings()
+                                        }
+                                    } catch (e: Exception) {
+                                        viewModel.setFullBackupResult("Restore failed: ${e.message}")
+                                    }
+                                }
+                            },
+                            isLoading = backupLoading.isLoading,
+                            resultMessage = resultMessage,
+                            onClearResult = { viewModel.clearFullBackupResult() },
+                        )
+                    }
+                    composable(
                         route = Screen.AllAddresses.route,
                         enterTransition = { slideInHorizontally(initialOffsetX = { it }, animationSpec = tween(300)) },
                         exitTransition = { slideOutHorizontally(targetOffsetX = { it }, animationSpec = tween(300)) },
@@ -1206,27 +2866,46 @@ fun IbisWalletApp(
                             )
                         },
                     ) {
-                        // Trigger recomposition after generating new address
-                        var addressListVersion by remember { mutableIntStateOf(0) }
-
-                        // Fetch addresses - uses addressListVersion as key to refresh after generating
-                        val addresses = remember(addressListVersion) { viewModel.getAllAddresses() }
-
-                        AllAddressesScreen(
-                            receiveAddresses = addresses.first,
-                            changeAddresses = addresses.second,
-                            usedAddresses = addresses.third,
-                            denomination = denomination,
-                            privacyMode = privacyMode,
-                            onSaveLabel = { address, label ->
-                                viewModel.saveAddressLabel(address, label)
-                                addressListVersion++
-                            },
-                            onDeleteLabel = { address ->
-                                viewModel.deleteAddressLabel(address)
-                                addressListVersion++
-                            },
-                        )
+                        val bitcoinAddressBook by viewModel.allAddresses.collectAsStateWithLifecycle()
+                        val liquidAddressBook by liquidViewModel.allLiquidAddresses.collectAsStateWithLifecycle()
+                        if (isLiquidAvailable && activeLayer == WalletLayer.LAYER2) {
+                            AllAddressesScreen(
+                                receiveAddresses = liquidAddressBook.first,
+                                changeAddresses = liquidAddressBook.second,
+                                usedAddresses = liquidAddressBook.third,
+                                denomination = layer2Denomination,
+                                privacyMode = privacyMode,
+                                accentColor = LiquidTeal,
+                                labelAccentColor = LiquidTeal,
+                                addressEdgeCharacters = 26,
+                                addressMaxLines = 2,
+                                useMultilineTruncatedAddress = true,
+                                onSaveLabel = { address, label ->
+                                    activeWalletId?.let { walletId ->
+                                        liquidViewModel.saveLiquidAddressLabel(walletId, address, label)
+                                    }
+                                },
+                                onDeleteLabel = { address ->
+                                    activeWalletId?.let { walletId ->
+                                        liquidViewModel.deleteLiquidAddressLabel(walletId, address)
+                                    }
+                                },
+                            )
+                        } else {
+                            AllAddressesScreen(
+                                receiveAddresses = bitcoinAddressBook.first,
+                                changeAddresses = bitcoinAddressBook.second,
+                                usedAddresses = bitcoinAddressBook.third,
+                                denomination = layer1Denomination,
+                                privacyMode = privacyMode,
+                                onSaveLabel = { address, label ->
+                                    viewModel.saveAddressLabel(address, label)
+                                },
+                                onDeleteLabel = { address ->
+                                    viewModel.deleteAddressLabel(address)
+                                },
+                            )
+                        }
                     }
                     composable(
                         route = Screen.AllUtxos.route,
@@ -1245,29 +2924,56 @@ fun IbisWalletApp(
                             )
                         },
                     ) {
-                        val utxos = viewModel.getAllUtxos()
+                        val liquidUtxos by liquidViewModel.allLiquidUtxos.collectAsStateWithLifecycle()
+                        if (isLiquidAvailable && activeLayer == WalletLayer.LAYER2) {
+                            AllUtxosScreen(
+                                utxos = liquidUtxos,
+                                denomination = layer2Denomination,
+                                btcPrice = btcPrice,
+                                privacyMode = privacyMode,
+                                spendUnconfirmed = true,
+                                addressEdgeCharacters = 10,
+                                onFreezeUtxo = { outpoint, frozen ->
+                                    liquidViewModel.setLiquidUtxoFrozen(outpoint, frozen)
+                                },
+                                onSendFromUtxo = {
+                                    navController.navigate(Screen.Send.route)
+                                },
+                                onSaveLabel = { address, label ->
+                                    activeWalletId?.let { walletId ->
+                                        liquidViewModel.saveLiquidAddressLabel(walletId, address, label)
+                                    }
+                                },
+                                onDeleteLabel = { address ->
+                                    activeWalletId?.let { walletId ->
+                                        liquidViewModel.deleteLiquidAddressLabel(walletId, address)
+                                    }
+                                },
+                            )
+                        } else {
+                            val utxos by viewModel.allUtxos.collectAsStateWithLifecycle()
 
-                        AllUtxosScreen(
-                            utxos = utxos,
-                            denomination = denomination,
-                            btcPrice = btcPrice,
-                            privacyMode = privacyMode,
-                            spendUnconfirmed = viewModel.getSpendUnconfirmed(),
-                            onFreezeUtxo = { outpoint, frozen ->
-                                viewModel.setUtxoFrozen(outpoint, frozen)
-                            },
-                            onSendFromUtxo = { utxo ->
-                                viewModel.setPreSelectedUtxo(utxo)
-                                // Simple navigation to Send screen
-                                navController.navigate(Screen.Send.route)
-                            },
-                            onSaveLabel = { address, label ->
-                                viewModel.saveAddressLabel(address, label)
-                            },
-                            onDeleteLabel = { address ->
-                                viewModel.deleteAddressLabel(address)
-                            },
-                        )
+                            AllUtxosScreen(
+                                utxos = utxos,
+                                denomination = layer1Denomination,
+                                btcPrice = btcPrice,
+                                privacyMode = privacyMode,
+                                spendUnconfirmed = viewModel.getSpendUnconfirmed(),
+                                onFreezeUtxo = { outpoint, frozen ->
+                                    viewModel.setUtxoFrozen(outpoint, frozen)
+                                },
+                                onSendFromUtxo = { utxo ->
+                                    viewModel.setPreSelectedUtxo(utxo)
+                                    navController.navigate(Screen.Send.route)
+                                },
+                                onSaveLabel = { address, label ->
+                                    viewModel.saveAddressLabel(address, label)
+                                },
+                                onDeleteLabel = { address ->
+                                    viewModel.deleteAddressLabel(address)
+                                },
+                            )
+                        }
                     }
                     composable(
                         route = Screen.PsbtExport.route,
@@ -1286,6 +2992,7 @@ fun IbisWalletApp(
                             )
                         },
                     ) {
+                        val psbtState by viewModel.psbtState.collectAsStateWithLifecycle()
                         PsbtScreen(
                             psbtState = psbtState,
                             uiState = uiState,
@@ -1321,7 +3028,7 @@ fun IbisWalletApp(
                             )
                         },
                     ) {
-                        val manualBroadcastState by viewModel.manualBroadcastState.collectAsState()
+                        val manualBroadcastState by viewModel.manualBroadcastState.collectAsStateWithLifecycle()
 
                         BroadcastTransactionScreen(
                             broadcastState = manualBroadcastState,
@@ -1337,30 +3044,200 @@ fun IbisWalletApp(
                             },
                         )
                     }
+
+                    // ── Layer 2 routes ──
+                    composable(
+                        route = Screen.LiquidServerConfig.route,
+                        enterTransition = { slideInHorizontally(initialOffsetX = { it }, animationSpec = tween(300)) },
+                        exitTransition = { slideOutHorizontally(targetOffsetX = { it }, animationSpec = tween(300)) },
+                        popEnterTransition = {
+                            slideInHorizontally(
+                                initialOffsetX = { -it },
+                                animationSpec = tween(300),
+                            )
+                        },
+                        popExitTransition = {
+                            slideOutHorizontally(
+                                targetOffsetX = { it },
+                                animationSpec = tween(300),
+                            )
+                        },
+                    ) {
+                        ServerConfigRoute(initialSection = ServerConfigSection.LIQUID)
+                    }
+
+                    composable(
+                        route = Screen.Swap.route,
+                    ) {
+                        DisposableEffect(Unit) {
+                            liquidViewModel.setSwapScreenActive(true)
+                            onDispose {
+                                liquidViewModel.setSwapScreenActive(false)
+                            }
+                        }
+                        val liquidSwapState by liquidViewModel.swapState.collectAsStateWithLifecycle()
+                        val pendingLiquidSwaps by liquidViewModel.pendingSwaps.collectAsStateWithLifecycle()
+                        val boltzRescueMnemonic by liquidViewModel.boltzRescueMnemonic.collectAsStateWithLifecycle()
+                        val liquidSwapLimits by liquidViewModel.swapLimits.collectAsStateWithLifecycle()
+                        val preferredSwapService by liquidViewModel.preferredSwapService.collectAsStateWithLifecycle()
+                        val liquidUtxos by liquidViewModel.allLiquidUtxos.collectAsStateWithLifecycle()
+                        if (!isLiquidAvailable) {
+                            LaunchedEffect(Unit) {
+                                navController.navigate(Screen.Balance.route) {
+                                    popUpTo(Screen.Swap.route) {
+                                        inclusive = true
+                                    }
+                                    launchSingleTop = true
+                                }
+                            }
+                            return@composable
+                        }
+                        Column(modifier = Modifier.fillMaxSize()) {
+                            val bitcoinSwapUtxos by viewModel.allUtxos.collectAsStateWithLifecycle()
+                            LayerSwitcher(
+                                activeLayer = activeLayer,
+                                onLayerSelected = { layer ->
+                                    liquidViewModel.setActiveLayer(layer, walletState.activeWallet?.id)
+                                    if (!navController.popBackStack()) {
+                                        navController.navigate(Screen.Receive.route) {
+                                            popUpTo(navController.graph.findStartDestination().id) {
+                                                inclusive = false
+                                            }
+                                        }
+                                    }
+                                },
+                                isSwapSelected = true,
+                                isSwapEnabled = swapAvailable,
+                                onSwap = { },
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                            )
+                            Box(modifier = Modifier.weight(1f)) {
+                                SwapScreen(
+                                    swapState = liquidSwapState,
+                                    pendingSwaps = pendingLiquidSwaps,
+                                    boltzRescueMnemonic = boltzRescueMnemonic,
+                                    swapLimitsByService = liquidSwapLimits,
+                                    boltzEnabled = boltzApiSource != SecureStorage.BOLTZ_API_DISABLED,
+                                    sideSwapEnabled = sideSwapApiSource != SecureStorage.SIDESWAP_API_DISABLED,
+                                    btcBalanceSats = walletState.balanceSats.toLong(),
+                                    lbtcBalanceSats = liquidState.balanceSats,
+                                    btcUtxos = bitcoinSwapUtxos,
+                                    liquidUtxos = liquidUtxos,
+                                    spendUnconfirmed = viewModel.getSpendUnconfirmed(),
+                                    btcPrice = btcPrice,
+                                    privacyMode = privacyMode,
+                                    denomination = layer2Denomination,
+                                    feeEstimationState = feeEstimationState,
+                                    minFeeRate = minFeeRate,
+                                    preferredService = preferredSwapService,
+                                    onFetchLimits = { direction, service ->
+                                        liquidViewModel.fetchSwapLimits(direction, service)
+                                    },
+                                    onPreferredServiceChange = { service ->
+                                        liquidViewModel.setPreferredSwapService(service)
+                                    },
+                                    onRefreshBitcoinFees = { viewModel.fetchFeeEstimates() },
+                                    onPrepareSwapReview = { direction, amount, service, selectedUtxos, destinationAddress, usesMaxAmount, fundingFeeRateOverride ->
+                                        liquidViewModel.prepareSwapReview(
+                                            direction = direction,
+                                            amountSats = amount,
+                                            service = service,
+                                            selectedUtxos = selectedUtxos,
+                                            bitcoinWalletAddress = walletState.currentAddress,
+                                            destinationAddress = destinationAddress,
+                                            usesMaxAmount = usesMaxAmount,
+                                            fundingFeeRateOverride = fundingFeeRateOverride,
+                                            resolveBitcoinMaxSend = { address, feeRate, selectedFundingUtxos ->
+                                                viewModel.getMaxBitcoinSpendableForSwap(
+                                                    recipientAddress = address,
+                                                    feeRate = feeRate,
+                                                    selectedUtxos = selectedFundingUtxos,
+                                                )
+                                            },
+                                            previewBitcoinFunding = { address, amount, feeRate, selectedFundingUtxos, isMaxSend ->
+                                                viewModel.previewBitcoinFundingForSwap(
+                                                    recipientAddress = address,
+                                                    amountSats = amount,
+                                                    feeRate = feeRate,
+                                                    selectedUtxos = selectedFundingUtxos,
+                                                    isMaxSend = isMaxSend,
+                                                )
+                                            },
+                                        )
+                                    },
+                                    onExecuteSwap = { pendingSwap, selectedUtxos ->
+                                        liquidViewModel.executeSwap(pendingSwap, selectedUtxos) { address, amountSats, feeRate, fundingUtxos, isMaxSend ->
+                                            viewModel.sendBitcoinForSwap(
+                                                recipientAddress = address,
+                                                amountSats = amountSats,
+                                                feeRate = feeRate,
+                                                selectedUtxos = fundingUtxos,
+                                                isMaxSend = isMaxSend,
+                                            )
+                                        }
+                                    },
+                                    onCancelPreparedReview = {
+                                        liquidViewModel.discardPreparedSwapReview()
+                                    },
+                                    onResetSwap = { liquidViewModel.resetSwapState() },
+                                    onDismissFailedSwap = { liquidViewModel.dismissFailedSwap() },
+                                )
+                            }
+                        }
+                    }
                 }
 
                 // Wallet selector overlay panel
                 if (isMainScreen) {
-                    val selectorSyncTimes =
-                        remember(filteredWallets, syncingWalletId) {
-                            filteredWallets.associate { it.id to viewModel.getLastFullSyncTime(it.id) }
-                        }
                     WalletSelectorPanel(
                         activeWallet = walletState.activeWallet,
                         wallets = filteredWallets,
                         expanded = walletSelectorExpanded,
                         onDismiss = { walletSelectorExpanded = false },
                         onSelectWallet = { walletId ->
-                            viewModel.switchWallet(walletId)
+                            requestWalletSelection(walletId)
                         },
                         onManageWallets = {
                             navController.navigate(Screen.ManageWallets.route)
                         },
                         onFullSync = { wallet ->
+                            if (!wallet.isWatchOnly && liquidViewModel.isLiquidEnabledForWallet(wallet.id)) {
+                                liquidViewModel.requestFullSync(wallet.id)
+                            }
                             viewModel.fullSync(wallet.id)
                         },
                         syncingWalletId = syncingWalletId,
-                        lastFullSyncTimes = selectorSyncTimes,
+                        lastFullSyncTimes = walletLastFullSyncTimes,
+                        layer2Enabled = isLayer2Enabled,
+                        isLiquidEnabledForWallet = { walletId ->
+                            liquidEnabledWallets[walletId]
+                                ?: liquidViewModel.isLiquidEnabledForWallet(walletId)
+                        },
+                        onSetLiquidEnabledForWallet = { walletId, enabled ->
+                            liquidViewModel.setLiquidEnabledForWallet(walletId, enabled)
+                            if (walletId == walletState.activeWallet?.id && isLayer2Enabled) {
+                                if (enabled) {
+                                    liquidViewModel.loadLiquidWallet(walletId)
+                                } else {
+                                    liquidViewModel.unloadLiquidWallet()
+                                }
+                            }
+                        },
+                        isWalletLockAvailable = isSecurityEnabled,
+                        onSetWalletLocked = { walletId, locked ->
+                            if (locked && !isSecurityEnabled) {
+                                scope.launch {
+                                    snackbarHostState.showSnackbar("Set up PIN or biometric first")
+                                }
+                            } else if (!locked) {
+                                requestDisableWalletLock(walletId)
+                            } else {
+                                if (walletId == activeWalletId) {
+                                    authorizedLockedWalletId = null
+                                }
+                                viewModel.setWalletLocked(walletId, true)
+                            }
+                        },
                     )
                 }
             }
@@ -1368,22 +3245,42 @@ fun IbisWalletApp(
     }
 }
 
-/**
- * Dialog showing full sync progress.
- * Non-dismissable - displayed while BDK full address discovery scan is running.
- * Shows the current keychain being scanned and address count.
- */
 @Composable
-private fun FullSyncProgressDialog(syncProgress: SyncProgress?) {
+private fun FullSyncProgressDialog(
+    walletName: String?,
+    progress: SyncProgress?,
+    onCancel: () -> Unit,
+    onClose: () -> Unit,
+) {
+    val current = progress?.current ?: 0UL
+    val total = progress?.total ?: 0UL
+    val status = progress?.status
+    val statusText =
+        when {
+            current > 0UL && status?.startsWith("Scanned") == true -> "Discovering addresses..."
+            !status.isNullOrBlank() -> status
+            else -> "Starting full sync..."
+        }
+    val countText =
+        when {
+            total > 0UL -> "$current / $total addresses"
+            current > 0UL -> "$current addresses scanned"
+            else -> null
+        }
+
     Dialog(
-        onDismissRequest = { /* non-dismissable during full sync */ },
+        onDismissRequest = onClose,
         properties =
-            androidx.compose.ui.window.DialogProperties(
-                dismissOnBackPress = false,
+            DialogProperties(
+                dismissOnBackPress = true,
                 dismissOnClickOutside = false,
             ),
     ) {
         Surface(
+            modifier =
+                Modifier
+                    .fillMaxWidth(0.82f)
+                    .padding(horizontal = 20.dp),
             shape = RoundedCornerShape(12.dp),
             color = DarkSurface,
         ) {
@@ -1391,352 +3288,60 @@ private fun FullSyncProgressDialog(syncProgress: SyncProgress?) {
                 modifier =
                     Modifier
                         .fillMaxWidth()
-                        .padding(20.dp),
+                        .padding(horizontal = 18.dp, vertical = 16.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                // Header
+                CircularProgressIndicator(
+                    color = BitcoinOrange,
+                    modifier = Modifier.size(34.dp),
+                    strokeWidth = 3.dp,
+                )
                 Text(
-                    text = "Full Sync",
+                    text = "Full sync in progress",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onBackground,
                 )
-
-                Spacer(modifier = Modifier.height(16.dp))
-
-                // Progress indicator
-                CircularProgressIndicator(
-                    modifier = Modifier.size(48.dp),
-                    color = BitcoinOrange,
-                    strokeWidth = 4.dp,
-                    trackColor = DarkCard,
-                )
-
-                Spacer(modifier = Modifier.height(16.dp))
-
-                // Status text — use pipeline status from syncProgress if available
+                if (!walletName.isNullOrBlank()) {
+                    Text(
+                        text = walletName,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = TextSecondary,
+                    )
+                }
                 Text(
-                    text = syncProgress?.status ?: "Scanning addresses...",
+                    text = statusText,
                     style = MaterialTheme.typography.bodyMedium,
                     color = TextSecondary,
                 )
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                Text(
-                    text = "This may take a while for large wallets",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = TextTertiary,
-                )
-            }
-        }
-    }
-}
-
-/**
- * Connection status indicator shown in the app bar
- */
-@Composable
-private fun ConnectionStatusIndicator(
-    isConnected: Boolean,
-    isConnecting: Boolean,
-    torStatus: TorStatus = TorStatus.DISCONNECTED,
-    isOnionServer: Boolean = false,
-    onClick: () -> Unit,
-) {
-    // Show Tor bootstrap progress when connecting to an onion server
-    // and Tor is not yet ready
-    val isTorBootstrapping =
-        isConnecting && isOnionServer &&
-            torStatus != TorStatus.CONNECTED
-
-    val statusColor =
-        when {
-            isTorBootstrapping -> TorPurple
-            isConnecting -> BitcoinOrange
-            isConnected -> SuccessGreen
-            else -> ErrorRed
-        }
-
-    Box(
-        modifier =
-            Modifier
-                .padding(end = 12.dp)
-                .clip(RoundedCornerShape(8.dp))
-                .border(
-                    width = 1.dp,
-                    color = statusColor,
-                    shape = RoundedCornerShape(8.dp),
-                )
-                .background(statusColor.copy(alpha = 0.15f))
-                .clickable(onClick = onClick)
-                .padding(horizontal = 8.dp, vertical = 4.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            if (isConnecting) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(12.dp),
-                    color = statusColor,
-                    strokeWidth = 1.5.dp,
-                )
-            } else {
-                Box(
-                    modifier =
-                        Modifier
-                            .size(6.dp)
-                            .clip(CircleShape)
-                            .background(statusColor),
-                )
-            }
-            Spacer(modifier = Modifier.width(6.dp))
-            Text(
-                text =
-                    when {
-                        isTorBootstrapping -> "Starting Tor"
-                        isConnecting -> "Connecting"
-                        isConnected -> "Connected"
-                        else -> "Disconnected"
-                    },
-                style = MaterialTheme.typography.labelMedium,
-                color = statusColor,
-            )
-        }
-    }
-}
-
-/**
- * Dialog showing connection status details
- */
-@Composable
-private fun ConnectionStatusDialog(
-    isConnected: Boolean,
-    isConnecting: Boolean,
-    serverName: String?,
-    serverUrl: String?,
-    serverPort: Int?,
-    useSsl: Boolean,
-    isOnion: Boolean,
-    serverVersion: String?,
-    isTorActive: Boolean,
-    blockHeight: UInt? = null,
-    onDismiss: () -> Unit,
-    onConnect: () -> Unit,
-    onDisconnect: () -> Unit,
-    onConfigureServer: () -> Unit,
-) {
-    val statusColor =
-        when {
-            isConnecting -> BitcoinOrange
-            isConnected -> SuccessGreen
-            else -> ErrorRed
-        }
-    val statusText =
-        when {
-            isConnecting -> "Connecting"
-            isConnected -> "Connected"
-            else -> "Disconnected"
-        }
-
-    Dialog(onDismissRequest = onDismiss) {
-        Surface(
-            shape = RoundedCornerShape(12.dp),
-            color = DarkSurface,
-        ) {
-            Column(
-                modifier =
-                    Modifier
-                        .fillMaxWidth()
-                        .verticalScroll(rememberScrollState())
-                        .padding(16.dp),
-            ) {
-                // Status header
+                countText?.let {
+                    Text(
+                        text = it,
+                        fontSize = 14.sp,
+                        lineHeight = 16.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        textAlign = TextAlign.Center,
+                    )
+                }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween,
+                    horizontalArrangement = Arrangement.Center,
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(
-                            modifier =
-                                Modifier
-                                    .size(10.dp)
-                                    .clip(CircleShape)
-                                    .background(statusColor),
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
+                    TextButton(onClick = onCancel) {
                         Text(
-                            text = statusText,
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.SemiBold,
-                            color = statusColor,
+                            text = "Cancel",
+                            color = ErrorRed,
                         )
                     }
-                    // Badges
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        if (serverUrl != null) {
-                            val sslColor = if (useSsl) SuccessGreen else TextSecondary
-                            Surface(
-                                shape = RoundedCornerShape(4.dp),
-                                color = sslColor.copy(alpha = 0.15f),
-                                border = BorderStroke(1.dp, sslColor.copy(alpha = 0.4f)),
-                            ) {
-                                Text(
-                                    text = if (useSsl) "SSL" else "TCP",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = sslColor,
-                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                                )
-                            }
-                        }
-                        // Tor badge - only for onion servers
-                        if (isOnion) {
-                            val torColor = if (isTorActive) TorPurple else TextSecondary
-                            Surface(
-                                shape = RoundedCornerShape(4.dp),
-                                color = torColor.copy(alpha = 0.15f),
-                                border = BorderStroke(1.dp, torColor.copy(alpha = if (isTorActive) 0.4f else 0.2f)),
-                            ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                                ) {
-                                    Box(
-                                        modifier =
-                                            Modifier
-                                                .background(
-                                                    if (isTorActive) TorPurple else TextSecondary.copy(alpha = 0.5f),
-                                                ),
-                                    )
-                                    Text(
-                                        text = "Tor",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = torColor,
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(12.dp))
-
-                if (serverUrl != null) {
-                    // Server info card
-                    Column(
-                        modifier =
-                            Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(DarkCard)
-                                .padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        if (serverName != null) {
-                            DialogDetailRow("Name:", serverName)
-                        }
-                        DialogDetailRow("Address:", serverUrl, monospace = true)
-                        DialogDetailRow("Port:", "${serverPort ?: 50001}", monospace = true)
-                        if (isConnected && serverVersion != null) {
-                            DialogDetailRow("Software:", serverVersion)
-                        }
-                        if (isConnected && blockHeight != null && blockHeight > 0u) {
-                            DialogDetailRow("Block:", "%,d".format(blockHeight.toInt()))
-                        }
-                    }
-                } else {
-                    Box(
-                        modifier =
-                            Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(DarkCard)
-                                .padding(16.dp),
-                        contentAlignment = Alignment.Center,
-                    ) {
+                    TextButton(onClick = onClose) {
                         Text(
-                            text = "No server configured",
-                            style = MaterialTheme.typography.bodyMedium,
+                            text = "Close",
                             color = TextSecondary,
                         )
                     }
                 }
-
-                Spacer(modifier = Modifier.height(12.dp))
-
-                // Buttons row
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    if (serverUrl != null) {
-                        val isDisconnectAction = isConnected || isConnecting
-                        val actionColor = if (isDisconnectAction) ErrorRed else SuccessGreen
-                        OutlinedButton(
-                            onClick = if (isDisconnectAction) onDisconnect else onConnect,
-                            modifier = Modifier.weight(1f),
-                            shape = RoundedCornerShape(8.dp),
-                            border = BorderStroke(1.dp, actionColor.copy(alpha = 0.4f)),
-                            colors =
-                                ButtonDefaults.outlinedButtonColors(
-                                    contentColor = actionColor,
-                                    containerColor = actionColor.copy(alpha = 0.08f),
-                                ),
-                        ) {
-                            Text(
-                                text = if (isDisconnectAction) "Disconnect" else "Connect",
-                                style = MaterialTheme.typography.bodySmall,
-                            )
-                        }
-                    }
-                    OutlinedButton(
-                        onClick = onConfigureServer,
-                        modifier = Modifier.weight(1f),
-                        shape = RoundedCornerShape(8.dp),
-                        border = BorderStroke(1.dp, BorderColor),
-                        colors =
-                            ButtonDefaults.outlinedButtonColors(
-                                contentColor = MaterialTheme.colorScheme.onBackground,
-                            ),
-                    ) {
-                        Text(
-                            text = if (serverUrl != null) "Change Server" else "Configure Server",
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                    }
-                }
             }
         }
     }
 }
 
-/**
- * Labeled detail row for the connection status dialog
- */
-@Composable
-private fun DialogDetailRow(
-    label: String,
-    value: String,
-    monospace: Boolean = false,
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.bodySmall,
-            color = TextSecondary,
-            modifier = Modifier.width(72.dp),
-        )
-        Text(
-            text = value,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onBackground,
-            fontFamily = if (monospace) FontFamily.Monospace else null,
-            maxLines = 1,
-        )
-    }
-}

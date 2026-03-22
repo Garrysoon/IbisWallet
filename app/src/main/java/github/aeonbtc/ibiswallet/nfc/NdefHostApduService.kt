@@ -4,6 +4,7 @@ import android.nfc.NdefMessage
 import android.nfc.NdefRecord
 import android.nfc.cardemulation.HostApduService
 import android.os.Bundle
+import java.nio.charset.StandardCharsets
 import java.util.Locale
 
 /**
@@ -27,25 +28,45 @@ class NdefHostApduService : HostApduService() {
 
         /**
          * Set the NDEF message to broadcast. Pass null to stop broadcasting.
-         * Typically called with a bitcoin: URI or plain address from the Receive screen.
+         * Typically called with a Bitcoin, Liquid, or Lightning payload from the Receive screen.
          */
         fun setNdefPayload(uri: String?) {
             currentNdefMessage = uri?.let { buildNdefBytes(it) }
         }
 
         /**
-         * Build raw NDEF message bytes from a bitcoin URI string.
+         * Build raw NDEF message bytes from a supported send payload.
          */
         private fun buildNdefBytes(uri: String): ByteArray {
-            val ndefRecord = if (uri.lowercase(Locale.US).startsWith("bitcoin:")) {
-                // Use a URI record with the bitcoin: scheme
-                NdefRecord.createUri(uri)
-            } else {
-                // Bare address — wrap in bitcoin: scheme
-                NdefRecord.createUri("bitcoin:$uri")
-            }
+            val trimmed = uri.trim()
+            val ndefRecord =
+                if (hasSupportedUriScheme(trimmed)) {
+                    NdefRecord.createUri(trimmed)
+                } else {
+                    createTextRecord(trimmed)
+                }
             val ndefMessage = NdefMessage(arrayOf(ndefRecord))
             return ndefMessage.toByteArray()
+        }
+
+        private fun hasSupportedUriScheme(uri: String): Boolean {
+            val scheme = uri.substringBefore(':', missingDelimiterValue = "").lowercase(Locale.US)
+            return scheme in setOf("bitcoin", "lightning", "liquidnetwork", "liquid")
+        }
+
+        private fun createTextRecord(text: String): NdefRecord {
+            val language = "en".toByteArray(StandardCharsets.US_ASCII)
+            val textBytes = text.toByteArray(StandardCharsets.UTF_8)
+            val payload = ByteArray(1 + language.size + textBytes.size)
+            payload[0] = language.size.toByte()
+            System.arraycopy(language, 0, payload, 1, language.size)
+            System.arraycopy(textBytes, 0, payload, 1 + language.size, textBytes.size)
+            return NdefRecord(
+                NdefRecord.TNF_WELL_KNOWN,
+                NdefRecord.RTD_TEXT,
+                ByteArray(0),
+                payload,
+            )
         }
 
         // APDU status words
@@ -57,8 +78,12 @@ class NdefHostApduService : HostApduService() {
         private val CC_FILE_ID = byteArrayOf(0xE1.toByte(), 0x03)
         private val NDEF_FILE_ID = byteArrayOf(0xE1.toByte(), 0x04)
 
-        // NDEF Tag Application SELECT command
+        // NDEF Tag Application SELECT command. Readers may include an optional Le byte.
         private val NDEF_APP_SELECT = byteArrayOf(
+            0x00, 0xA4.toByte(), 0x04, 0x00, 0x07,
+            0xD2.toByte(), 0x76, 0x00, 0x00, 0x85.toByte(), 0x01, 0x01,
+        )
+        private val NDEF_APP_SELECT_WITH_LE = byteArrayOf(
             0x00, 0xA4.toByte(), 0x04, 0x00, 0x07,
             0xD2.toByte(), 0x76, 0x00, 0x00, 0x85.toByte(), 0x01, 0x01, 0x00,
         )
@@ -75,18 +100,18 @@ class NdefHostApduService : HostApduService() {
 
         val ins = commandApdu[1]
 
-        return when {
+        return when (ins) {
             // SELECT command (INS = 0xA4)
-            ins == 0xA4.toByte() -> handleSelect(commandApdu)
+            0xA4.toByte() -> handleSelect(commandApdu)
             // READ BINARY command (INS = 0xB0)
-            ins == 0xB0.toByte() -> handleReadBinary(commandApdu)
+            0xB0.toByte() -> handleReadBinary(commandApdu)
             else -> SW_FUNC_NOT_SUPPORTED
         }
     }
 
     private fun handleSelect(apdu: ByteArray): ByteArray {
         // SELECT by AID (P1=04): NDEF Tag Application
-        if (apdu.contentEquals(NDEF_APP_SELECT)) {
+        if (apdu.contentEquals(NDEF_APP_SELECT) || apdu.contentEquals(NDEF_APP_SELECT_WITH_LE)) {
             selectedFile = SelectedFile.NONE
             // Rebuild NDEF file bytes from current payload
             val ndefBytes = currentNdefMessage
@@ -141,16 +166,21 @@ class NdefHostApduService : HostApduService() {
     /**
      * Build the Capability Container (CC) file.
      * Describes the NDEF file's location, size, and access permissions.
+     *
+     * MLe (max R-APDU data) and MLc (max C-APDU data) are set to 246 bytes
+     * to allow reading a full bitcoin BIP21 URI in a single READ BINARY
+     * command. Android HCE supports up to ~261-byte APDUs; 246 leaves room
+     * for the 2-byte status word and APDU header overhead.
      */
     private fun buildCapabilityContainer(): ByteArray {
         val ndefLen = ndefFileBytes.size
-        val maxNdefSize = maxOf(ndefLen, 256) // report at least 256 bytes capacity
+        val maxNdefSize = maxOf(ndefLen, 512) // report at least 512 bytes capacity
 
         return byteArrayOf(
             0x00, 0x0F,                               // CC length (15 bytes)
             0x20,                                      // Mapping version 2.0
-            0x00, 0x3B,                                // Max R-APDU size (59 bytes)
-            0x00, 0x34,                                // Max C-APDU size (52 bytes)
+            0x00, 0xF6.toByte(),                       // Max R-APDU size (246 bytes)
+            0x00, 0xF6.toByte(),                       // Max C-APDU size (246 bytes)
             // NDEF File Control TLV
             0x04,                                      // Type: NDEF File Control
             0x06,                                      // Length of value

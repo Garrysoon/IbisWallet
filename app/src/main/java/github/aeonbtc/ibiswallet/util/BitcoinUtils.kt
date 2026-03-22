@@ -1,6 +1,7 @@
 package github.aeonbtc.ibiswallet.util
 
 import github.aeonbtc.ibiswallet.data.model.AddressType
+import github.aeonbtc.ibiswallet.data.model.WalletNetwork
 
 /**
  * Pure-logic Bitcoin utility functions extracted from WalletRepository
@@ -11,22 +12,133 @@ import github.aeonbtc.ibiswallet.data.model.AddressType
  * No Android dependencies. No BDK dependencies. Pure Kotlin + JDK crypto.
  */
 object BitcoinUtils {
+    const val UNSUPPORTED_NESTED_SEGWIT_MESSAGE =
+        "Nested SegWit is not supported. Use Legacy, SegWit, or Taproot."
+    const val UNSUPPORTED_NON_MAINNET_MESSAGE =
+        "Only Bitcoin mainnet is supported."
+
+    private const val BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+    private val supportedDescriptorPrefixes = listOf("pkh(", "wpkh(", "tr(")
+
+    fun parseSupportedAddressType(
+        rawAddressType: String?,
+        default: AddressType = AddressType.SEGWIT,
+    ): AddressType {
+        val normalized = rawAddressType?.trim()?.uppercase()
+        return when (normalized) {
+            null, "" -> default
+            AddressType.LEGACY.name -> AddressType.LEGACY
+            AddressType.SEGWIT.name -> AddressType.SEGWIT
+            AddressType.TAPROOT.name -> AddressType.TAPROOT
+            "NESTED_SEGWIT" -> throw IllegalArgumentException(UNSUPPORTED_NESTED_SEGWIT_MESSAGE)
+            else -> default
+        }
+    }
+
+    fun parseSupportedWalletNetwork(
+        rawNetwork: String?,
+        default: WalletNetwork = WalletNetwork.BITCOIN,
+    ): WalletNetwork {
+        val normalized = rawNetwork?.trim()?.uppercase()
+        return when (normalized) {
+            null, "" -> default
+            WalletNetwork.BITCOIN.name -> WalletNetwork.BITCOIN
+            "TESTNET", "SIGNET", "REGTEST" -> throw IllegalArgumentException(UNSUPPORTED_NON_MAINNET_MESSAGE)
+            else -> default
+        }
+    }
+
+    fun unsupportedNestedSegwitReason(input: String): String? {
+        val trimmed = input.trim()
+        if (trimmed.isBlank()) return null
+
+        val lowered = trimmed.lowercase()
+        return when {
+            lowered.contains("\"p2sh_p2wpkh\"") -> UNSUPPORTED_NESTED_SEGWIT_MESSAGE
+            trimmed.startsWith("ypub") || trimmed.startsWith("upub") ->
+                UNSUPPORTED_NESTED_SEGWIT_MESSAGE
+            trimmed.startsWith("yprv") || trimmed.startsWith("uprv") ->
+                UNSUPPORTED_NESTED_SEGWIT_MESSAGE
+            trimmed.startsWith("[") &&
+                trimmed.contains("]") &&
+                trimmed.substringAfter("]").let { it.startsWith("ypub") || it.startsWith("upub") } ->
+                UNSUPPORTED_NESTED_SEGWIT_MESSAGE
+            trimmed.startsWith("[") &&
+                trimmed.contains("]") &&
+                trimmed.substringAfter("]").let { it.startsWith("yprv") || it.startsWith("uprv") } ->
+                UNSUPPORTED_NESTED_SEGWIT_MESSAGE
+            lowered.startsWith("sh(wpkh(") -> UNSUPPORTED_NESTED_SEGWIT_MESSAGE
+            trimmed.startsWith("3") || trimmed.startsWith("2") -> UNSUPPORTED_NESTED_SEGWIT_MESSAGE
+            else -> null
+        }
+    }
+
+    fun unsupportedNonMainnetReason(input: String): String? {
+        val trimmed = input.trim()
+        if (trimmed.isBlank()) return null
+
+        val lowered = trimmed.lowercase()
+        return when {
+            lowered.contains("\"network\":\"testnet\"") ||
+                lowered.contains("\"network\": \"testnet\"") ||
+                lowered.contains("\"network\":\"signet\"") ||
+                lowered.contains("\"network\": \"signet\"") ||
+                lowered.contains("\"network\":\"regtest\"") ||
+                lowered.contains("\"network\": \"regtest\"") ->
+                UNSUPPORTED_NON_MAINNET_MESSAGE
+            trimmed.startsWith("tpub") || trimmed.startsWith("vpub") ->
+                UNSUPPORTED_NON_MAINNET_MESSAGE
+            trimmed.startsWith("tprv") || trimmed.startsWith("uprv") ->
+                UNSUPPORTED_NON_MAINNET_MESSAGE
+            trimmed.startsWith("[") &&
+                trimmed.contains("]") &&
+                trimmed.substringAfter("]").let { it.startsWith("tpub") || it.startsWith("vpub") } ->
+                UNSUPPORTED_NON_MAINNET_MESSAGE
+            trimmed.startsWith("[") &&
+                trimmed.contains("]") &&
+                trimmed.substringAfter("]").let { it.startsWith("tprv") || it.startsWith("uprv") } ->
+                UNSUPPORTED_NON_MAINNET_MESSAGE
+            lowered.startsWith("bitcoin:tb1") ||
+                lowered.startsWith("bitcoin:m") ||
+                lowered.startsWith("bitcoin:n") ||
+                lowered.startsWith("bitcoin:2") ->
+                UNSUPPORTED_NON_MAINNET_MESSAGE
+            trimmed.startsWith("tb1q") || trimmed.startsWith("tb1p") ->
+                UNSUPPORTED_NON_MAINNET_MESSAGE
+            isLikelyTestnetBase58Address(trimmed) ->
+                UNSUPPORTED_NON_MAINNET_MESSAGE
+            isLikelyTestnetWif(trimmed) ->
+                UNSUPPORTED_NON_MAINNET_MESSAGE
+            else -> null
+        }
+    }
+
+    private fun isLikelyTestnetBase58Address(input: String): Boolean {
+        if (!input.startsWith("m") && !input.startsWith("n") && !input.startsWith("2")) {
+            return false
+        }
+        return input.length in 26..35 && input.all { it in BASE58_ALPHABET }
+    }
+
+    private fun isLikelyTestnetWif(input: String): Boolean {
+        if (!input.startsWith("c") && !input.startsWith("9")) {
+            return false
+        }
+        return input.length in 51..52 && input.all { it in BASE58_ALPHABET }
+    }
+
 
     // ── Address Type Detection ───────────────────────────────────────
 
     /**
-     * Detect the address type from a Bitcoin address string.
-     * Supports mainnet (1, 3, bc1q, bc1p) and testnet (m, n, 2, tb1q, tb1p).
+     * Detect the address type from a Bitcoin mainnet address string.
      */
     fun detectAddressType(address: String): AddressType? {
         val trimmed = address.trim()
         return when {
             trimmed.startsWith("1") -> AddressType.LEGACY
-            trimmed.startsWith("3") -> AddressType.NESTED_SEGWIT
-            trimmed.startsWith("bc1q") || trimmed.startsWith("tb1q") -> AddressType.SEGWIT
-            trimmed.startsWith("bc1p") || trimmed.startsWith("tb1p") -> AddressType.TAPROOT
-            trimmed.startsWith("m") || trimmed.startsWith("n") -> AddressType.LEGACY // testnet P2PKH
-            trimmed.startsWith("2") -> AddressType.NESTED_SEGWIT // testnet P2SH
+            trimmed.startsWith("bc1q") -> AddressType.SEGWIT
+            trimmed.startsWith("bc1p") -> AddressType.TAPROOT
             else -> null
         }
     }
@@ -36,17 +148,23 @@ object BitcoinUtils {
     /**
      * Check if input string represents a watch-only key material.
      * Supports:
-     * - Bare xpub/zpub/ypub/tpub/vpub/upub
+     * - Bare xpub/zpub
      * - Origin-prefixed: "[fingerprint/path]xpub..."
      * - Full output descriptors: wpkh([fingerprint/path]xpub.../0/wildcard)
      */
     fun isWatchOnlyInput(input: String): Boolean {
         val trimmed = input.trim()
 
-        // Bare xpub/zpub/ypub/tpub/vpub/upub
-        if (trimmed.startsWith("xpub") || trimmed.startsWith("ypub") ||
-            trimmed.startsWith("zpub") || trimmed.startsWith("tpub") ||
-            trimmed.startsWith("vpub") || trimmed.startsWith("upub")
+        if (unsupportedNonMainnetReason(trimmed) != null) {
+            return false
+        }
+        if (unsupportedNestedSegwitReason(trimmed) != null) {
+            return false
+        }
+
+        // Bare xpub/zpub
+        if (trimmed.startsWith("xpub") ||
+            trimmed.startsWith("zpub")
         ) {
             return true
         }
@@ -54,22 +172,18 @@ object BitcoinUtils {
         // Origin-prefixed: [fingerprint/path]xpub
         if (trimmed.startsWith("[") && trimmed.contains("]")) {
             val afterBracket = trimmed.substringAfter("]")
-            if (afterBracket.startsWith("xpub") || afterBracket.startsWith("ypub") ||
-                afterBracket.startsWith("zpub") || afterBracket.startsWith("tpub") ||
-                afterBracket.startsWith("vpub") || afterBracket.startsWith("upub")
+            if (afterBracket.startsWith("xpub") ||
+                afterBracket.startsWith("zpub")
             ) {
                 return true
             }
         }
 
         // Full output descriptor with public key
-        val descriptorPrefixes = listOf("pkh(", "wpkh(", "tr(", "sh(wpkh(", "sh(")
-        if (descriptorPrefixes.any { trimmed.lowercase().startsWith(it) }) {
+        if (supportedDescriptorPrefixes.any { trimmed.lowercase().startsWith(it) }) {
             val hasPublicKey =
-                trimmed.contains("xpub") || trimmed.contains("tpub") ||
-                    trimmed.contains("ypub") || trimmed.contains("zpub") ||
-                    trimmed.contains("vpub") || trimmed.contains("upub")
-            val hasPrivateKey = trimmed.contains("xprv") || trimmed.contains("tprv")
+                trimmed.contains("xpub") || trimmed.contains("zpub")
+            val hasPrivateKey = trimmed.contains("xprv")
             return hasPublicKey && !hasPrivateKey
         }
 
@@ -81,20 +195,19 @@ object BitcoinUtils {
     /**
      * Check if input string is a WIF (Wallet Import Format) private key.
      * Mainnet: starts with 'K' or 'L' (compressed, 52 chars) or '5' (uncompressed, 51 chars)
-     * Testnet: starts with 'c' (compressed) or '9' (uncompressed)
-     * Validates via Base58Check decode: version byte 0x80 (mainnet) or 0xEF (testnet).
+     * Validates via Base58Check decode: version byte 0x80 (mainnet).
      */
     fun isWifPrivateKey(input: String): Boolean {
         val trimmed = input.trim()
         val couldBeWif =
-            (trimmed.length == 52 && (trimmed[0] == 'K' || trimmed[0] == 'L' || trimmed[0] == 'c')) ||
-                (trimmed.length == 51 && (trimmed[0] == '5' || trimmed[0] == '9'))
+            (trimmed.length == 52 && (trimmed[0] == 'K' || trimmed[0] == 'L')) ||
+                (trimmed.length == 51 && trimmed[0] == '5')
         if (!couldBeWif) return false
 
         return try {
             val decoded = Base58.decodeChecked(trimmed)
             val version = decoded[0].toInt() and 0xFF
-            val validVersion = version == 0x80 || version == 0xEF
+            val validVersion = version == 0x80
             val validLength = decoded.size == 34 || decoded.size == 33
             validVersion && validLength
         } catch (_: Exception) {
@@ -103,11 +216,11 @@ object BitcoinUtils {
     }
 
     /**
-     * Check if a WIF key is compressed (K/L/c prefix, 52 chars).
+     * Check if a WIF key is compressed (K/L prefix, 52 chars).
      */
     fun isWifCompressed(wif: String): Boolean {
         val trimmed = wif.trim()
-        return trimmed.length == 52 && (trimmed[0] == 'K' || trimmed[0] == 'L' || trimmed[0] == 'c')
+        return trimmed.length == 52 && (trimmed[0] == 'K' || trimmed[0] == 'L')
     }
 
     // ── Fingerprint Extraction ───────────────────────────────────────
@@ -158,31 +271,24 @@ object BitcoinUtils {
     // ── Extended Key Conversion ──────────────────────────────────────
 
     /**
-     * Convert zpub/ypub/vpub/upub to xpub/tpub via Base58Check re-encode.
-     * xpub and tpub pass through unchanged.
+     * Convert zpub to xpub via Base58Check re-encode.
+     * xpub passes through unchanged.
      *
      * Version byte mappings:
      * - xpub: 0x0488B21E (mainnet)
-     * - tpub: 0x043587CF (testnet)
-     * - ypub: 0x049D7CB2 (mainnet BIP49)
-     * - upub: 0x044A5262 (testnet BIP49)
      * - zpub: 0x04B24746 (mainnet BIP84)
-     * - vpub: 0x045F1CF6 (testnet BIP84)
      */
     fun convertToXpub(extendedKey: String): String {
-        if (extendedKey.startsWith("xpub") || extendedKey.startsWith("tpub")) {
+        unsupportedNonMainnetReason(extendedKey)?.let { throw IllegalArgumentException(it) }
+        unsupportedNestedSegwitReason(extendedKey)?.let { throw IllegalArgumentException(it) }
+
+        if (extendedKey.startsWith("xpub")) {
             return extendedKey
         }
 
         val decoded = Base58.decodeChecked(extendedKey)
 
-        val isTestnet = extendedKey.startsWith("vpub") || extendedKey.startsWith("upub")
-        val targetVersion =
-            if (isTestnet) {
-                byteArrayOf(0x04, 0x35, 0x87.toByte(), 0xCF.toByte()) // tpub
-            } else {
-                byteArrayOf(0x04, 0x88.toByte(), 0xB2.toByte(), 0x1E) // xpub
-            }
+        val targetVersion = byteArrayOf(0x04, 0x88.toByte(), 0xB2.toByte(), 0x1E) // xpub
 
         val newData = targetVersion + decoded.sliceArray(4 until decoded.size)
         return Base58.encodeChecked(newData)
@@ -351,10 +457,6 @@ object BitcoinUtils {
                 "pkh($keyWithOrigin/0/*)",
                 "pkh($keyWithOrigin/1/*)",
             )
-            AddressType.NESTED_SEGWIT -> Pair(
-                "sh(wpkh($keyWithOrigin/0/*))",
-                "sh(wpkh($keyWithOrigin/1/*))",
-            )
             AddressType.SEGWIT -> Pair(
                 "wpkh($keyWithOrigin/0/*)",
                 "wpkh($keyWithOrigin/1/*)",
@@ -380,11 +482,10 @@ object BitcoinUtils {
 
     /**
      * Check if a descriptor string is a full output descriptor
-     * (starts with pkh(, wpkh(, tr(, sh(wpkh(, or sh().
+     * (starts with pkh(, wpkh(, or tr().
      */
     fun isFullDescriptor(input: String): Boolean {
-        val descriptorPrefixes = listOf("pkh(", "wpkh(", "tr(", "sh(wpkh(", "sh(")
-        return descriptorPrefixes.any { input.trim().lowercase().startsWith(it) }
+        return supportedDescriptorPrefixes.any { input.trim().lowercase().startsWith(it) }
     }
 
     /**
@@ -434,7 +535,6 @@ object BitcoinUtils {
     fun inputWeightWU(addressType: AddressType): Long {
         return when (addressType) {
             AddressType.LEGACY -> 592L
-            AddressType.NESTED_SEGWIT -> 364L
             AddressType.SEGWIT -> 272L
             AddressType.TAPROOT -> 230L
         }
@@ -475,7 +575,7 @@ object BitcoinUtils {
     data class BackupWalletData(
         val name: String,
         val addressType: AddressType,
-        val network: String, // "BITCOIN" or "TESTNET"
+        val network: String, // "BITCOIN"
         val seedFormat: String, // "BIP39" etc.
         val keyMaterial: String,
         val isWatchOnly: Boolean,
@@ -494,23 +594,20 @@ object BitcoinUtils {
         walletJson: org.json.JSONObject,
         keyMaterialJson: org.json.JSONObject,
     ): BackupWalletData {
-        val addressType = try {
-            AddressType.valueOf(walletJson.getString("addressType"))
-        } catch (_: Exception) {
-            AddressType.SEGWIT
-        }
+        val addressType =
+            parseSupportedAddressType(
+                rawAddressType = walletJson.optString("addressType", AddressType.SEGWIT.name),
+                default = AddressType.SEGWIT,
+            )
 
-        val network = try {
-            val n = walletJson.optString("network", "BITCOIN")
-            // Validate it's a known value
-            if (n == "BITCOIN" || n == "TESTNET" || n == "SIGNET" || n == "REGTEST") n else "BITCOIN"
-        } catch (_: Exception) {
-            "BITCOIN"
-        }
+        val network =
+            parseSupportedWalletNetwork(
+                rawNetwork = walletJson.optString("network", WalletNetwork.BITCOIN.name),
+                default = WalletNetwork.BITCOIN,
+            ).name
 
         val seedFormat = try {
-            val sf = walletJson.optString("seedFormat", "BIP39")
-            if (sf.isNotBlank()) sf else "BIP39"
+            walletJson.optString("seedFormat", "BIP39").ifBlank { "BIP39" }
         } catch (_: Exception) {
             "BIP39"
         }

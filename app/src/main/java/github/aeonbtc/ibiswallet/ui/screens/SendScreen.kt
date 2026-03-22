@@ -2,7 +2,6 @@
 
 package github.aeonbtc.ibiswallet.ui.screens
 
-import android.nfc.NfcAdapter
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -58,6 +57,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -87,6 +87,7 @@ import github.aeonbtc.ibiswallet.ui.theme.DarkSurface
 import github.aeonbtc.ibiswallet.ui.theme.SuccessGreen
 import github.aeonbtc.ibiswallet.ui.theme.TextSecondary
 import github.aeonbtc.ibiswallet.ui.theme.WarningYellow
+import github.aeonbtc.ibiswallet.util.getNfcAvailability
 import github.aeonbtc.ibiswallet.viewmodel.SendScreenDraft
 import github.aeonbtc.ibiswallet.viewmodel.WalletUiState
 import java.util.Locale
@@ -157,6 +158,8 @@ fun SendScreen(
         precomputedFeeSats: Long?,
     ) -> Unit = { _, _, _, _, _ -> },
     onNavigateToBroadcast: () -> Unit = {},
+    onHandleScannedInput: (String) -> Boolean = { false },
+    onHandleRecipientInput: (String) -> Boolean = { false },
 ) {
     // Initialize state from draft
     var recipientAddress by remember { mutableStateOf(draft.recipientAddress) }
@@ -182,20 +185,17 @@ fun SendScreen(
         }
     }
 
-    // NFC foreground dispatch: enable reading NFC tags while on the Send screen.
+    // NFC reader mode: enable reading NFC tags while on the Send screen.
     // When another device broadcasts a bitcoin: URI via NFC (e.g. from another
     // wallet's Receive screen), tapping fills the address and amount fields.
     val context = LocalContext.current
-    val nfcAvailable = remember {
-        NfcAdapter.getDefaultAdapter(context) != null &&
-            SecureStorage(context).isNfcEnabled()
-    }
+    val nfcAvailable = context.getNfcAvailability().canRead
     DisposableEffect(nfcAvailable) {
         if (nfcAvailable) {
-            (context as? MainActivity)?.enableNfcForegroundDispatch()
+            (context as? MainActivity)?.enableNfcReaderMode()
         }
         onDispose {
-            (context as? MainActivity)?.disableNfcForegroundDispatch()
+            (context as? MainActivity)?.disableNfcReaderMode()
         }
     }
 
@@ -211,6 +211,23 @@ fun SendScreen(
     // Label state
     var showLabelField by remember { mutableStateOf(draft.label.isNotEmpty()) }
     var labelText by remember { mutableStateOf(draft.label) }
+
+    fun clearLocalSendForm() {
+        recipientAddress = ""
+        amountInput = ""
+        feeRate = SendScreenDraft().feeRate
+        isUsdMode = false
+        showQrScanner = false
+        showCoinControl = false
+        selectedUtxos.clear()
+        isMultiMode = false
+        showMultiDialog = false
+        multiRecipients.clear()
+        isMaxMode = false
+        showLabelField = false
+        labelText = ""
+        onClearDryRun()
+    }
 
     // Restore selected UTXOs from draft
     LaunchedEffect(draft.selectedUtxoOutpoints, utxos) {
@@ -259,10 +276,7 @@ fun SendScreen(
     var showConfirmDialog by remember { mutableStateOf(false) }
 
     // Address validation
-    val addressValidationError =
-        remember(recipientAddress) {
-            validateBitcoinAddress(recipientAddress)
-        }
+    val addressValidationError = remember(recipientAddress) { validateBitcoinAddress(recipientAddress) }
     val isAddressValid = recipientAddress.isNotBlank() && addressValidationError == null
 
     val useSats = denomination == SecureStorage.DENOMINATION_SATS
@@ -286,32 +300,40 @@ fun SendScreen(
 
     // Convert input to sats based on denomination or USD mode
     val amountSats =
-        try {
-            when {
-                isUsdMode && btcPrice != null && btcPrice > 0 -> {
-                    // Input is in USD, convert to sats: USD / price * 100_000_000
-                    val usdAmount = amountInput.toDoubleOrNull() ?: 0.0
-                    (usdAmount / btcPrice) * 100_000_000
+        remember(amountInput, isUsdMode, btcPrice, useSats) {
+            try {
+                when {
+                    isUsdMode && btcPrice != null && btcPrice > 0 -> {
+                        // Input is in USD, convert to sats: USD / price * 100_000_000
+                        val usdAmount = amountInput.toDoubleOrNull() ?: 0.0
+                        (usdAmount / btcPrice) * 100_000_000
+                    }
+                    useSats -> {
+                        // Input is already in sats
+                        amountInput.replace(",", "").toLongOrNull()?.toDouble() ?: 0.0
+                    }
+                    else -> {
+                        // Input is in BTC, convert to sats
+                        (amountInput.toDoubleOrNull() ?: 0.0) * 100_000_000
+                    }
                 }
-                useSats -> {
-                    // Input is already in sats
-                    amountInput.replace(",", "").toLongOrNull()?.toDouble() ?: 0.0
-                }
-                else -> {
-                    // Input is in BTC, convert to sats
-                    (amountInput.toDoubleOrNull() ?: 0.0) * 100_000_000
-                }
+            } catch (_: Exception) {
+                0.0
             }
-        } catch (_: Exception) {
-            0.0
         }
 
     // Calculate available balance based on coin control selection
     val availableSats =
-        if (selectedUtxos.isNotEmpty()) {
-            selectedUtxos.sumOf { it.amountSats.toLong() }
-        } else {
-            walletState.balanceSats.toLong()
+        remember(selectedUtxos.toList(), walletState.balanceSats) {
+            if (selectedUtxos.isNotEmpty()) {
+                selectedUtxos.sumOf { it.amountSats.toLong() }
+            } else {
+                walletState.balanceSats.toLong()
+            }
+        }
+    val selectedUtxoOutpoints =
+        remember(selectedUtxos.toList()) {
+            selectedUtxos.mapTo(hashSetOf()) { it.outpoint }
         }
 
     // Build multi-recipient list for fee estimation
@@ -427,7 +449,7 @@ fun SendScreen(
                     dryRunResult.recipientAmountSats
                 } else {
                     // Rough estimate while dry-run is pending
-                    maxOf(0L, availableSats - (feeRate.toLong() * 150))
+                        maxOf(0L, availableSats - kotlin.math.ceil(feeRate * 150.0).toLong())
                 }
             amountInput =
                 when {
@@ -451,7 +473,7 @@ fun SendScreen(
             privacyMode = privacyMode,
             spendUnconfirmed = spendUnconfirmed,
             onUtxoToggle = { utxo ->
-                if (selectedUtxos.contains(utxo)) {
+                if (selectedUtxoOutpoints.contains(utxo.outpoint)) {
                     selectedUtxos.remove(utxo)
                 } else {
                     selectedUtxos.add(utxo)
@@ -491,7 +513,13 @@ fun SendScreen(
     if (showQrScanner) {
         QrScannerDialog(
             onCodeScanned = { code ->
-                val bip21 = parseBip21Uri(code)
+                val normalizedCode = code.trim()
+                if (onHandleScannedInput(normalizedCode)) {
+                    showQrScanner = false
+                    return@QrScannerDialog
+                }
+
+                val bip21 = parseBip21Uri(normalizedCode)
                 recipientAddress = bip21.address
 
                 // Set amount if present in URI
@@ -525,9 +553,12 @@ fun SendScreen(
     // Send Confirmation Dialog
     // Auto-close confirmation dialog when send completes (isSending goes false)
     var wasSending by remember { mutableStateOf(false) }
-    LaunchedEffect(uiState.isSending) {
+    LaunchedEffect(uiState.isSending, uiState.error, isWatchOnly) {
         if (wasSending && !uiState.isSending) {
             showConfirmDialog = false
+            if (!isWatchOnly && uiState.error == null) {
+                clearLocalSendForm()
+            }
         }
         wasSending = uiState.isSending
     }
@@ -542,6 +573,7 @@ fun SendScreen(
                 recipients = multiRecipientList,
                 feeRate = feeRate,
                 useSats = useSats,
+                btcPrice = btcPrice,
                 selectedUtxos = utxoSelection,
                 privacyMode = privacyMode,
                 isWatchOnly = isWatchOnly,
@@ -570,6 +602,7 @@ fun SendScreen(
                 feeRate = feeRate,
                 selectedUtxos = utxoSelection,
                 useSats = useSats,
+                btcPrice = btcPrice,
                 privacyMode = privacyMode,
                 label = txLabel,
                 isSelfTransfer = isSelfTransfer,
@@ -616,17 +649,38 @@ fun SendScreen(
                         .fillMaxWidth()
                         .padding(16.dp),
             ) {
-                // Header with title and coin control button
+                // Header with title, NFC indicator, and coin control button
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
+                    verticalAlignment = Alignment.Top,
                 ) {
-                    Text(
-                        text = "Send Bitcoin",
-                        style = MaterialTheme.typography.titleLarge,
-                        color = MaterialTheme.colorScheme.onBackground,
-                    )
+                    Column {
+                        Text(
+                            text = "Send Bitcoin",
+                            style = MaterialTheme.typography.titleLarge,
+                            color = MaterialTheme.colorScheme.onBackground,
+                        )
+                        if (nfcAvailable) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.padding(top = 2.dp),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Sensors,
+                                    contentDescription = "NFC reading",
+                                    tint = SuccessGreen,
+                                    modifier = Modifier.size(14.dp),
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = "NFC",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = SuccessGreen,
+                                )
+                            }
+                        }
+                    }
 
                     // Coin Control button in header
                     val hasUtxos = spendableUtxos.isNotEmpty()
@@ -657,24 +711,6 @@ fun SendScreen(
                         )
                     }
                 }
-                if (nfcAvailable) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Sensors,
-                            contentDescription = "NFC reading",
-                            tint = SuccessGreen,
-                            modifier = Modifier.size(14.dp),
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(
-                            text = "NFC",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = SuccessGreen,
-                        )
-                    }
-                }
 
                 Spacer(modifier = Modifier.height(20.dp))
 
@@ -685,7 +721,7 @@ fun SendScreen(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
-                        text = "Recipient Address",
+                        text = "Recipient",
                         style = MaterialTheme.typography.labelLarge,
                         color = TextSecondary,
                     )
@@ -934,8 +970,12 @@ fun SendScreen(
                     OutlinedTextField(
                         value = recipientAddress,
                         onValueChange = { input ->
-                            if (input.trim().lowercase().startsWith("bitcoin:")) {
-                                val bip21 = parseBip21Uri(input.trim())
+                            val normalizedInput = input.trim()
+                            if (onHandleRecipientInput(normalizedInput)) {
+                                return@OutlinedTextField
+                            }
+                            if (normalizedInput.lowercase().startsWith("bitcoin:")) {
+                                val bip21 = parseBip21Uri(normalizedInput)
                                 recipientAddress = bip21.address
                                 bip21.amount?.let { btcAmount ->
                                     isMaxMode = false
@@ -960,7 +1000,7 @@ fun SendScreen(
                         modifier = Modifier.fillMaxWidth(),
                         placeholder = {
                             Text(
-                                "Enter Bitcoin address",
+                                "Bitcoin address",
                                 color = TextSecondary.copy(alpha = 0.5f),
                             )
                         },
@@ -1242,7 +1282,8 @@ fun SendScreen(
                                             // will fill amountInput with the exact value from dry-run.
                                             // Use rough estimate as an immediate placeholder.
                                             isMaxMode = true
-                                            val roughMaxSats = maxOf(0L, availableSats - (feeRate.toLong() * 150))
+                                            val roughMaxSats =
+                                                maxOf(0L, availableSats - kotlin.math.ceil(feeRate * 150.0).toLong())
                                             amountInput =
                                                 when {
                                                     isUsdMode && btcPrice != null && btcPrice > 0 -> {
@@ -1349,7 +1390,7 @@ fun SendScreen(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(5.dp))
 
                 val showFeeEstimate = if (isMultiMode) multiRecipientList.isNotEmpty() else (amountSats > 0 || isMaxMode)
                 github.aeonbtc.ibiswallet.ui.components.FeeRateSection(
@@ -1405,7 +1446,7 @@ fun SendScreen(
                     ),
             ) {
                 Text(
-                    text = "Import a wallet first to send Bitcoin",
+                    text = "Add a wallet first to send Bitcoin",
                     style = MaterialTheme.typography.bodySmall,
                     color = WarningYellow,
                     modifier = Modifier.padding(16.dp),
@@ -1416,6 +1457,7 @@ fun SendScreen(
             Spacer(modifier = Modifier.height(16.dp))
         }
 
+        // ── Layer 1 send button (existing Bitcoin flow) ──
         // Watch-only wallets can create PSBTs without Electrum connection
         val isButtonEnabled =
             if (isWatchOnly) {
@@ -1510,6 +1552,10 @@ private fun CoinControlDialog(
     onDismiss: () -> Unit,
 ) {
     val totalSelected = selectedUtxos.sumOf { it.amountSats.toLong() }.toULong()
+    val selectedOutpoints =
+        remember(selectedUtxos) {
+            selectedUtxos.mapTo(hashSetOf()) { it.outpoint }
+        }
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -1597,7 +1643,7 @@ private fun CoinControlDialog(
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     items(utxos, key = { it.outpoint }) { utxo ->
-                        val isSelected = selectedUtxos.contains(utxo)
+                        val isSelected = selectedOutpoints.contains(utxo.outpoint)
                         val isDisabled = !utxo.isConfirmed && !spendUnconfirmed
 
                         Card(
@@ -1769,6 +1815,7 @@ private fun SendConfirmationDialog(
     feeRate: Double,
     selectedUtxos: List<UtxoInfo>?,
     useSats: Boolean,
+    btcPrice: Double? = null,
     privacyMode: Boolean = false,
     label: String? = null,
     isSelfTransfer: Boolean = false,
@@ -1784,6 +1831,7 @@ private fun SendConfirmationDialog(
     val estimatedFeeSats = dryRunResult?.feeSats ?: 0L
     val estimatedVBytes = dryRunResult?.txVBytes ?: 0.0
     val actualChangeSats = dryRunResult?.changeSats ?: 0L
+    val changeAddress = dryRunResult?.changeAddress
     val hasChange = dryRunResult?.hasChange ?: false
     val totalSats = amountSats.toLong() + estimatedFeeSats
 
@@ -1807,7 +1855,7 @@ private fun SendConfirmationDialog(
             ) {
                 Text(
                     text = if (isWatchOnly) "Review PSBT" else "Review Transaction",
-                    style = MaterialTheme.typography.titleMedium,
+                    style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onBackground,
                 )
@@ -1820,14 +1868,14 @@ private fun SendConfirmationDialog(
                 ) {
                     Text(
                         text = if (isSelfTransfer) "Destination" else "Sending To",
-                        style = MaterialTheme.typography.labelMedium,
+                        style = MaterialTheme.typography.bodyLarge,
                         color = TextSecondary,
                     )
                     if (isSelfTransfer) {
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
                             text = "(Self-transfer)",
-                            style = MaterialTheme.typography.labelMedium,
+                            style = MaterialTheme.typography.bodyLarge,
                             color = BorderColor,
                         )
                     }
@@ -1835,7 +1883,7 @@ private fun SendConfirmationDialog(
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
                     text = recipientAddress,
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = MaterialTheme.typography.bodyLarge,
                     fontFamily = FontFamily.Monospace,
                     color = MaterialTheme.colorScheme.onBackground,
                 )
@@ -1845,13 +1893,13 @@ private fun SendConfirmationDialog(
                     Spacer(modifier = Modifier.height(12.dp))
                     Text(
                         text = "Label",
-                        style = MaterialTheme.typography.labelMedium,
+                        style = MaterialTheme.typography.bodyLarge,
                         color = TextSecondary,
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
                         text = label,
-                        style = MaterialTheme.typography.bodyMedium,
+                        style = MaterialTheme.typography.bodyLarge,
                         color = AccentTeal,
                     )
                 }
@@ -1877,18 +1925,18 @@ private fun SendConfirmationDialog(
                     Column {
                         Text(
                             text = "Sending:",
-                            style = MaterialTheme.typography.bodyMedium,
+                                style = MaterialTheme.typography.bodyLarge,
                             color = TextSecondary,
                         )
                         Text(
                             text = recipientAddress.take(8) + "..." + recipientAddress.takeLast(8),
-                            style = MaterialTheme.typography.bodySmall,
+                                style = MaterialTheme.typography.bodyLarge,
                             fontFamily = FontFamily.Monospace,
                             color = TextSecondary.copy(alpha = 0.7f),
                         )
                     }
-                    Text(
-                        text =
+                    SendReviewValueColumn(
+                        primaryText =
                             if (privacyMode) {
                                 HIDDEN_AMOUNT
                             } else {
@@ -1897,9 +1945,8 @@ private fun SendConfirmationDialog(
                                     useSats,
                                 )} ${if (useSats) "sats" else "BTC"}"
                             },
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.Medium,
                         color = if (isSelfTransfer) SuccessGreen else AccentRed,
+                        subtext = reviewUsdSubtext(amountSats.toLong(), btcPrice, privacyMode),
                     )
                 }
 
@@ -1907,7 +1954,6 @@ private fun SendConfirmationDialog(
 
                 // Change (if applicable)
                 if (hasChange && actualChangeSats > 0) {
-                    Spacer(modifier = Modifier.height(12.dp))
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -1916,17 +1962,18 @@ private fun SendConfirmationDialog(
                         Column {
                             Text(
                                 text = "Change:",
-                                style = MaterialTheme.typography.bodyMedium,
+                                style = MaterialTheme.typography.bodyLarge,
                                 color = TextSecondary,
                             )
                             Text(
-                                text = "Returned to your wallet",
-                                style = MaterialTheme.typography.bodySmall,
+                                text = changeAddress?.let(::abbreviateReviewAddress) ?: "Wallet change",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontFamily = FontFamily.Monospace,
                                 color = TextSecondary.copy(alpha = 0.7f),
                             )
                         }
-                        Text(
-                            text =
+                        SendReviewValueColumn(
+                            primaryText =
                                 if (privacyMode) {
                                     HIDDEN_AMOUNT
                                 } else {
@@ -1935,9 +1982,8 @@ private fun SendConfirmationDialog(
                                         useSats,
                                     )} ${if (useSats) "sats" else "BTC"}"
                                 },
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.Medium,
                             color = SuccessGreen,
+                            subtext = reviewUsdSubtext(actualChangeSats, btcPrice, privacyMode),
                         )
                     }
                 }
@@ -1951,18 +1997,18 @@ private fun SendConfirmationDialog(
                 ) {
                     Column {
                         Text(
-                            text = "Network Fee:",
-                            style = MaterialTheme.typography.bodyMedium,
+                            text = "Bitcoin Miner Fee:",
+                            style = MaterialTheme.typography.bodyLarge,
                             color = TextSecondary,
                         )
                         Text(
                             text = "${formatFeeRate(feeRate)} sat/vB • ${formatVBytes(estimatedVBytes)} vB",
-                            style = MaterialTheme.typography.bodySmall,
+                            style = MaterialTheme.typography.bodyMedium,
                             color = TextSecondary.copy(alpha = 0.7f),
                         )
                     }
-                    Text(
-                        text =
+                    SendReviewValueColumn(
+                        primaryText =
                             if (privacyMode) {
                                 HIDDEN_AMOUNT
                             } else {
@@ -1971,9 +2017,8 @@ private fun SendConfirmationDialog(
                                     useSats,
                                 )} ${if (useSats) "sats" else "BTC"}"
                             },
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.Medium,
                         color = BitcoinOrange,
+                        subtext = reviewUsdSubtext(estimatedFeeSats, btcPrice, privacyMode),
                     )
                 }
                 Spacer(modifier = Modifier.height(12.dp))
@@ -2001,8 +2046,8 @@ private fun SendConfirmationDialog(
                             color = MaterialTheme.colorScheme.onBackground,
                         )
                     }
-                    Text(
-                        text =
+                    SendReviewValueColumn(
+                        primaryText =
                             if (privacyMode) {
                                 HIDDEN_AMOUNT
                             } else {
@@ -2011,9 +2056,14 @@ private fun SendConfirmationDialog(
                                     useSats,
                                 )} ${if (useSats) "sats" else "BTC"}"
                             },
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
                         color = AccentRed,
+                        subtext =
+                            reviewUsdSubtext(
+                                if (isSelfTransfer) estimatedFeeSats else totalSats,
+                                btcPrice,
+                                privacyMode,
+                            ),
+                        emphasize = true,
                     )
                 }
 
@@ -2022,7 +2072,7 @@ private fun SendConfirmationDialog(
                     Spacer(modifier = Modifier.height(12.dp))
                     Text(
                         text = "Spending from ${selectedUtxos.size} selected UTXO${if (selectedUtxos.size > 1) "s" else ""}",
-                        style = MaterialTheme.typography.bodySmall,
+                        style = MaterialTheme.typography.bodyMedium,
                         color = TextSecondary,
                     )
                 }
@@ -2071,7 +2121,7 @@ private fun SendConfirmationDialog(
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
                         text = sendStatus,
-                        style = MaterialTheme.typography.bodySmall,
+                        style = MaterialTheme.typography.bodyMedium,
                         color = TextSecondary,
                         textAlign = TextAlign.Center,
                         modifier = Modifier.fillMaxWidth(),
@@ -2081,15 +2131,14 @@ private fun SendConfirmationDialog(
                 Spacer(modifier = Modifier.height(12.dp))
 
                 // Cancel button
-                TextButton(
+                IbisButton(
                     onClick = onDismiss,
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp),
                     enabled = !isSending,
                 ) {
-                    Text(
-                        text = "Cancel",
-                        color = if (isSending) TextSecondary.copy(alpha = 0.3f) else TextSecondary,
-                    )
+                    Text("Cancel", style = MaterialTheme.typography.titleMedium)
                 }
             }
         }
@@ -2098,35 +2147,51 @@ private fun SendConfirmationDialog(
 
 private const val HIDDEN_AMOUNT = "****"
 
-private fun formatBtc(sats: ULong): String {
-    val btc = sats.toDouble() / 100_000_000.0
-    return String.format(Locale.US, "%.8f", btc)
-}
-
-private fun formatSats(sats: ULong): String {
-    return java.text.NumberFormat.getNumberInstance(Locale.US).format(sats.toLong())
-}
-
-private fun formatAmount(
-    sats: ULong,
-    useSats: Boolean,
-): String {
-    return if (useSats) {
-        formatSats(sats)
-    } else {
-        formatBtc(sats)
+@Composable
+private fun SendReviewValueColumn(
+    primaryText: String,
+    color: Color,
+    subtext: String? = null,
+    emphasize: Boolean = false,
+) {
+    Column(horizontalAlignment = Alignment.End) {
+        Text(
+            text = primaryText,
+            style = if (emphasize) MaterialTheme.typography.titleLarge else MaterialTheme.typography.titleMedium,
+            fontWeight = if (emphasize) FontWeight.Bold else FontWeight.Medium,
+            color = color,
+        )
+        subtext?.let {
+            Text(
+                text = it,
+                style = MaterialTheme.typography.bodyLarge,
+                color = TextSecondary.copy(alpha = 0.7f),
+                textAlign = TextAlign.End,
+            )
+        }
     }
 }
 
-private fun formatUsd(amount: Double): String {
-    val format = java.text.NumberFormat.getCurrencyInstance(Locale.US)
-    return format.format(amount)
+private fun reviewUsdSubtext(
+    sats: Long,
+    btcPrice: Double?,
+    privacyMode: Boolean,
+): String? {
+    if (privacyMode || btcPrice == null || btcPrice <= 0.0) {
+        return null
+    }
+    return formatUsd((sats.toDouble() / 100_000_000.0) * btcPrice)
 }
 
-private fun formatVBytes(vBytes: Double): String {
-    // Show up to 2 decimal places, trim trailing zeros: 256.75, 140.5, 154
-    val formatted = String.format(Locale.US, "%.2f", vBytes)
-    return formatted.trimEnd('0').trimEnd('.')
+private fun abbreviateReviewAddress(
+    address: String,
+    leading: Int = 8,
+    trailing: Int = 8,
+): String {
+    if (address.length <= leading + trailing + 3) {
+        return address
+    }
+    return address.take(leading) + "..." + address.takeLast(trailing)
 }
 
 /**
@@ -2205,10 +2270,6 @@ private fun validateBitcoinAddress(address: String): String? {
         trimmed.lowercase().startsWith("bc1q") -> validateBech32Address(trimmed, false)
         // Taproot (starts with bc1p)
         trimmed.lowercase().startsWith("bc1p") -> validateBech32Address(trimmed, true)
-        // Testnet addresses
-        trimmed.startsWith("m") || trimmed.startsWith("n") -> validateBase58CheckAddress(trimmed)
-        trimmed.startsWith("2") -> validateBase58CheckAddress(trimmed)
-        trimmed.lowercase().startsWith("tb1") -> validateBech32Address(trimmed, trimmed.lowercase().startsWith("tb1p"))
         // Unknown format
         else -> "Invalid address format"
     }
@@ -2718,6 +2779,7 @@ private fun MultiRecipientConfirmationDialog(
     recipients: List<Recipient>,
     feeRate: Double,
     useSats: Boolean,
+    btcPrice: Double? = null,
     selectedUtxos: List<UtxoInfo>?,
     privacyMode: Boolean = false,
     isWatchOnly: Boolean = false,
@@ -2731,6 +2793,7 @@ private fun MultiRecipientConfirmationDialog(
     val feeSats = dryRunResult?.feeSats ?: 0L
     val estimatedVBytes = dryRunResult?.txVBytes ?: 0.0
     val changeSats = dryRunResult?.changeSats ?: 0L
+    val changeAddress = dryRunResult?.changeAddress
     val hasChange = dryRunResult?.hasChange ?: false
     val totalRecipientSats = recipients.sumOf { it.amountSats.toLong() }
     val totalSats = totalRecipientSats + feeSats
@@ -2765,7 +2828,7 @@ private fun MultiRecipientConfirmationDialog(
                 // Sending To
                 Text(
                     text = "Sending To (${recipients.size} recipients)",
-                    style = MaterialTheme.typography.labelMedium,
+                    style = MaterialTheme.typography.bodyLarge,
                     color = TextSecondary,
                 )
                 Spacer(modifier = Modifier.height(4.dp))
@@ -2796,7 +2859,7 @@ private fun MultiRecipientConfirmationDialog(
                     Spacer(modifier = Modifier.height(12.dp))
                     Text(
                         text = "Label",
-                        style = MaterialTheme.typography.labelMedium,
+                        style = MaterialTheme.typography.bodyLarge,
                         color = TextSecondary,
                     )
                     Spacer(modifier = Modifier.height(4.dp))
@@ -2829,18 +2892,18 @@ private fun MultiRecipientConfirmationDialog(
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
                                 text = "Sending:",
-                                style = MaterialTheme.typography.bodyMedium,
+                                style = MaterialTheme.typography.bodyLarge,
                                 color = TextSecondary,
                             )
                             Text(
                                 text = r.address.take(8) + "..." + r.address.takeLast(8),
-                                style = MaterialTheme.typography.bodySmall,
+                                style = MaterialTheme.typography.bodyMedium,
                                 fontFamily = FontFamily.Monospace,
                                 color = TextSecondary.copy(alpha = 0.7f),
                             )
                         }
-                        Text(
-                            text =
+                        SendReviewValueColumn(
+                            primaryText =
                                 if (privacyMode) {
                                     HIDDEN_AMOUNT
                                 } else {
@@ -2849,9 +2912,8 @@ private fun MultiRecipientConfirmationDialog(
                                         useSats,
                                     )} ${if (useSats) "sats" else "BTC"}"
                                 },
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.Medium,
                             color = AccentRed,
+                            subtext = reviewUsdSubtext(r.amountSats.toLong(), btcPrice, privacyMode),
                         )
                     }
                     Spacer(modifier = Modifier.height(12.dp))
@@ -2866,17 +2928,18 @@ private fun MultiRecipientConfirmationDialog(
                         Column {
                             Text(
                                 text = "Change:",
-                                style = MaterialTheme.typography.bodyMedium,
+                                style = MaterialTheme.typography.bodyLarge,
                                 color = TextSecondary,
                             )
                             Text(
-                                text = "Returned to your wallet",
-                                style = MaterialTheme.typography.bodySmall,
+                                text = changeAddress?.let(::abbreviateReviewAddress) ?: "Wallet change",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontFamily = FontFamily.Monospace,
                                 color = TextSecondary.copy(alpha = 0.7f),
                             )
                         }
-                        Text(
-                            text =
+                        SendReviewValueColumn(
+                            primaryText =
                                 if (privacyMode) {
                                     HIDDEN_AMOUNT
                                 } else {
@@ -2885,9 +2948,8 @@ private fun MultiRecipientConfirmationDialog(
                                         useSats,
                                     )} ${if (useSats) "sats" else "BTC"}"
                                 },
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.Medium,
                             color = SuccessGreen,
+                            subtext = reviewUsdSubtext(changeSats, btcPrice, privacyMode),
                         )
                     }
                     Spacer(modifier = Modifier.height(12.dp))
@@ -2900,7 +2962,7 @@ private fun MultiRecipientConfirmationDialog(
                 ) {
                     Column {
                         Text(
-                            text = "Network Fee:",
+                            text = "Bitcoin Miner Fee:",
                             style = MaterialTheme.typography.bodyMedium,
                             color = TextSecondary,
                         )
@@ -2910,8 +2972,8 @@ private fun MultiRecipientConfirmationDialog(
                             color = TextSecondary.copy(alpha = 0.7f),
                         )
                     }
-                    Text(
-                        text =
+                    SendReviewValueColumn(
+                        primaryText =
                             if (privacyMode) {
                                 HIDDEN_AMOUNT
                             } else {
@@ -2920,9 +2982,8 @@ private fun MultiRecipientConfirmationDialog(
                                     useSats,
                                 )} ${if (useSats) "sats" else "BTC"}"
                             },
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.Medium,
                         color = BitcoinOrange,
+                        subtext = reviewUsdSubtext(feeSats, btcPrice, privacyMode),
                     )
                 }
 
@@ -2950,8 +3011,8 @@ private fun MultiRecipientConfirmationDialog(
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onBackground,
                     )
-                    Text(
-                        text =
+                    SendReviewValueColumn(
+                        primaryText =
                             if (privacyMode) {
                                 HIDDEN_AMOUNT
                             } else {
@@ -2960,9 +3021,9 @@ private fun MultiRecipientConfirmationDialog(
                                     useSats,
                                 )} ${if (useSats) "sats" else "BTC"}"
                             },
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
                         color = AccentRed,
+                        subtext = reviewUsdSubtext(totalSats, btcPrice, privacyMode),
+                        emphasize = true,
                     )
                 }
 
@@ -3030,15 +3091,14 @@ private fun MultiRecipientConfirmationDialog(
                 Spacer(modifier = Modifier.height(12.dp))
 
                 // Cancel button
-                TextButton(
+                IbisButton(
                     onClick = onDismiss,
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp),
                     enabled = !isSending,
                 ) {
-                    Text(
-                        text = "Cancel",
-                        color = if (isSending) TextSecondary.copy(alpha = 0.3f) else TextSecondary,
-                    )
+                    Text("Cancel", style = MaterialTheme.typography.titleMedium)
                 }
             }
         }

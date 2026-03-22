@@ -13,11 +13,13 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.AttachMoney
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CurrencyBitcoin
 import androidx.compose.material.icons.filled.Language
+import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.SwapHoriz
@@ -43,9 +45,13 @@ fun SettingsScreen(
     onDenominationChange: (String) -> Unit = {},
     spendUnconfirmed: Boolean = true,
     onSpendUnconfirmedChange: (Boolean) -> Unit = {},
+    walletNotificationsEnabled: Boolean = false,
+    onWalletNotificationsEnabledChange: (Boolean) -> Unit = {},
     nfcEnabled: Boolean = true,
     onNfcEnabledChange: (Boolean) -> Unit = {},
     hasNfcHardware: Boolean = false,
+    isSystemNfcEnabled: Boolean = false,
+    supportsNfcBroadcast: Boolean = false,
     currentFeeSource: String = SecureStorage.FEE_SOURCE_OFF,
     onFeeSourceChange: (String) -> Unit = {},
     customFeeSourceUrl: String = "",
@@ -56,7 +62,11 @@ fun SettingsScreen(
     onMempoolServerChange: (String) -> Unit = {},
     customMempoolUrl: String = "",
     onCustomMempoolUrlSave: (String) -> Unit = {},
+    currentSwipeMode: String = SecureStorage.SWIPE_MODE_DISABLED,
+    onSwipeModeChange: (String) -> Unit = {},
+    isLiquidAvailable: Boolean = false,
     torStatus: TorStatus = TorStatus.DISCONNECTED,
+    onOpenBitcoinElectrum: () -> Unit = {},
     onBack: () -> Unit = {},
 ) {
     Column(
@@ -140,18 +150,14 @@ fun SettingsScreen(
                             modifier = Modifier.size(24.dp),
                         )
                         Spacer(modifier = Modifier.width(12.dp))
-                        Column {
-                            Text(
-                                text = if (isSats) "Sats" else "BTC",
-                                style = MaterialTheme.typography.titleMedium,
-                                color = MaterialTheme.colorScheme.onBackground,
-                            )
-                            Text(
-                                text = if (isSats) "Amounts shown in satoshis" else "Amounts shown in bitcoin",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = TextSecondary,
-                            )
-                        }
+                        ToggleOptionText(
+                            title = if (isSats) "Sats" else "BTC",
+                            subtitle = if (isSats) {
+                                "Wallet amounts shown in satoshis"
+                            } else {
+                                "Wallet amounts shown in bitcoin"
+                            },
+                        )
                     }
                     SquareToggle(
                         checked = isSats,
@@ -170,6 +176,31 @@ fun SettingsScreen(
                         uncheckedThumbColor = TextSecondary,
                     )
                 }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.SwapHoriz,
+                        contentDescription = null,
+                        tint = BitcoinOrange,
+                        modifier = Modifier.size(20.dp),
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Swipe Navigation",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = TextSecondary,
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(4.dp))
+
+                SwipeModeDropdown(
+                    currentMode = currentSwipeMode,
+                    onModeSelected = onSwipeModeChange,
+                    isLiquidAvailable = isLiquidAvailable,
+                )
             }
         }
 
@@ -195,6 +226,14 @@ fun SettingsScreen(
 
                 Spacer(modifier = Modifier.height(12.dp))
 
+                val nfcSubtitle =
+                    when {
+                        !hasNfcHardware -> "Not available on this device"
+                        !isSystemNfcEnabled -> "Turn on NFC in Android settings"
+                        !supportsNfcBroadcast -> "Enable NFC reading (broadcast unsupported)"
+                        else -> "Enable NFC reading and broadcast"
+                    }
+
                 Row(
                     modifier =
                         Modifier
@@ -215,22 +254,47 @@ fun SettingsScreen(
                             modifier = Modifier.size(24.dp),
                         )
                         Spacer(modifier = Modifier.width(12.dp))
-                        Column {
-                            Text(
-                                text = "Spend Unconfirmed",
-                                style = MaterialTheme.typography.titleMedium,
-                                color = MaterialTheme.colorScheme.onBackground,
-                            )
-                            Text(
-                                text = "Allow spending unconfirmed UTXOs",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = TextSecondary,
-                            )
-                        }
+                        ToggleOptionText(
+                            title = "Spend Unconfirmed",
+                            subtitle = "Allow spending unconfirmed UTXOs",
+                        )
                     }
                     SquareToggle(
                         checked = spendUnconfirmed,
                         onCheckedChange = onSpendUnconfirmedChange,
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Row(
+                    modifier =
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable { onWalletNotificationsEnabledChange(!walletNotificationsEnabled) },
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Notifications,
+                            contentDescription = null,
+                            tint = BitcoinOrange,
+                            modifier = Modifier.size(24.dp),
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        ToggleOptionText(
+                            title = "Push Notifications",
+                            subtitle = "Notifications for wallet activity",
+                        )
+                    }
+                    SquareToggle(
+                        checked = walletNotificationsEnabled,
+                        onCheckedChange = onWalletNotificationsEnabledChange,
                     )
                 }
 
@@ -262,26 +326,16 @@ fun SettingsScreen(
                             modifier = Modifier.size(24.dp),
                         )
                         Spacer(modifier = Modifier.width(12.dp))
-                        Column {
-                            Text(
-                                text = "NFC",
-                                style = MaterialTheme.typography.titleMedium,
-                                color = if (hasNfcHardware) {
-                                    MaterialTheme.colorScheme.onBackground
-                                } else {
-                                    TextSecondary.copy(alpha = 0.4f)
-                                },
-                            )
-                            Text(
-                                text = if (hasNfcHardware) {
-                                    "Enable NFC functionality"
-                                } else {
-                                    "Not available on this device"
-                                },
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = if (hasNfcHardware) TextSecondary else TextSecondary.copy(alpha = 0.4f),
-                            )
-                        }
+                        ToggleOptionText(
+                            title = "NFC",
+                            subtitle = nfcSubtitle,
+                            titleColor = if (hasNfcHardware) {
+                                MaterialTheme.colorScheme.onBackground
+                            } else {
+                                TextSecondary.copy(alpha = 0.4f)
+                            },
+                            subtitleColor = if (hasNfcHardware) TextSecondary else TextSecondary.copy(alpha = 0.4f),
+                        )
                     }
                     SquareToggle(
                         checked = if (hasNfcHardware) nfcEnabled else false,
@@ -313,199 +367,560 @@ fun SettingsScreen(
 
                 Spacer(modifier = Modifier.height(12.dp))
 
-                // Fee Rate Source
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = Icons.Default.Speed,
-                        contentDescription = null,
-                        tint = BitcoinOrange,
-                        modifier = Modifier.size(20.dp),
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "Fee Rate Source",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = TextSecondary,
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(4.dp))
-
-                FeeSourceDropdown(
-                    currentSource = currentFeeSource,
-                    onSourceSelected = onFeeSourceChange,
+            // Fee Rate Source
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Default.Speed,
+                    contentDescription = null,
+                    tint = BitcoinOrange,
+                    modifier = Modifier.size(20.dp),
                 )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "Fee Rate Source",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = TextSecondary,
+                )
+            }
 
-                // Tor status indicator (shown when onion option is selected)
-                if (currentFeeSource == SecureStorage.FEE_SOURCE_MEMPOOL_ONION) {
-                    TorStatusIndicator(
-                        torStatus = torStatus,
-                        modifier = Modifier.padding(start = 24.dp, top = 4.dp),
-                    )
+            Spacer(modifier = Modifier.height(4.dp))
+
+            FeeSourceDropdown(
+                currentSource = currentFeeSource,
+                onSourceSelected = onFeeSourceChange,
+            )
+
+            if (currentFeeSource == SecureStorage.FEE_SOURCE_MEMPOOL_ONION) {
+                TorStatusIndicator(
+                    torStatus = torStatus,
+                    modifier = Modifier.padding(start = 24.dp, top = 4.dp),
+                )
+            }
+
+            if (currentFeeSource == SecureStorage.FEE_SOURCE_CUSTOM) {
+                Spacer(modifier = Modifier.height(6.dp))
+
+                var feeUrlDraft by remember(customFeeSourceUrl) {
+                    mutableStateOf(customFeeSourceUrl)
+                }
+                var feeUrlError by remember { mutableStateOf<String?>(null) }
+                var feeUrlSaved by remember { mutableStateOf<String?>(null) }
+
+                LaunchedEffect(feeUrlSaved) {
+                    if (feeUrlSaved != null) {
+                        delay(3000)
+                        feeUrlSaved = null
+                    }
                 }
 
-                // Custom fee server URL field (shown only when Custom is selected)
-                if (currentFeeSource == SecureStorage.FEE_SOURCE_CUSTOM) {
-                    Spacer(modifier = Modifier.height(6.dp))
-
-                    var feeUrlDraft by remember(customFeeSourceUrl) {
-                        mutableStateOf(customFeeSourceUrl)
+                val isOnionUrl =
+                    try {
+                        java.net.URI(feeUrlDraft).host?.endsWith(".onion") == true
+                    } catch (_: Exception) {
+                        feeUrlDraft.endsWith(".onion")
                     }
-                    var feeUrlError by remember { mutableStateOf<String?>(null) }
-                    var feeUrlSaved by remember { mutableStateOf<String?>(null) }
+                val torStatusColor =
+                    when (torStatus) {
+                        TorStatus.CONNECTED -> SuccessGreen
+                        TorStatus.CONNECTING, TorStatus.STARTING -> SuccessGreen.copy(alpha = 0.6f)
+                        TorStatus.ERROR -> ErrorRed
+                        TorStatus.DISCONNECTED -> TextSecondary
+                    }
+                val torStatusText =
+                    when (torStatus) {
+                        TorStatus.CONNECTED -> "Tor connected"
+                        TorStatus.CONNECTING -> "Tor connecting..."
+                        TorStatus.STARTING -> "Tor starting..."
+                        TorStatus.ERROR -> "Tor error"
+                        TorStatus.DISCONNECTED -> "Tor will start automatically"
+                    }
 
-                    LaunchedEffect(feeUrlSaved) {
-                        if (feeUrlSaved != null) {
-                            delay(3000)
+                CompactTextFieldWithSave(
+                    value = feeUrlDraft,
+                    onValueChange = {
+                        feeUrlDraft = it
+                        feeUrlError = null
+                        feeUrlSaved = null
+                    },
+                    onSave = {
+                        val error = validateServerUrl(feeUrlDraft)
+                        if (error != null) {
+                            feeUrlError = error
                             feeUrlSaved = null
-                        }
-                    }
-
-                    val isOnionUrl =
-                        try {
-                            java.net.URI(feeUrlDraft).host?.endsWith(".onion") == true
-                        } catch (_: Exception) {
-                            feeUrlDraft.endsWith(".onion")
-                        }
-                    val torStatusColor =
-                        when (torStatus) {
-                            TorStatus.CONNECTED -> SuccessGreen
-                            TorStatus.CONNECTING, TorStatus.STARTING -> SuccessGreen.copy(alpha = 0.6f)
-                            TorStatus.ERROR -> ErrorRed
-                            TorStatus.DISCONNECTED -> TextSecondary
-                        }
-                    val torStatusText =
-                        when (torStatus) {
-                            TorStatus.CONNECTED -> "Tor connected"
-                            TorStatus.CONNECTING -> "Tor connecting..."
-                            TorStatus.STARTING -> "Tor starting..."
-                            TorStatus.ERROR -> "Tor error"
-                            TorStatus.DISCONNECTED -> "Tor will start automatically"
-                        }
-
-                    CompactTextFieldWithSave(
-                        value = feeUrlDraft,
-                        onValueChange = {
-                            feeUrlDraft = it
+                        } else {
                             feeUrlError = null
-                            feeUrlSaved = null
-                        },
-                        onSave = {
-                            val error = validateServerUrl(feeUrlDraft)
-                            if (error != null) {
-                                feeUrlError = error
-                                feeUrlSaved = null
-                            } else {
-                                feeUrlError = null
-                                onCustomFeeSourceUrlSave(feeUrlDraft)
-                                feeUrlSaved = "Server saved"
-                            }
-                        },
-                        placeholder = "http://192.168... or http://...onion",
-                        errorMessage = feeUrlError,
-                        successMessage = feeUrlSaved,
-                        torStatusText = if (isOnionUrl) torStatusText else null,
-                        torStatusColor = if (isOnionUrl) torStatusColor else null,
-                        modifier = Modifier.padding(start = 24.dp),
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                // Block Explorer
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = Icons.Default.Language,
-                        contentDescription = null,
-                        tint = BitcoinOrange,
-                        modifier = Modifier.size(20.dp),
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "Block Explorer",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = TextSecondary,
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(4.dp))
-
-                MempoolServerDropdown(
-                    currentServer = currentMempoolServer,
-                    onServerSelected = onMempoolServerChange,
+                            onCustomFeeSourceUrlSave(feeUrlDraft)
+                            feeUrlSaved = "Server saved"
+                        }
+                    },
+                    placeholder = "http://192.168... or http://...onion",
+                    errorMessage = feeUrlError,
+                    successMessage = feeUrlSaved,
+                    torStatusText = if (isOnionUrl) torStatusText else null,
+                    torStatusColor = if (isOnionUrl) torStatusColor else null,
+                    modifier = Modifier.padding(start = 24.dp),
                 )
+            }
 
-                // Custom URL input field (shown only when Custom Server is selected)
-                if (currentMempoolServer == SecureStorage.MEMPOOL_CUSTOM) {
-                    Spacer(modifier = Modifier.height(6.dp))
+            Spacer(modifier = Modifier.height(8.dp))
 
-                    var mempoolUrlDraft by remember(customMempoolUrl) {
-                        mutableStateOf(customMempoolUrl)
-                    }
-                    var mempoolUrlError by remember { mutableStateOf<String?>(null) }
-                    var mempoolUrlSaved by remember { mutableStateOf<String?>(null) }
+            // Block Explorer
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Default.Language,
+                    contentDescription = null,
+                    tint = BitcoinOrange,
+                    modifier = Modifier.size(20.dp),
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "Block Explorer",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = TextSecondary,
+                )
+            }
 
-                    CompactTextFieldWithSave(
-                        value = mempoolUrlDraft,
-                        onValueChange = {
-                            mempoolUrlDraft = it
-                            mempoolUrlError = null
+            Spacer(modifier = Modifier.height(4.dp))
+
+            MempoolServerDropdown(
+                currentServer = currentMempoolServer,
+                onServerSelected = onMempoolServerChange,
+            )
+
+            if (currentMempoolServer == SecureStorage.MEMPOOL_CUSTOM) {
+                Spacer(modifier = Modifier.height(6.dp))
+
+                var mempoolUrlDraft by remember(customMempoolUrl) {
+                    mutableStateOf(customMempoolUrl)
+                }
+                var mempoolUrlError by remember { mutableStateOf<String?>(null) }
+                var mempoolUrlSaved by remember { mutableStateOf<String?>(null) }
+
+                CompactTextFieldWithSave(
+                    value = mempoolUrlDraft,
+                    onValueChange = {
+                        mempoolUrlDraft = it
+                        mempoolUrlError = null
+                        mempoolUrlSaved = null
+                    },
+                    onSave = {
+                        val error = validateServerUrl(mempoolUrlDraft)
+                        if (error != null) {
+                            mempoolUrlError = error
                             mempoolUrlSaved = null
-                        },
-                        onSave = {
-                            val error = validateServerUrl(mempoolUrlDraft)
-                            if (error != null) {
-                                mempoolUrlError = error
-                                mempoolUrlSaved = null
-                            } else {
-                                mempoolUrlError = null
-                                onCustomMempoolUrlSave(mempoolUrlDraft)
-                                mempoolUrlSaved = "Server saved"
-                            }
-                        },
-                        placeholder = "http://192.168... or http://...onion",
-                        errorMessage = mempoolUrlError,
-                        successMessage = mempoolUrlSaved,
-                        modifier = Modifier.padding(start = 24.dp),
-                    )
-                }
+                        } else {
+                            mempoolUrlError = null
+                            onCustomMempoolUrlSave(mempoolUrlDraft)
+                            mempoolUrlSaved = "Server saved"
+                        }
+                    },
+                    placeholder = "http://192.168... or http://...onion",
+                    errorMessage = mempoolUrlError,
+                    successMessage = mempoolUrlSaved,
+                    modifier = Modifier.padding(start = 24.dp),
+                )
+            }
 
-                Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(8.dp))
 
-                // BTC/USD Price Source
-                Row(verticalAlignment = Alignment.CenterVertically) {
+            // BTC/USD Price Source
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Default.AttachMoney,
+                    contentDescription = null,
+                    tint = BitcoinOrange,
+                    modifier = Modifier.size(20.dp),
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "USD Price Source",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = TextSecondary,
+                )
+            }
+
+            Spacer(modifier = Modifier.height(4.dp))
+
+            PriceSourceDropdown(
+                currentSource = currentPriceSource,
+                onSourceSelected = onPriceSourceChange,
+            )
+
+            if (currentPriceSource == SecureStorage.PRICE_SOURCE_MEMPOOL_ONION) {
+                TorStatusIndicator(
+                    torStatus = torStatus,
+                    modifier = Modifier.padding(start = 24.dp, top = 4.dp),
+                )
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            HorizontalDivider(color = BorderColor.copy(alpha = 0.7f))
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 40.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "Bitcoin Electrum Server",
+                    style = TextStyle(fontSize = 15.sp),
+                    color = TextPrimary,
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(start = 8.dp),
+                )
+                Box(
+                    modifier = Modifier
+                        .size(36.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable(onClick = onOpenBitcoinElectrum),
+                    contentAlignment = Alignment.Center,
+                ) {
                     Icon(
-                        imageVector = Icons.Default.AttachMoney,
-                        contentDescription = null,
+                        imageVector = Icons.AutoMirrored.Filled.OpenInNew,
+                        contentDescription = "Open Bitcoin Electrum settings",
                         tint = BitcoinOrange,
                         modifier = Modifier.size(20.dp),
                     )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "USD Price Source",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = TextSecondary,
-                    )
                 }
+            }
 
-                Spacer(modifier = Modifier.height(4.dp))
-
-                PriceSourceDropdown(
-                    currentSource = currentPriceSource,
-                    onSourceSelected = onPriceSourceChange,
-                )
-
-                // Tor status indicator (shown when onion option is selected)
-                if (currentPriceSource == SecureStorage.PRICE_SOURCE_MEMPOOL_ONION) {
-                    TorStatusIndicator(
-                        torStatus = torStatus,
-                        modifier = Modifier.padding(start = 24.dp, top = 4.dp),
-                    )
-                }
             }
         }
 
         Spacer(modifier = Modifier.height(32.dp))
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun Layer2OptionsScreen(
+    layer2Enabled: Boolean = false,
+    onLayer2EnabledChange: (Boolean) -> Unit = {},
+    currentBoltzApiSource: String = SecureStorage.BOLTZ_API_DISABLED,
+    onBoltzApiSourceChange: (String) -> Unit = {},
+    currentSideSwapApiSource: String = SecureStorage.SIDESWAP_API_DISABLED,
+    onSideSwapApiSourceChange: (String) -> Unit = {},
+    currentLiquidExplorer: String = SecureStorage.LIQUID_EXPLORER_DISABLED,
+    onLiquidExplorerChange: (String) -> Unit = {},
+    customLiquidExplorerUrl: String = "",
+    onCustomLiquidExplorerUrlSave: (String) -> Unit = {},
+    layer2TorStatus: TorStatus = TorStatus.DISCONNECTED,
+    onOpenLiquidElectrum: () -> Unit = {},
+    onBack: () -> Unit = {},
+) {
+    Column(
+        modifier =
+            Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Row(
+            modifier =
+                Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            IconButton(onClick = onBack) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "Back",
+                )
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = "Layer 2",
+                style = MaterialTheme.typography.titleLarge,
+                color = MaterialTheme.colorScheme.onBackground,
+            )
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        Layer2OptionsCard(
+            layer2Enabled = layer2Enabled,
+            onLayer2EnabledChange = onLayer2EnabledChange,
+        )
+
+        if (layer2Enabled) {
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Layer2ExternalServicesCard(
+                currentBoltzApiSource = currentBoltzApiSource,
+                onBoltzApiSourceChange = onBoltzApiSourceChange,
+                currentSideSwapApiSource = currentSideSwapApiSource,
+                onSideSwapApiSourceChange = onSideSwapApiSourceChange,
+                currentLiquidExplorer = currentLiquidExplorer,
+                onLiquidExplorerChange = onLiquidExplorerChange,
+                customLiquidExplorerUrl = customLiquidExplorerUrl,
+                onCustomLiquidExplorerUrlSave = onCustomLiquidExplorerUrlSave,
+                layer2TorStatus = layer2TorStatus,
+                onOpenLiquidElectrum = onOpenLiquidElectrum,
+            )
+        }
+
+        Spacer(modifier = Modifier.height(32.dp))
+    }
+}
+
+@Composable
+private fun Layer2OptionsCard(
+    layer2Enabled: Boolean,
+    onLayer2EnabledChange: (Boolean) -> Unit,
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = DarkCard),
+    ) {
+        Column(
+            modifier =
+                Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+        ) {
+            Text(
+                text = "Layer 2 Options",
+                style = MaterialTheme.typography.titleMedium,
+                color = BitcoinOrange,
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                ToggleOptionText(
+                    title = "Liquid w/Lightning swaps",
+                    subtitle = "Trusted federation sidechain",
+                    titleColor = TextPrimary,
+                    modifier = Modifier.weight(1f),
+                )
+                SquareToggle(
+                    checked = layer2Enabled,
+                    onCheckedChange = onLayer2EnabledChange,
+                )
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                ToggleOptionText(
+                    title = "Ark w/Lightning swaps",
+                    subtitle = "Trustless L2 protocol (Coming soon)",
+                    titleColor = TextTertiary,
+                    subtitleColor = TextTertiary,
+                    modifier = Modifier.weight(1f),
+                )
+                SquareToggle(
+                    checked = false,
+                    onCheckedChange = { /* disabled */ },
+                    enabled = false,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun Layer2ExternalServicesCard(
+    currentBoltzApiSource: String,
+    onBoltzApiSourceChange: (String) -> Unit,
+    currentSideSwapApiSource: String,
+    onSideSwapApiSourceChange: (String) -> Unit,
+    currentLiquidExplorer: String,
+    onLiquidExplorerChange: (String) -> Unit,
+    customLiquidExplorerUrl: String,
+    onCustomLiquidExplorerUrlSave: (String) -> Unit,
+    layer2TorStatus: TorStatus,
+    onOpenLiquidElectrum: () -> Unit,
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = DarkCard),
+    ) {
+        Column(
+            modifier =
+                Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+        ) {
+            Text(
+                text = "External Services",
+                style = MaterialTheme.typography.titleMedium,
+                color = BitcoinOrange,
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Default.SwapHoriz,
+                    contentDescription = null,
+                    tint = BitcoinOrange,
+                    modifier = Modifier.size(20.dp),
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "Boltz API",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = TextSecondary,
+                )
+            }
+
+            Spacer(modifier = Modifier.height(4.dp))
+
+            BoltzApiSourceDropdown(
+                currentSource = currentBoltzApiSource,
+                onSourceSelected = onBoltzApiSourceChange,
+            )
+
+            if (currentBoltzApiSource == SecureStorage.BOLTZ_API_TOR) {
+                TorStatusIndicator(
+                    torStatus = layer2TorStatus,
+                    modifier = Modifier.padding(start = 24.dp, top = 4.dp),
+                )
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Default.SwapHoriz,
+                    contentDescription = null,
+                    tint = BitcoinOrange,
+                    modifier = Modifier.size(20.dp),
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "SideSwap API",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = TextSecondary,
+                )
+            }
+
+            Spacer(modifier = Modifier.height(4.dp))
+
+            SideSwapApiSourceDropdown(
+                currentSource = currentSideSwapApiSource,
+                onSourceSelected = onSideSwapApiSourceChange,
+            )
+
+            if (currentSideSwapApiSource == SecureStorage.SIDESWAP_API_TOR) {
+                TorStatusIndicator(
+                    torStatus = layer2TorStatus,
+                    modifier = Modifier.padding(start = 24.dp, top = 4.dp),
+                )
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Default.Language,
+                    contentDescription = null,
+                    tint = BitcoinOrange,
+                    modifier = Modifier.size(20.dp),
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "Block Explorer",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = TextSecondary,
+                )
+            }
+
+            Spacer(modifier = Modifier.height(4.dp))
+
+            LiquidExplorerDropdown(
+                currentExplorer = currentLiquidExplorer,
+                onExplorerSelected = onLiquidExplorerChange,
+            )
+
+            if (currentLiquidExplorer == SecureStorage.LIQUID_EXPLORER_CUSTOM) {
+                Spacer(modifier = Modifier.height(6.dp))
+
+                var liquidExplorerUrlDraft by remember(customLiquidExplorerUrl) {
+                    mutableStateOf(customLiquidExplorerUrl)
+                }
+                var liquidExplorerUrlError by remember { mutableStateOf<String?>(null) }
+                var liquidExplorerUrlSaved by remember { mutableStateOf<String?>(null) }
+
+                CompactTextFieldWithSave(
+                    value = liquidExplorerUrlDraft,
+                    onValueChange = {
+                        liquidExplorerUrlDraft = it
+                        liquidExplorerUrlError = null
+                        liquidExplorerUrlSaved = null
+                    },
+                    onSave = {
+                        val error = validateServerUrl(liquidExplorerUrlDraft)
+                        if (error != null) {
+                            liquidExplorerUrlError = error
+                            liquidExplorerUrlSaved = null
+                        } else {
+                            liquidExplorerUrlError = null
+                            onCustomLiquidExplorerUrlSave(liquidExplorerUrlDraft)
+                            liquidExplorerUrlSaved = "Server saved"
+                        }
+                    },
+                    placeholder = "http://192.168... or http://...onion",
+                    errorMessage = liquidExplorerUrlError,
+                    successMessage = liquidExplorerUrlSaved,
+                    modifier = Modifier.padding(start = 24.dp),
+                )
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            HorizontalDivider(color = BorderColor.copy(alpha = 0.7f))
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 40.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "Liquid Electrum Server",
+                    style = TextStyle(fontSize = 15.sp),
+                    color = TextPrimary,
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(start = 8.dp),
+                )
+                Box(
+                    modifier = Modifier
+                        .size(36.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable(onClick = onOpenLiquidElectrum),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.OpenInNew,
+                        contentDescription = "Open Liquid Electrum settings",
+                        tint = BitcoinOrange,
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -534,22 +949,22 @@ private fun MempoolServerDropdown(
             MempoolServerOption(
                 id = SecureStorage.MEMPOOL_DISABLED,
                 name = "Disabled",
-                description = "Don't show block explorer links",
+                description = "No Liquid explorer links",
             ),
             MempoolServerOption(
                 id = SecureStorage.MEMPOOL_SPACE,
                 name = "mempool.space",
-                description = "Clearnet server (HTTPS)",
+                description = "Clearnet",
             ),
             MempoolServerOption(
                 id = SecureStorage.MEMPOOL_ONION,
                 name = "mempool.space (Onion)",
-                description = "Onion address (requires Tor Browser)",
+                description = "Onion via Tor Browser",
             ),
             MempoolServerOption(
                 id = SecureStorage.MEMPOOL_CUSTOM,
                 name = "Custom Server",
-                description = "Configure custom mempool instance",
+                description = "Custom URL",
             ),
         )
 
@@ -562,7 +977,7 @@ private fun MempoolServerDropdown(
         CompactDropdownField(
             value = selectedOption.name,
             expanded = expanded,
-            modifier = Modifier.menuAnchor(MenuAnchorType.PrimaryNotEditable),
+            modifier = Modifier.menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable),
         )
 
         ExposedDropdownMenu(
@@ -576,23 +991,11 @@ private fun MempoolServerDropdown(
             serverOptions.forEach { option ->
                 DropdownMenuItem(
                     text = {
-                        Column {
-                            Text(
-                                text = option.name,
-                                style = MaterialTheme.typography.titleMedium,
-                                color =
-                                    if (option.id == currentServer) {
-                                        BitcoinOrange
-                                    } else {
-                                        MaterialTheme.colorScheme.onBackground
-                                    },
-                            )
-                            Text(
-                                text = option.description,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = TextSecondary,
-                            )
-                        }
+                        DropdownOptionText(
+                            title = option.name,
+                            subtitle = option.description,
+                            selected = option.id == currentServer,
+                        )
                     },
                     onClick = {
                         onServerSelected(option.id)
@@ -600,6 +1003,102 @@ private fun MempoolServerDropdown(
                     },
                     leadingIcon = {
                         if (option.id == currentServer) {
+                            Icon(
+                                imageVector = Icons.Default.Check,
+                                contentDescription = "Selected",
+                                tint = BitcoinOrange,
+                            )
+                        }
+                    },
+                )
+            }
+        }
+    }
+}
+
+private data class SwipeModeOption(
+    val id: String,
+    val name: String,
+    val description: String,
+)
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SwipeModeDropdown(
+    currentMode: String,
+    onModeSelected: (String) -> Unit,
+    isLiquidAvailable: Boolean,
+) {
+    var expanded by remember { mutableStateOf(false) }
+
+    val options = buildList {
+        add(
+            SwipeModeOption(
+                id = SecureStorage.SWIPE_MODE_DISABLED,
+                name = "Disabled",
+                description = "No swipe gestures",
+            ),
+        )
+        add(
+            SwipeModeOption(
+                id = SecureStorage.SWIPE_MODE_WALLETS,
+                name = "Wallets",
+                description = "Swipe between wallets",
+            ),
+        )
+        add(
+            SwipeModeOption(
+                id = SecureStorage.SWIPE_MODE_SEND_RECEIVE,
+                name = "Send / Receive",
+                description = "Swipe between balance, send, and receive",
+            ),
+        )
+        if (isLiquidAvailable) {
+            add(
+                SwipeModeOption(
+                    id = SecureStorage.SWIPE_MODE_LAYERS,
+                    name = "Layers",
+                    description = "Swipe between layer 1 and layer 2",
+                ),
+            )
+        }
+    }
+
+    val selectedOption = options.find { it.id == currentMode } ?: options.first()
+
+    ExposedDropdownMenuBox(
+        expanded = expanded,
+        onExpandedChange = { expanded = it },
+    ) {
+        CompactDropdownField(
+            value = selectedOption.name,
+            expanded = expanded,
+            modifier = Modifier.menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable),
+        )
+
+        ExposedDropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            modifier =
+                Modifier
+                    .exposedDropdownSize(true)
+                    .background(DarkSurface),
+        ) {
+            options.forEach { option ->
+                DropdownMenuItem(
+                    text = {
+                        DropdownOptionText(
+                            title = option.name,
+                            subtitle = option.description,
+                            selected = option.id == currentMode,
+                        )
+                    },
+                    onClick = {
+                        onModeSelected(option.id)
+                        expanded = false
+                    },
+                    leadingIcon = {
+                        if (option.id == currentMode) {
                             Icon(
                                 imageVector = Icons.Default.Check,
                                 contentDescription = "Selected",
@@ -638,27 +1137,27 @@ private fun FeeSourceDropdown(
             FeeSourceOption(
                 id = SecureStorage.FEE_SOURCE_OFF,
                 name = "Disabled",
-                description = "Manual fee entry only",
+                description = "No fee rate fetching",
             ),
             FeeSourceOption(
                 id = SecureStorage.FEE_SOURCE_MEMPOOL,
                 name = "mempool.space",
-                description = "Fetch from mempool.space",
+                description = "Clearnet",
             ),
             FeeSourceOption(
                 id = SecureStorage.FEE_SOURCE_MEMPOOL_ONION,
                 name = "mempool.space (Onion)",
-                description = "Fetch from mempool.space over Tor",
+                description = "Onion via Tor",
             ),
             FeeSourceOption(
                 id = SecureStorage.FEE_SOURCE_ELECTRUM,
                 name = "Electrum Server",
-                description = "Fetch from connected Electrum server",
+                description = "Connected server",
             ),
             FeeSourceOption(
                 id = SecureStorage.FEE_SOURCE_CUSTOM,
                 name = "Custom Server",
-                description = "Fetch from custom mempool instance",
+                description = "Custom URL",
             ),
         )
 
@@ -671,7 +1170,7 @@ private fun FeeSourceDropdown(
         CompactDropdownField(
             value = selectedOption.name,
             expanded = expanded,
-            modifier = Modifier.menuAnchor(MenuAnchorType.PrimaryNotEditable),
+            modifier = Modifier.menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable),
         )
 
         ExposedDropdownMenu(
@@ -685,23 +1184,11 @@ private fun FeeSourceDropdown(
             sourceOptions.forEach { option ->
                 DropdownMenuItem(
                     text = {
-                        Column {
-                            Text(
-                                text = option.name,
-                                style = MaterialTheme.typography.titleMedium,
-                                color =
-                                    if (option.id == currentSource) {
-                                        BitcoinOrange
-                                    } else {
-                                        MaterialTheme.colorScheme.onBackground
-                                    },
-                            )
-                            Text(
-                                text = option.description,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = TextSecondary,
-                            )
-                        }
+                        DropdownOptionText(
+                            title = option.name,
+                            subtitle = option.description,
+                            selected = option.id == currentSource,
+                        )
                     },
                     onClick = {
                         onSourceSelected(option.id)
@@ -747,22 +1234,22 @@ private fun PriceSourceDropdown(
             PriceSourceOption(
                 id = SecureStorage.PRICE_SOURCE_OFF,
                 name = "Disabled",
-                description = "Don't show USD values",
+                description = "No USD prices",
             ),
             PriceSourceOption(
                 id = SecureStorage.PRICE_SOURCE_MEMPOOL,
                 name = "mempool.space",
-                description = "Fetch from mempool.space",
+                description = "Clearnet",
             ),
             PriceSourceOption(
                 id = SecureStorage.PRICE_SOURCE_MEMPOOL_ONION,
                 name = "mempool.space (Onion)",
-                description = "Fetch from mempool.space over Tor",
+                description = "Onion via Tor",
             ),
             PriceSourceOption(
                 id = SecureStorage.PRICE_SOURCE_COINGECKO,
                 name = "CoinGecko",
-                description = "Fetch from CoinGecko",
+                description = "Clearnet",
             ),
         )
 
@@ -775,7 +1262,7 @@ private fun PriceSourceDropdown(
         CompactDropdownField(
             value = selectedOption.name,
             expanded = expanded,
-            modifier = Modifier.menuAnchor(MenuAnchorType.PrimaryNotEditable),
+            modifier = Modifier.menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable),
         )
 
         ExposedDropdownMenu(
@@ -789,23 +1276,11 @@ private fun PriceSourceDropdown(
             sourceOptions.forEach { option ->
                 DropdownMenuItem(
                     text = {
-                        Column {
-                            Text(
-                                text = option.name,
-                                style = MaterialTheme.typography.titleMedium,
-                                color =
-                                    if (option.id == currentSource) {
-                                        BitcoinOrange
-                                    } else {
-                                        MaterialTheme.colorScheme.onBackground
-                                    },
-                            )
-                            Text(
-                                text = option.description,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = TextSecondary,
-                            )
-                        }
+                        DropdownOptionText(
+                            title = option.name,
+                            subtitle = option.description,
+                            selected = option.id == currentSource,
+                        )
                     },
                     onClick = {
                         onSourceSelected(option.id)
@@ -813,6 +1288,238 @@ private fun PriceSourceDropdown(
                     },
                     leadingIcon = {
                         if (option.id == currentSource) {
+                            Icon(
+                                imageVector = Icons.Default.Check,
+                                contentDescription = "Selected",
+                                tint = BitcoinOrange,
+                            )
+                        }
+                    },
+                )
+            }
+        }
+    }
+}
+
+private data class Layer2ApiSourceOption(
+    val id: String,
+    val name: String,
+    val description: String,
+)
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun BoltzApiSourceDropdown(
+    currentSource: String,
+    onSourceSelected: (String) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val options =
+        listOf(
+            Layer2ApiSourceOption(
+                id = SecureStorage.BOLTZ_API_DISABLED,
+                name = "Disabled",
+                description = "No Boltz swaps or lightning functionality",
+            ),
+            Layer2ApiSourceOption(
+                id = SecureStorage.BOLTZ_API_CLEARNET,
+                name = "Boltz",
+                description = "Clearnet",
+            ),
+            Layer2ApiSourceOption(
+                id = SecureStorage.BOLTZ_API_TOR,
+                name = "Boltz (Onion)",
+                description = "Onion via Tor",
+            ),
+        )
+    val selectedOption = options.find { it.id == currentSource } ?: options.first()
+
+    ExposedDropdownMenuBox(
+        expanded = expanded,
+        onExpandedChange = { expanded = it },
+    ) {
+        CompactDropdownField(
+            value = selectedOption.name,
+            expanded = expanded,
+            modifier = Modifier.menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable),
+        )
+
+        ExposedDropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            modifier = Modifier.exposedDropdownSize(true).background(DarkSurface),
+        ) {
+            options.forEach { option ->
+                DropdownMenuItem(
+                    text = {
+                        DropdownOptionText(
+                            title = option.name,
+                            subtitle = option.description,
+                            selected = option.id == currentSource,
+                        )
+                    },
+                    onClick = {
+                        onSourceSelected(option.id)
+                        expanded = false
+                    },
+                    leadingIcon = {
+                        if (option.id == currentSource) {
+                            Icon(
+                                imageVector = Icons.Default.Check,
+                                contentDescription = "Selected",
+                                tint = BitcoinOrange,
+                            )
+                        }
+                    },
+                )
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SideSwapApiSourceDropdown(
+    currentSource: String,
+    onSourceSelected: (String) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val options =
+        listOf(
+            Layer2ApiSourceOption(
+                id = SecureStorage.SIDESWAP_API_DISABLED,
+                name = "Disabled",
+                description = "No SideSwap swaps",
+            ),
+            Layer2ApiSourceOption(
+                id = SecureStorage.SIDESWAP_API_CLEARNET,
+                name = "SideSwap",
+                description = "Clearnet",
+            ),
+            Layer2ApiSourceOption(
+                id = SecureStorage.SIDESWAP_API_TOR,
+                name = "SideSwap (Tor)",
+                description = "Clearnet via Tor",
+            ),
+        )
+    val selectedOption = options.find { it.id == currentSource } ?: options.first()
+
+    ExposedDropdownMenuBox(
+        expanded = expanded,
+        onExpandedChange = { expanded = it },
+    ) {
+        CompactDropdownField(
+            value = selectedOption.name,
+            expanded = expanded,
+            modifier = Modifier.menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable),
+        )
+
+        ExposedDropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            modifier = Modifier.exposedDropdownSize(true).background(DarkSurface),
+        ) {
+            options.forEach { option ->
+                DropdownMenuItem(
+                    text = {
+                        DropdownOptionText(
+                            title = option.name,
+                            subtitle = option.description,
+                            selected = option.id == currentSource,
+                        )
+                    },
+                    onClick = {
+                        onSourceSelected(option.id)
+                        expanded = false
+                    },
+                    leadingIcon = {
+                        if (option.id == currentSource) {
+                            Icon(
+                                imageVector = Icons.Default.Check,
+                                contentDescription = "Selected",
+                                tint = BitcoinOrange,
+                            )
+                        }
+                    },
+                )
+            }
+        }
+    }
+}
+
+private data class LiquidExplorerOption(
+    val id: String,
+    val name: String,
+    val description: String,
+)
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun LiquidExplorerDropdown(
+    currentExplorer: String,
+    onExplorerSelected: (String) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val options =
+        listOf(
+            LiquidExplorerOption(
+                id = SecureStorage.LIQUID_EXPLORER_DISABLED,
+                name = "Disabled",
+                description = "No block explorer links",
+            ),
+            LiquidExplorerOption(
+                id = SecureStorage.LIQUID_EXPLORER_LIQUID_NETWORK,
+                name = "liquid.network",
+                description = "Clearnet",
+            ),
+            LiquidExplorerOption(
+                id = SecureStorage.LIQUID_EXPLORER_LIQUID_NETWORK_ONION,
+                name = "liquid.network (Onion)",
+                description = "Onion via Tor Browser",
+            ),
+            LiquidExplorerOption(
+                id = SecureStorage.LIQUID_EXPLORER_BLOCKSTREAM,
+                name = "Blockstream",
+                description = "Clearnet",
+            ),
+            LiquidExplorerOption(
+                id = SecureStorage.LIQUID_EXPLORER_CUSTOM,
+                name = "Custom Server",
+                description = "Custom URL",
+            ),
+        )
+    val selectedOption = options.find { it.id == currentExplorer } ?: options.first()
+
+    ExposedDropdownMenuBox(
+        expanded = expanded,
+        onExpandedChange = { expanded = it },
+    ) {
+        CompactDropdownField(
+            value = selectedOption.name,
+            expanded = expanded,
+            modifier = Modifier.menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable),
+        )
+
+        ExposedDropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            modifier = Modifier.exposedDropdownSize(true).background(DarkSurface),
+        ) {
+            options.forEach { option ->
+                DropdownMenuItem(
+                    text = {
+                        DropdownOptionText(
+                            title = option.name,
+                            subtitle = option.description,
+                            selected = option.id == currentExplorer,
+                        )
+                    },
+                    onClick = {
+                        onExplorerSelected(option.id)
+                        expanded = false
+                    },
+                    leadingIcon = {
+                        if (option.id == currentExplorer) {
                             Icon(
                                 imageVector = Icons.Default.Check,
                                 contentDescription = "Selected",
@@ -845,7 +1552,7 @@ private fun CompactDropdownField(
     ) {
         Text(
             text = value,
-            style = TextStyle(fontSize = 14.sp),
+            style = TextStyle(fontSize = 14.5.sp),
             color = MaterialTheme.colorScheme.onBackground,
             modifier = Modifier.weight(1f),
         )
@@ -854,6 +1561,48 @@ private fun CompactDropdownField(
             contentDescription = null,
             tint = TextSecondary,
             modifier = Modifier.size(20.dp),
+        )
+    }
+}
+
+@Composable
+private fun DropdownOptionText(
+    title: String,
+    subtitle: String,
+    selected: Boolean,
+) {
+    Column {
+        Text(
+            text = title,
+            style = TextStyle(fontSize = 14.5.sp),
+            color = if (selected) BitcoinOrange else MaterialTheme.colorScheme.onBackground,
+        )
+        Text(
+            text = subtitle,
+            style = TextStyle(fontSize = 12.5.sp),
+            color = TextSecondary,
+        )
+    }
+}
+
+@Composable
+private fun ToggleOptionText(
+    title: String,
+    subtitle: String,
+    modifier: Modifier = Modifier,
+    titleColor: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.onBackground,
+    subtitleColor: androidx.compose.ui.graphics.Color = TextSecondary,
+) {
+    Column(modifier = modifier) {
+        Text(
+            text = title,
+            style = TextStyle(fontSize = 15.sp),
+            color = titleColor,
+        )
+        Text(
+            text = subtitle,
+            style = TextStyle(fontSize = 13.sp),
+            color = subtitleColor,
         )
     }
 }
@@ -1025,5 +1774,7 @@ private fun CompactTextFieldWithSave(
                 }
             }
         }
+
+        Spacer(modifier = Modifier.height(8.dp))
     }
 }

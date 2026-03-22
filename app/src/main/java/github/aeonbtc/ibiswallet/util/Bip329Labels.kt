@@ -3,6 +3,45 @@ package github.aeonbtc.ibiswallet.util
 import github.aeonbtc.ibiswallet.data.model.AddressType
 import org.json.JSONObject
 
+enum class Bip329LabelScope {
+    BITCOIN,
+    LIQUID,
+    BOTH,
+}
+
+enum class Bip329LabelNetwork(val wireValue: String) {
+    BITCOIN("bitcoin"),
+    LIQUID("liquid"), ;
+
+    companion object {
+        fun fromWireValue(value: String?): Bip329LabelNetwork? =
+            entries.firstOrNull { it.wireValue.equals(value, ignoreCase = true) }
+    }
+}
+
+data class Bip329LabelCounts(
+    val bitcoinAddressCount: Int = 0,
+    val bitcoinTransactionCount: Int = 0,
+    val liquidAddressCount: Int = 0,
+    val liquidTransactionCount: Int = 0,
+) {
+    fun addressCount(scope: Bip329LabelScope): Int =
+        when (scope) {
+            Bip329LabelScope.BITCOIN -> bitcoinAddressCount
+            Bip329LabelScope.LIQUID -> liquidAddressCount
+            Bip329LabelScope.BOTH -> bitcoinAddressCount + liquidAddressCount
+        }
+
+    fun transactionCount(scope: Bip329LabelScope): Int =
+        when (scope) {
+            Bip329LabelScope.BITCOIN -> bitcoinTransactionCount
+            Bip329LabelScope.LIQUID -> liquidTransactionCount
+            Bip329LabelScope.BOTH -> bitcoinTransactionCount + liquidTransactionCount
+        }
+
+    fun totalCount(scope: Bip329LabelScope): Int = addressCount(scope) + transactionCount(scope)
+}
+
 /**
  * BIP 329 Wallet Labels Export Format.
  * See https://github.com/bitcoin/bips/blob/master/bip-0329.mediawiki
@@ -15,15 +54,26 @@ import org.json.JSONObject
  * Ibis stores tx and addr labels; other types are parsed but only tx/addr are persisted.
  */
 object Bip329Labels {
+    data class ExportSection(
+        val addressLabels: Map<String, String>,
+        val transactionLabels: Map<String, String>,
+        val origin: String? = null,
+        val network: Bip329LabelNetwork? = null,
+    )
 
     /** BIP 329 record types */
-    enum class Type {
-        tx,
-        addr,
-        pubkey,
-        input,
-        output,
-        xpub,
+    enum class Type(val wireValue: String) {
+        TX("tx"),
+        ADDR("addr"),
+        PUBKEY("pubkey"),
+        INPUT("input"),
+        OUTPUT("output"),
+        XPUB("xpub"), ;
+
+        companion object {
+            fun fromWireValue(value: String?): Type? =
+                entries.firstOrNull { it.wireValue.equals(value, ignoreCase = true) }
+        }
     }
 
     /**
@@ -40,45 +90,61 @@ object Bip329Labels {
         val path = addressType.accountPath
         return when (addressType) {
             AddressType.LEGACY -> "pkh([$fp/$path])"
-            AddressType.NESTED_SEGWIT -> "sh(wpkh([$fp/$path]))"
             AddressType.SEGWIT -> "wpkh([$fp/$path])"
             AddressType.TAPROOT -> "tr([$fp/$path])"
         }
     }
 
-    /**
-     * Export address and transaction labels to BIP 329 JSONL format.
-     * Each line is a valid JSON object with type, ref, label, and optional origin.
-     */
     fun export(
         addressLabels: Map<String, String>,
         transactionLabels: Map<String, String>,
         origin: String? = null,
+        network: Bip329LabelNetwork? = null,
     ): String {
+        return export(
+            listOf(
+                ExportSection(
+                    addressLabels = addressLabels,
+                    transactionLabels = transactionLabels,
+                    origin = origin,
+                    network = network,
+                ),
+            ),
+        )
+    }
+
+    /**
+     * Export one or more label sections to BIP 329 JSONL format.
+     * When `network` is present it is emitted as an extra field for internal
+     * round-trip routing between Bitcoin and Liquid namespaces.
+     */
+    fun export(sections: List<ExportSection>): String {
         val lines = mutableListOf<String>()
 
-        // Transaction labels first (following Sparrow convention)
-        for ((txid, label) in transactionLabels) {
-            if (label.isBlank()) continue
-            val json = JSONObject().apply {
-                put("type", Type.tx.name)
-                put("ref", txid)
-                put("label", label)
-                if (origin != null) put("origin", origin)
+        for (section in sections) {
+            for ((txid, label) in section.transactionLabels) {
+                if (label.isBlank()) continue
+                val json = JSONObject().apply {
+                    put("type", Type.TX.wireValue)
+                    put("ref", txid)
+                    put("label", label)
+                    if (section.origin != null) put("origin", section.origin)
+                    if (section.network != null) put("network", section.network.wireValue)
+                }
+                lines.add(json.toString())
             }
-            lines.add(json.toString())
-        }
 
-        // Address labels
-        for ((address, label) in addressLabels) {
-            if (label.isBlank()) continue
-            val json = JSONObject().apply {
-                put("type", Type.addr.name)
-                put("ref", address)
-                put("label", label)
-                if (origin != null) put("origin", origin)
+            for ((address, label) in section.addressLabels) {
+                if (label.isBlank()) continue
+                val json = JSONObject().apply {
+                    put("type", Type.ADDR.wireValue)
+                    put("ref", address)
+                    put("label", label)
+                    if (section.origin != null) put("origin", section.origin)
+                    if (section.network != null) put("network", section.network.wireValue)
+                }
+                lines.add(json.toString())
             }
-            lines.add(json.toString())
         }
 
         return lines.joinToString("\n")
@@ -91,9 +157,14 @@ object Bip329Labels {
      * Merge semantics: imported labels overwrite existing labels for matching refs,
      * but do not delete labels not present in the import.
      */
-    fun import(content: String): ImportResult {
-        val addressLabels = mutableMapOf<String, String>()
-        val transactionLabels = mutableMapOf<String, String>()
+    fun import(
+        content: String,
+        defaultScope: Bip329LabelScope = Bip329LabelScope.BITCOIN,
+    ): ImportResult {
+        val bitcoinAddressLabels = mutableMapOf<String, String>()
+        val bitcoinTransactionLabels = mutableMapOf<String, String>()
+        val liquidAddressLabels = mutableMapOf<String, String>()
+        val liquidTransactionLabels = mutableMapOf<String, String>()
         val outputSpendable = mutableMapOf<String, Boolean>()
         var totalLines = 0
         var errorLines = 0
@@ -103,36 +174,44 @@ object Bip329Labels {
             if (trimmed.isEmpty()) continue
             totalLines++
 
-            // Try BIP 329 JSON first
             val parsed = parseBip329Line(trimmed)
             if (parsed != null) {
                 when (parsed.type) {
-                    Type.tx -> {
+                    Type.TX -> {
                         if (!parsed.label.isNullOrEmpty()) {
-                            transactionLabels[parsed.ref] = parsed.label
+                            when (resolveNetwork(parsed, defaultScope)) {
+                                Bip329LabelNetwork.BITCOIN -> bitcoinTransactionLabels[parsed.ref] = parsed.label
+                                Bip329LabelNetwork.LIQUID -> liquidTransactionLabels[parsed.ref] = parsed.label
+                            }
                         }
                     }
-                    Type.addr -> {
+
+                    Type.ADDR -> {
                         if (!parsed.label.isNullOrEmpty()) {
-                            addressLabels[parsed.ref] = parsed.label
+                            when (resolveNetwork(parsed, defaultScope)) {
+                                Bip329LabelNetwork.BITCOIN -> bitcoinAddressLabels[parsed.ref] = parsed.label
+                                Bip329LabelNetwork.LIQUID -> liquidAddressLabels[parsed.ref] = parsed.label
+                            }
                         }
                     }
-                    Type.output -> {
-                        // Handle spendable flag (frozen UTXOs)
-                        if (parsed.spendable != null) {
+
+                    Type.OUTPUT -> {
+                        if (parsed.spendable != null && resolveNetwork(parsed, defaultScope) != Bip329LabelNetwork.LIQUID) {
                             outputSpendable[parsed.ref] = parsed.spendable
                         }
                     }
-                    // pubkey, input, xpub — not stored in Ibis
-                    else -> { }
+
+                    else -> Unit
                 }
                 continue
             }
 
-            // Try Electrum CSV format: txid,label,...
             val csvResult = parseElectrumCsvLine(trimmed)
             if (csvResult != null) {
-                transactionLabels[csvResult.first] = csvResult.second
+                when (defaultNetwork(defaultScope)) {
+                    Bip329LabelNetwork.BITCOIN -> bitcoinTransactionLabels[csvResult.first] = csvResult.second
+                    Bip329LabelNetwork.LIQUID -> liquidTransactionLabels[csvResult.first] = csvResult.second
+                }
                 continue
             }
 
@@ -140,15 +219,15 @@ object Bip329Labels {
         }
 
         return ImportResult(
-            addressLabels = addressLabels,
-            transactionLabels = transactionLabels,
+            bitcoinAddressLabels = bitcoinAddressLabels,
+            bitcoinTransactionLabels = bitcoinTransactionLabels,
+            liquidAddressLabels = liquidAddressLabels,
+            liquidTransactionLabels = liquidTransactionLabels,
             outputSpendable = outputSpendable,
             totalLines = totalLines,
             errorLines = errorLines,
         )
     }
-
-    // -- Internal parsing helpers --
 
     private data class ParsedLabel(
         val type: Type,
@@ -156,6 +235,7 @@ object Bip329Labels {
         val label: String?,
         val origin: String?,
         val spendable: Boolean?,
+        val network: Bip329LabelNetwork?,
     )
 
     private fun parseBip329Line(line: String): ParsedLabel? {
@@ -163,19 +243,52 @@ object Bip329Labels {
             val json = JSONObject(line)
             val typeStr = json.optString("type", "")
             if (typeStr.isEmpty()) return null
-            val type = try { Type.valueOf(typeStr) } catch (_: Exception) { return null }
+            val type = Type.fromWireValue(typeStr) ?: return null
             val ref = json.optString("ref", "")
             if (ref.isEmpty()) return null
 
             ParsedLabel(
                 type = type,
                 ref = ref,
-                label = json.optString("label")?.takeIf { it.isNotEmpty() && it != "null" },
-                origin = json.optString("origin")?.takeIf { it.isNotEmpty() && it != "null" },
+                label = json.optString("label").takeIf { it.isNotEmpty() && it != "null" },
+                origin = json.optString("origin").takeIf { it.isNotEmpty() && it != "null" },
                 spendable = if (json.has("spendable")) json.optBoolean("spendable") else null,
+                network = Bip329LabelNetwork.fromWireValue(json.optString("network")),
             )
         } catch (_: Exception) {
             null
+        }
+    }
+
+    private fun resolveNetwork(
+        parsed: ParsedLabel,
+        defaultScope: Bip329LabelScope,
+    ): Bip329LabelNetwork {
+        parsed.network?.let { return it }
+        if (parsed.type == Type.ADDR) {
+            inferAddressNetwork(parsed.ref)?.let { return it }
+        }
+        return defaultNetwork(defaultScope)
+    }
+
+    private fun defaultNetwork(defaultScope: Bip329LabelScope): Bip329LabelNetwork =
+        when (defaultScope) {
+            Bip329LabelScope.BITCOIN, Bip329LabelScope.BOTH -> Bip329LabelNetwork.BITCOIN
+            Bip329LabelScope.LIQUID -> Bip329LabelNetwork.LIQUID
+        }
+
+    private fun inferAddressNetwork(ref: String): Bip329LabelNetwork? {
+        val normalized = ref.trim().lowercase()
+        return when {
+            normalized.startsWith("lq1") || normalized.startsWith("ex1") ||
+                normalized.startsWith("vj") || normalized.startsWith("ct") ||
+                normalized.startsWith("liquidnetwork:") -> Bip329LabelNetwork.LIQUID
+
+            normalized.startsWith("bc1") || normalized.startsWith("1") ||
+                normalized.startsWith("3") ||
+                normalized.startsWith("bitcoin:") -> Bip329LabelNetwork.BITCOIN
+
+            else -> null
         }
     }
 
@@ -188,7 +301,6 @@ object Bip329Labels {
         val parts = parseCsvLine(line)
         if (parts.size < 2) return null
 
-        // Find the column that looks like a txid (64-char hex)
         val txidIdx = parts.indexOfFirst { field ->
             field.length == 64 && field.all { c ->
                 c in '0'..'9' || c in 'a'..'f' || c in 'A'..'F'
@@ -200,26 +312,24 @@ object Bip329Labels {
         if (labelIdx >= parts.size) return null
 
         val label = parts[labelIdx].trim()
-        // Skip header row and empty labels
         if (label.isEmpty() || label.equals("label", ignoreCase = true)) return null
 
         return Pair(parts[txidIdx], label)
     }
 
-    /**
-     * Simple CSV line parser that handles quoted fields.
-     */
     private fun parseCsvLine(line: String): List<String> {
         val result = mutableListOf<String>()
         val current = StringBuilder()
         var inQuotes = false
 
         for (c in line) {
-            when {
-                c == '"' -> inQuotes = !inQuotes
-                c == ',' && !inQuotes -> {
+            when (c) {
+                '"' -> inQuotes = !inQuotes
+                ',' -> if (!inQuotes) {
                     result.add(current.toString().trim().removeSurrounding("\""))
                     current.clear()
+                } else {
+                    current.append(c)
                 }
                 else -> current.append(c)
             }
@@ -229,48 +339,24 @@ object Bip329Labels {
         return result
     }
 
-    /**
-     * CBOR-encode a byte array as a CBOR byte string (major type 2).
-     * Used to create ur:bytes URs for animated QR export.
-     */
-    fun cborEncodeByteString(data: ByteArray): ByteArray {
-        val output = java.io.ByteArrayOutputStream(data.size + 5)
-        val len = data.size
-        when {
-            len < 24 -> output.write(0x40 or len)
-            len < 256 -> {
-                output.write(0x58)
-                output.write(len)
-            }
-            len < 65536 -> {
-                output.write(0x59)
-                output.write(len shr 8)
-                output.write(len and 0xFF)
-            }
-            else -> {
-                output.write(0x5a)
-                output.write(len shr 24 and 0xFF)
-                output.write(len shr 16 and 0xFF)
-                output.write(len shr 8 and 0xFF)
-                output.write(len and 0xFF)
-            }
-        }
-        output.write(data)
-        return output.toByteArray()
-    }
-
-    /**
-     * Result of a BIP 329 / Electrum CSV import operation.
-     */
     data class ImportResult(
-        val addressLabels: Map<String, String>,
-        val transactionLabels: Map<String, String>,
+        val bitcoinAddressLabels: Map<String, String>,
+        val bitcoinTransactionLabels: Map<String, String>,
+        val liquidAddressLabels: Map<String, String>,
+        val liquidTransactionLabels: Map<String, String>,
         val outputSpendable: Map<String, Boolean>,
         val totalLines: Int,
         val errorLines: Int,
     ) {
+        val totalBitcoinLabelsImported: Int
+            get() = bitcoinAddressLabels.size + bitcoinTransactionLabels.size
+
+        val totalLiquidLabelsImported: Int
+            get() = liquidAddressLabels.size + liquidTransactionLabels.size
+
         val totalLabelsImported: Int
-            get() = addressLabels.size + transactionLabels.size
+            get() = totalBitcoinLabelsImported + totalLiquidLabelsImported
+
         val isEmpty: Boolean
             get() = totalLabelsImported == 0
     }

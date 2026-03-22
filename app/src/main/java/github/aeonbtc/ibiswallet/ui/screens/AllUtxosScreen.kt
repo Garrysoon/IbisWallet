@@ -25,19 +25,25 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AcUnit
+import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -48,6 +54,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -80,6 +87,7 @@ fun AllUtxosScreen(
     btcPrice: Double? = null,
     privacyMode: Boolean = false,
     spendUnconfirmed: Boolean = true,
+    addressEdgeCharacters: Int? = null,
     onFreezeUtxo: (String, Boolean) -> Unit = { _, _ -> },
     onSendFromUtxo: (UtxoInfo) -> Unit = {},
     onSaveLabel: (address: String, label: String) -> Unit = { _, _ -> },
@@ -87,12 +95,38 @@ fun AllUtxosScreen(
 ) {
     val context = LocalContext.current
     val useSats = denomination == SecureStorage.DENOMINATION_SATS
+    var searchQuery by remember { mutableStateOf("") }
 
     // Local mutable state for immediate UI updates
-    val localUtxos = remember(utxos) { mutableStateListOf(*utxos.toTypedArray()) }
+    val localUtxos = remember { mutableStateListOf<UtxoInfo>() }
 
-    val totalBalance = localUtxos.filter { !it.isFrozen }.sumOf { it.amountSats.toLong() }.toULong()
-    val frozenBalance = localUtxos.filter { it.isFrozen }.sumOf { it.amountSats.toLong() }.toULong()
+    LaunchedEffect(utxos) {
+        localUtxos.clear()
+        localUtxos.addAll(utxos)
+    }
+
+    val totalBalance by remember {
+        derivedStateOf {
+            localUtxos.filter { !it.isFrozen }.sumOf { it.amountSats.toLong() }.toULong()
+        }
+    }
+    val frozenBalance by remember {
+        derivedStateOf {
+            localUtxos.filter { it.isFrozen }.sumOf { it.amountSats.toLong() }.toULong()
+        }
+    }
+    val filteredUtxos by remember {
+        derivedStateOf {
+            val query = searchQuery.trim()
+            if (query.isBlank()) {
+                localUtxos.toList()
+            } else {
+                localUtxos.filter { utxo ->
+                    utxoMatchesSearch(utxo, query)
+                }
+            }
+        }
+    }
 
     Column(
         modifier =
@@ -111,7 +145,7 @@ fun AllUtxosScreen(
                 modifier =
                     Modifier
                         .fillMaxWidth()
-                        .padding(16.dp),
+                        .padding(14.dp),
             ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -124,7 +158,7 @@ fun AllUtxosScreen(
                             color = TextSecondary,
                         )
                         Text(
-                            text = if (privacyMode) HIDDEN_AMOUNT else formatAmount(totalBalance, useSats),
+                            text = if (privacyMode) HIDDEN_AMOUNT else formatAmount(totalBalance, useSats, includeUnit = true),
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold,
                             color = AccentGreen,
@@ -145,7 +179,7 @@ fun AllUtxosScreen(
                             color = TextSecondary,
                         )
                         Text(
-                            text = if (privacyMode) HIDDEN_AMOUNT else formatAmount(frozenBalance, useSats),
+                            text = if (privacyMode) HIDDEN_AMOUNT else formatAmount(frozenBalance, useSats, includeUnit = true),
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold,
                             color = if (frozenBalance > 0UL) AccentBlue else TextSecondary,
@@ -160,40 +194,91 @@ fun AllUtxosScreen(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(6.dp))
 
                 Text(
-                    text = "${localUtxos.size} UTXOs (${localUtxos.count { it.isFrozen }} frozen)",
+                    text =
+                        if (searchQuery.isBlank()) {
+                            "${localUtxos.size} UTXOs (${localUtxos.count { it.isFrozen }} frozen)"
+                        } else {
+                            "${filteredUtxos.size} matches / ${localUtxos.size} total"
+                        },
                     style = MaterialTheme.typography.bodySmall,
                     color = TextSecondary,
                 )
             }
         }
 
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(10.dp))
 
-        if (localUtxos.isEmpty()) {
+        OutlinedTextField(
+            value = searchQuery,
+            onValueChange = { searchQuery = it },
+            placeholder = {
+                Text(
+                    text = "Search address, label, amount, txid, or outpoint",
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            },
+            leadingIcon = {
+                Icon(
+                    imageVector = Icons.Default.Search,
+                    contentDescription = null,
+                    tint = TextSecondary,
+                )
+            },
+            trailingIcon = {
+                if (searchQuery.isNotEmpty()) {
+                    IconButton(onClick = { searchQuery = "" }) {
+                        Icon(
+                            imageVector = Icons.Default.Clear,
+                            contentDescription = "Clear",
+                            tint = TextSecondary,
+                        )
+                    }
+                }
+            },
+            singleLine = true,
+            shape = RoundedCornerShape(12.dp),
+            colors =
+                OutlinedTextFieldDefaults.colors(
+                    unfocusedContainerColor = DarkCard,
+                    focusedContainerColor = DarkCard,
+                    unfocusedBorderColor = DarkCard,
+                    focusedBorderColor = BitcoinOrange,
+                ),
+            modifier =
+                Modifier
+                    .fillMaxWidth()
+                    .height(52.dp),
+        )
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        if (filteredUtxos.isEmpty()) {
             Box(
                 modifier = Modifier.fillMaxSize(),
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
-                    text = "No UTXOs",
+                    text = if (searchQuery.isBlank()) "No UTXOs" else "No matching UTXOs",
                     style = MaterialTheme.typography.bodyLarge,
                     color = TextSecondary,
                 )
             }
         } else {
             LazyColumn(
-                verticalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                items(localUtxos, key = { "${it.outpoint}_${it.isFrozen}" }) { utxo ->
+                items(filteredUtxos, key = { it.outpoint }) { utxo ->
                     UtxoCard(
                         utxo = utxo,
                         useSats = useSats,
                         btcPrice = btcPrice,
                         privacyMode = privacyMode,
                         spendUnconfirmed = spendUnconfirmed,
+                        addressEdgeCharacters = addressEdgeCharacters,
                         onSaveLabel = { label ->
                             onSaveLabel(utxo.address, label)
                             // Update all UTXOs sharing this address for immediate UI feedback
@@ -215,10 +300,11 @@ fun AllUtxosScreen(
                             // Update local state immediately for responsive UI
                             val index = localUtxos.indexOfFirst { it.outpoint == utxo.outpoint }
                             if (index >= 0) {
-                                val newFrozenState = !utxo.isFrozen
-                                localUtxos[index] = utxo.copy(isFrozen = newFrozenState)
+                                val currentUtxo = localUtxos[index]
+                                val newFrozenState = !currentUtxo.isFrozen
+                                localUtxos[index] = currentUtxo.copy(isFrozen = newFrozenState)
                                 // Persist the change
-                                onFreezeUtxo(utxo.outpoint, newFrozenState)
+                                onFreezeUtxo(currentUtxo.outpoint, newFrozenState)
                                 // Show feedback
                                 val message = if (newFrozenState) "UTXO frozen" else "UTXO unfrozen"
                                 Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
@@ -243,6 +329,7 @@ private fun UtxoCard(
     btcPrice: Double? = null,
     privacyMode: Boolean = false,
     spendUnconfirmed: Boolean = true,
+    addressEdgeCharacters: Int? = null,
     onSaveLabel: (String) -> Unit = {},
     onDeleteLabel: () -> Unit = {},
     onFreeze: () -> Unit,
@@ -276,6 +363,19 @@ private fun UtxoCard(
         }
     }
 
+    val displayAddress = remember(utxo.address, addressEdgeCharacters) {
+        formatDisplayedAddress(utxo.address, addressEdgeCharacters)
+    }
+    val displayOutpoint = remember(utxo.txid, utxo.vout) {
+        "${utxo.txid.take(16)}...${utxo.txid.takeLast(8)}:${utxo.vout}"
+    }
+    val copyStatusText =
+        when {
+            showCopiedAddress -> "Address copied"
+            showCopiedOutpoint -> "Outpoint copied"
+            else -> null
+        }
+
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(12.dp),
@@ -288,9 +388,8 @@ private fun UtxoCard(
             modifier =
                 Modifier
                     .fillMaxWidth()
-                    .padding(16.dp),
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
         ) {
-            // Amount and frozen status
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -302,12 +401,12 @@ private fun UtxoCard(
                             imageVector = Icons.Default.AcUnit,
                             contentDescription = "Frozen",
                             tint = AccentBlue,
-                            modifier = Modifier.size(20.dp),
+                            modifier = Modifier.size(18.dp),
                         )
-                        Spacer(modifier = Modifier.width(8.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
                     }
                     Text(
-                        text = if (privacyMode) HIDDEN_AMOUNT else formatAmount(utxo.amountSats, useSats),
+                        text = if (privacyMode) HIDDEN_AMOUNT else formatAmount(utxo.amountSats, useSats, includeUnit = true),
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold,
                         color = if (utxo.isFrozen) AccentBlue else AccentGreen,
@@ -343,273 +442,294 @@ private fun UtxoCard(
                 }
             }
 
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.Top,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                CompactInfoRow(
+                    label = "Address",
+                    value = displayAddress,
+                    copied = showCopiedAddress,
+                    modifier = Modifier.weight(1f),
+                    onCopy = {
+                        SecureClipboard.copyAndScheduleClear(context, "Address", utxo.address)
+                        showCopiedAddress = true
+                    },
+                )
+
+                CompactInfoRow(
+                    label = "Outpoint",
+                    value = displayOutpoint,
+                    copied = showCopiedOutpoint,
+                    valueColor = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f),
+                    modifier = Modifier.weight(1f),
+                    onCopy = {
+                        SecureClipboard.copyAndScheduleClear(context, "Outpoint", utxo.outpoint)
+                        showCopiedOutpoint = true
+                    },
+                )
+            }
+
+            if (copyStatusText != null) {
+                Spacer(modifier = Modifier.height(4.dp))
+
+                Text(
+                    text = copyStatusText,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = BitcoinOrange,
+                )
+            }
+
             Spacer(modifier = Modifier.height(8.dp))
 
-            // Address
-            Text(
-                text = "Address:",
-                style = MaterialTheme.typography.labelSmall,
-                color = TextSecondary,
-            )
             Row(
+                modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text(
-                    text = utxo.address,
-                    style = MaterialTheme.typography.bodySmall,
-                    fontFamily = FontFamily.Monospace,
-                    color = MaterialTheme.colorScheme.onBackground,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f),
-                )
-                Box(
-                    contentAlignment = Alignment.Center,
-                    modifier =
-                        Modifier
-                            .size(32.dp)
-                            .clip(RoundedCornerShape(6.dp))
-                            .background(DarkSurfaceVariant)
-                            .clickable {
-                                SecureClipboard.copyAndScheduleClear(context, "Address", utxo.address)
-                                showCopiedAddress = true
-                            },
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.ContentCopy,
-                        contentDescription = "Copy",
-                        tint = if (showCopiedAddress) BitcoinOrange else TextSecondary,
-                        modifier = Modifier.size(16.dp),
-                    )
-                }
-            }
-            if (showCopiedAddress) {
-                Text(
-                    text = "Copied to clipboard!",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = BitcoinOrange,
-                )
-            }
-
-            Spacer(modifier = Modifier.height(4.dp))
-
-            // Outpoint (txid:vout)
-            Text(
-                text = "Outpoint:",
-                style = MaterialTheme.typography.labelSmall,
-                color = TextSecondary,
-            )
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    text = "${utxo.txid.take(16)}...${utxo.txid.takeLast(8)}:${utxo.vout}",
-                    style = MaterialTheme.typography.bodySmall,
-                    fontFamily = FontFamily.Monospace,
-                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f),
-                    modifier = Modifier.weight(1f),
-                )
-                Box(
-                    contentAlignment = Alignment.Center,
-                    modifier =
-                        Modifier
-                            .size(32.dp)
-                            .clip(RoundedCornerShape(6.dp))
-                            .background(DarkSurfaceVariant)
-                            .clickable {
-                                SecureClipboard.copyAndScheduleClear(context, "Outpoint", utxo.outpoint)
-                                showCopiedOutpoint = true
-                            },
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.ContentCopy,
-                        contentDescription = "Copy",
-                        tint = if (showCopiedOutpoint) BitcoinOrange else TextSecondary,
-                        modifier = Modifier.size(16.dp),
-                    )
-                }
-            }
-            if (showCopiedOutpoint) {
-                Text(
-                    text = "Copied to clipboard!",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = BitcoinOrange,
-                )
-            }
-
-            // Label pill with inline editing
-            Spacer(modifier = Modifier.height(4.dp))
-            if (isEditingLabel) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    BasicTextField(
-                        value = labelDraft,
-                        onValueChange = { if (it.length <= 50) labelDraft = it },
-                        singleLine = true,
-                        textStyle = TextStyle(
-                            color = MaterialTheme.colorScheme.onBackground,
-                            fontSize = MaterialTheme.typography.labelSmall.fontSize,
-                        ),
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                        keyboardActions = KeyboardActions(
-                            onDone = {
-                                val trimmed = labelDraft.trim()
-                                if (trimmed.isNotEmpty()) onSaveLabel(trimmed)
-                                isEditingLabel = false
-                            },
-                        ),
-                        decorationBox = { innerTextField ->
-                            Box(
+                Box(modifier = Modifier.weight(1f)) {
+                    if (isEditingLabel) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            BasicTextField(
+                                value = labelDraft,
+                                onValueChange = { if (it.length <= 50) labelDraft = it },
+                                singleLine = true,
+                                textStyle = TextStyle(
+                                    color = MaterialTheme.colorScheme.onBackground,
+                                    fontSize = MaterialTheme.typography.labelSmall.fontSize,
+                                ),
+                                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                                keyboardActions = KeyboardActions(
+                                    onDone = {
+                                        val trimmed = labelDraft.trim()
+                                        if (trimmed.isNotEmpty()) onSaveLabel(trimmed)
+                                        isEditingLabel = false
+                                    },
+                                ),
+                                decorationBox = { innerTextField ->
+                                    Box(
+                                        modifier = Modifier
+                                            .background(
+                                                BorderColor.copy(alpha = 0.3f),
+                                                RoundedCornerShape(4.dp),
+                                            )
+                                            .padding(horizontal = 8.dp, vertical = 3.dp),
+                                    ) {
+                                        if (labelDraft.isEmpty()) {
+                                            Text(
+                                                text = "Enter label",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = TextSecondary.copy(alpha = 0.5f),
+                                            )
+                                        }
+                                        innerTextField()
+                                    }
+                                },
                                 modifier = Modifier
-                                    .background(
-                                        BorderColor.copy(alpha = 0.3f),
-                                        RoundedCornerShape(4.dp),
-                                    )
-                                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                                    .widthIn(max = 180.dp)
+                                    .focusRequester(focusRequester),
+                            )
+                            Box(
+                                contentAlignment = Alignment.Center,
+                                modifier = Modifier
+                                    .padding(start = 4.dp)
+                                    .size(28.dp)
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .clickable {
+                                        val trimmed = labelDraft.trim()
+                                        if (trimmed.isNotEmpty()) onSaveLabel(trimmed)
+                                        isEditingLabel = false
+                                    },
                             ) {
-                                if (labelDraft.isEmpty()) {
-                                    Text(
-                                        text = "Enter label",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = TextSecondary.copy(alpha = 0.5f),
+                                Icon(
+                                    imageVector = Icons.Default.Check,
+                                    contentDescription = "Save",
+                                    tint = SuccessGreen,
+                                    modifier = Modifier.size(16.dp),
+                                )
+                            }
+                        }
+                    } else {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            val hasLabel = !utxo.label.isNullOrEmpty()
+                            Card(
+                                modifier = Modifier
+                                    .widthIn(max = 200.dp)
+                                    .clickable {
+                                        labelDraft = utxo.label ?: ""
+                                        isEditingLabel = true
+                                    },
+                                shape = RoundedCornerShape(8.dp),
+                                colors = CardDefaults.cardColors(
+                                    containerColor = if (hasLabel) AccentTeal.copy(alpha = 0.15f) else DarkSurface,
+                                ),
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (hasLabel) AccentTeal else BorderColor,
+                                ),
+                            ) {
+                                Text(
+                                    text = utxo.label ?: "+ Label",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = if (hasLabel) AccentTeal else TextSecondary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                                )
+                            }
+                            if (hasLabel) {
+                                Box(
+                                    contentAlignment = Alignment.Center,
+                                    modifier = Modifier
+                                        .padding(start = 4.dp)
+                                        .size(28.dp)
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .clickable { onDeleteLabel() },
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Close,
+                                        contentDescription = "Remove label",
+                                        tint = ErrorRed,
+                                        modifier = Modifier.size(15.dp),
                                     )
                                 }
-                                innerTextField()
                             }
-                        },
-                        modifier = Modifier
-                            .widthIn(max = 180.dp)
-                            .focusRequester(focusRequester),
-                    )
-                    Box(
-                        contentAlignment = Alignment.Center,
-                        modifier = Modifier
-                            .padding(start = 4.dp)
-                            .size(32.dp)
-                            .clip(RoundedCornerShape(6.dp))
-                            .clickable {
-                                val trimmed = labelDraft.trim()
-                                if (trimmed.isNotEmpty()) onSaveLabel(trimmed)
-                                isEditingLabel = false
-                            },
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Check,
-                            contentDescription = "Save",
-                            tint = SuccessGreen,
-                            modifier = Modifier.size(18.dp),
-                        )
-                    }
-                }
-            } else {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    val hasLabel = !utxo.label.isNullOrEmpty()
-                    Card(
-                        modifier = Modifier
-                            .widthIn(max = 200.dp)
-                            .clickable {
-                                labelDraft = utxo.label ?: ""
-                                isEditingLabel = true
-                            },
-                        shape = RoundedCornerShape(8.dp),
-                        colors = CardDefaults.cardColors(
-                            containerColor = if (hasLabel) AccentTeal.copy(alpha = 0.15f) else DarkSurface,
-                        ),
-                        border = BorderStroke(
-                            1.dp,
-                            if (hasLabel) AccentTeal else BorderColor,
-                        ),
-                    ) {
-                        Text(
-                            text = utxo.label ?: "+ Label",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = if (hasLabel) AccentTeal else TextSecondary,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                        )
-                    }
-                    if (hasLabel) {
-                        Box(
-                            contentAlignment = Alignment.Center,
-                            modifier = Modifier
-                                .padding(start = 4.dp)
-                                .size(32.dp)
-                                .clip(RoundedCornerShape(6.dp))
-                                .clickable { onDeleteLabel() },
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Close,
-                                contentDescription = "Remove label",
-                                tint = ErrorRed,
-                                modifier = Modifier.size(16.dp),
-                            )
                         }
                     }
                 }
-            }
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            // Action buttons
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                TextButton(
-                    onClick = onFreeze,
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Icon(
-                        imageVector = if (utxo.isFrozen) Icons.Default.LockOpen else Icons.Default.Lock,
-                        contentDescription = null,
-                        tint = if (utxo.isFrozen) AccentGreen else AccentBlue,
-                        modifier = Modifier.size(18.dp),
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = if (utxo.isFrozen) "Unfreeze" else "Freeze",
-                        color = if (utxo.isFrozen) AccentGreen else AccentBlue,
-                    )
-                }
 
                 val canSend = !utxo.isFrozen && (utxo.isConfirmed || spendUnconfirmed)
-                TextButton(
-                    onClick = onSend,
-                    enabled = canSend,
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.Send,
-                        contentDescription = null,
-                        tint = if (canSend) AccentGreen else TextSecondary,
-                        modifier = Modifier.size(18.dp),
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = "Send",
-                        color = if (canSend) AccentGreen else TextSecondary,
-                    )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(
+                        onClick = onFreeze,
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                    ) {
+                        Icon(
+                            imageVector = if (utxo.isFrozen) Icons.Default.LockOpen else Icons.Default.Lock,
+                            contentDescription = null,
+                            tint = if (utxo.isFrozen) AccentGreen else AccentBlue,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = if (utxo.isFrozen) "Unfreeze" else "Freeze",
+                            color = if (utxo.isFrozen) AccentGreen else AccentBlue,
+                        )
+                    }
+
+                    TextButton(
+                        onClick = onSend,
+                        enabled = canSend,
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.Send,
+                            contentDescription = null,
+                            tint = if (canSend) AccentGreen else TextSecondary,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "Send",
+                            color = if (canSend) AccentGreen else TextSecondary,
+                        )
+                    }
                 }
             }
         }
     }
 }
 
-private const val HIDDEN_AMOUNT = "****"
+@Composable
+private fun CompactInfoRow(
+    label: String,
+    value: String,
+    copied: Boolean,
+    onCopy: () -> Unit,
+    modifier: Modifier = Modifier,
+    valueColor: Color = MaterialTheme.colorScheme.onBackground,
+) {
+    Column(modifier = modifier) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelSmall,
+                color = TextSecondary,
+            )
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier =
+                    Modifier
+                        .size(28.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(DarkSurfaceVariant)
+                        .clickable(onClick = onCopy),
+            ) {
+                Icon(
+                    imageVector = Icons.Default.ContentCopy,
+                    contentDescription = "Copy $label",
+                    tint = if (copied) BitcoinOrange else TextSecondary,
+                    modifier = Modifier.size(14.dp),
+                )
+            }
+        }
 
-private fun formatAmount(
-    sats: ULong,
-    useSats: Boolean,
-): String {
-    return if (useSats) {
-        "${NumberFormat.getNumberInstance(Locale.US).format(sats.toLong())} sats"
-    } else {
-        val btc = sats.toDouble() / 100_000_000.0
-        "${String.format(Locale.US, "%.8f", btc)} BTC"
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodySmall,
+            fontFamily = FontFamily.Monospace,
+            color = valueColor,
+            maxLines = 1,
+            overflow = TextOverflow.MiddleEllipsis,
+        )
     }
 }
 
-private fun formatUsd(amount: Double): String {
-    val format = NumberFormat.getCurrencyInstance(Locale.US)
-    return format.format(amount)
+private const val HIDDEN_AMOUNT = "****"
+
+private fun formatDisplayedAddress(address: String, edgeCharacters: Int?): String {
+    if (edgeCharacters == null || edgeCharacters <= 0) return address
+    val minimumLengthToShorten = edgeCharacters * 2
+    if (address.length <= minimumLengthToShorten) return address
+    return "${address.take(edgeCharacters)}...${address.takeLast(edgeCharacters)}"
 }
+
+private fun utxoMatchesSearch(
+    utxo: UtxoInfo,
+    query: String,
+): Boolean {
+    val normalizedQuery = query.trim().lowercase()
+    if (normalizedQuery.isBlank()) return true
+    val normalizedAmountQuery = normalizeAmountSearchValue(query)
+    val amountTerms =
+        listOf(
+            utxo.amountSats.toString(),
+            NumberFormat.getNumberInstance(Locale.US).format(utxo.amountSats.toLong()),
+            "${utxo.amountSats} sats",
+            "${NumberFormat.getNumberInstance(Locale.US).format(utxo.amountSats.toLong())} sats",
+            String.format(Locale.US, "%.8f", utxo.amountSats.toDouble() / 100_000_000.0),
+            "${String.format(Locale.US, "%.8f", utxo.amountSats.toDouble() / 100_000_000.0)} btc",
+        )
+
+    return utxo.address.lowercase().contains(normalizedQuery) ||
+        utxo.label?.lowercase()?.contains(normalizedQuery) == true ||
+        utxo.txid.lowercase().contains(normalizedQuery) ||
+        utxo.outpoint.lowercase().contains(normalizedQuery) ||
+        utxo.vout.toString().contains(normalizedQuery) ||
+        amountTerms.any { normalizeAmountSearchValue(it).contains(normalizedAmountQuery) } ||
+        (if (utxo.isConfirmed) "confirmed" else "pending").contains(normalizedQuery) ||
+        (if (utxo.isFrozen) "frozen" else "spendable").contains(normalizedQuery)
+}
+
+private fun normalizeAmountSearchValue(value: String): String =
+    value
+        .trim()
+        .lowercase()
+        .replace(",", "")
+        .replace(" ", "")
+

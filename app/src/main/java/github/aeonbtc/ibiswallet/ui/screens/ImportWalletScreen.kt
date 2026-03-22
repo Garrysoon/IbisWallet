@@ -2,7 +2,9 @@
 
 package github.aeonbtc.ibiswallet.ui.screens
 
+import android.content.Context
 import android.net.Uri
+import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -19,6 +21,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -28,6 +31,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -53,6 +57,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -69,6 +74,8 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import github.aeonbtc.ibiswallet.data.model.AddressType
 import github.aeonbtc.ibiswallet.data.model.SeedFormat
 import github.aeonbtc.ibiswallet.data.model.StoredWallet
@@ -86,6 +93,7 @@ import github.aeonbtc.ibiswallet.ui.theme.DarkSurfaceVariant
 import github.aeonbtc.ibiswallet.ui.theme.ErrorRed
 import github.aeonbtc.ibiswallet.ui.theme.SuccessGreen
 import github.aeonbtc.ibiswallet.ui.theme.TextSecondary
+import github.aeonbtc.ibiswallet.util.BitcoinUtils
 import github.aeonbtc.ibiswallet.util.ElectrumSeedUtil
 import github.aeonbtc.ibiswallet.util.QrFormatParser
 import kotlinx.coroutines.Dispatchers
@@ -113,10 +121,10 @@ fun ImportWalletScreen(
     var walletName by remember { mutableStateOf("") }
     var selectedAddressType by remember { mutableStateOf(AddressType.SEGWIT) }
     var keyMaterial by remember { mutableStateOf("") }
-    var selectedNetwork by remember { mutableStateOf(WalletNetwork.BITCOIN) }
 
     // QR scanner state
     var showQrScanner by remember { mutableStateOf(false) }
+    var scannerError by remember { mutableStateOf<String?>(null) }
 
     // Backup restore state
     var backupFileUri by remember { mutableStateOf<Uri?>(null) }
@@ -126,10 +134,11 @@ fun ImportWalletScreen(
     var backupIsEncrypted by remember { mutableStateOf<Boolean?>(null) }
     var backupError by remember { mutableStateOf<String?>(null) }
     var backupParsedJson by remember { mutableStateOf<JSONObject?>(null) }
-    var backupWalletName by remember { mutableStateOf<String?>(null) }
     var isParsingBackup by remember { mutableStateOf(false) }
     var importServerSettings by remember { mutableStateOf(true) }
+    var showBackupRestoreDialog by remember { mutableStateOf(false) }
     val backupCoroutineScope = rememberCoroutineScope()
+    val context = LocalContext.current
 
     val backupFilePickerLauncher =
         rememberLauncherForActivityResult(
@@ -137,12 +146,12 @@ fun ImportWalletScreen(
         ) { uri: Uri? ->
             if (uri != null) {
                 backupFileUri = uri
-                backupFileName = uri.lastPathSegment?.substringAfterLast('/') ?: "backup.json"
+                backupFileName = getDisplayNameFromUri(context, uri) ?: "backup.json"
                 backupIsEncrypted = null
                 backupError = null
                 backupParsedJson = null
-                backupWalletName = null
                 backupPassword = ""
+                showBackupRestoreDialog = true
 
                 // Try to parse without password first to check if encrypted
                 backupCoroutineScope.launch {
@@ -151,7 +160,6 @@ fun ImportWalletScreen(
                         val json = onParseBackupFile(uri, null)
                         backupIsEncrypted = false
                         backupParsedJson = json
-                        backupWalletName = json.optJSONObject("wallet")?.optString("name")
                         backupError = null
                     } catch (e: Exception) {
                         if (e.message?.contains("encrypted", ignoreCase = true) == true) {
@@ -181,29 +189,33 @@ fun ImportWalletScreen(
 
     // Determine if input is seed phrase, extended key, output descriptor, WIF key, or address
     val trimmedInput = keyMaterial.trim()
+    val unsupportedNonMainnetReason =
+        remember(keyMaterial) {
+            BitcoinUtils.unsupportedNonMainnetReason(trimmedInput)
+        }
+    val unsupportedNestedSegwitReason =
+        remember(keyMaterial) {
+            BitcoinUtils.unsupportedNestedSegwitReason(trimmedInput)
+        }
     val isExtendedKey =
         trimmedInput.let {
             it.startsWith("xpub") || it.startsWith("ypub") ||
-                it.startsWith("zpub") || it.startsWith("tpub") ||
-                it.startsWith("vpub") || it.startsWith("upub") ||
+                it.startsWith("zpub") || it.startsWith("upub") ||
                 it.startsWith("xprv") || it.startsWith("yprv") ||
-                it.startsWith("zprv") || it.startsWith("tprv")
+                it.startsWith("zprv")
         }
     // Also detect [fingerprint/path]xpub and output descriptor formats
     val isOriginPrefixed =
         trimmedInput.startsWith("[") && trimmedInput.contains("]") &&
             trimmedInput.substringAfter("]").let {
                 it.startsWith("xpub") || it.startsWith("ypub") ||
-                    it.startsWith("zpub") || it.startsWith("tpub") ||
-                    it.startsWith("vpub") || it.startsWith("upub")
+                    it.startsWith("zpub") || it.startsWith("upub")
             }
     val isOutputDescriptor =
-        listOf("pkh(", "wpkh(", "tr(", "sh(wpkh(", "sh(").any {
+        listOf("pkh(", "wpkh(", "tr(").any {
             trimmedInput.lowercase().startsWith(it)
         } && (
-            trimmedInput.contains("xpub") || trimmedInput.contains("tpub") ||
-                trimmedInput.contains("ypub") || trimmedInput.contains("zpub") ||
-                trimmedInput.contains("vpub") || trimmedInput.contains("upub")
+            trimmedInput.contains("xpub") || trimmedInput.contains("zpub")
         )
     // Detect ColdCard/Specter JSON format
     val isJsonFormat = trimmedInput.startsWith("{") && trimmedInput.endsWith("}")
@@ -213,17 +225,17 @@ fun ImportWalletScreen(
         isWatchOnlyKey &&
             !trimmedInput.let {
                 it.startsWith("xprv") || it.startsWith("yprv") ||
-                    it.startsWith("zprv") || it.startsWith("tprv") ||
-                    it.contains("xprv") || it.contains("tprv")
+                    it.startsWith("zprv") ||
+                    it.contains("xprv")
             }
 
-    // Detect WIF private key (K/L/5 for mainnet, c/9 for testnet)
+    // Detect WIF private key (K/L/5 for mainnet)
     val isWifKey =
         remember(keyMaterial) {
             val t = keyMaterial.trim()
             val couldBeWif =
-                (t.length == 52 && (t[0] == 'K' || t[0] == 'L' || t[0] == 'c')) ||
-                    (t.length == 51 && (t[0] == '5' || t[0] == '9'))
+                (t.length == 52 && (t[0] == 'K' || t[0] == 'L')) ||
+                    (t.length == 51 && t[0] == '5')
             if (!couldBeWif) {
                 false
             } else {
@@ -232,12 +244,7 @@ fun ImportWalletScreen(
                     Descriptor("wpkh($t)", Network.BITCOIN)
                     true
                 } catch (_: Exception) {
-                    try {
-                        Descriptor("wpkh($t)", Network.TESTNET)
-                        true
-                    } catch (_: Exception) {
-                        false
-                    }
+                    false
                 }
             }
         }
@@ -251,9 +258,7 @@ fun ImportWalletScreen(
             } else {
                 val looksLikeAddress =
                     t.startsWith("1") || t.startsWith("3") ||
-                        t.startsWith("bc1q") || t.startsWith("bc1p") ||
-                        t.startsWith("tb1q") || t.startsWith("tb1p") ||
-                        t.startsWith("m") || t.startsWith("n") || t.startsWith("2")
+                        t.startsWith("bc1q") || t.startsWith("bc1p")
                 if (!looksLikeAddress) {
                     false
                 } else {
@@ -261,12 +266,7 @@ fun ImportWalletScreen(
                         org.bitcoindevkit.Address(t, Network.BITCOIN)
                         true
                     } catch (_: Exception) {
-                        try {
-                            org.bitcoindevkit.Address(t, Network.TESTNET)
-                            true
-                        } catch (_: Exception) {
-                            false
-                        }
+                        false
                     }
                 }
             }
@@ -277,10 +277,9 @@ fun ImportWalletScreen(
         remember(keyMaterial) {
             val t = keyMaterial.trim()
             when {
-                t.startsWith("1") || t.startsWith("m") || t.startsWith("n") -> AddressType.LEGACY
-                t.startsWith("3") || t.startsWith("2") -> AddressType.NESTED_SEGWIT
-                t.startsWith("bc1q") || t.startsWith("tb1q") -> AddressType.SEGWIT
-                t.startsWith("bc1p") || t.startsWith("tb1p") -> AddressType.TAPROOT
+                t.startsWith("1") -> AddressType.LEGACY
+                t.startsWith("bc1q") -> AddressType.SEGWIT
+                t.startsWith("bc1p") -> AddressType.TAPROOT
                 else -> null
             }
         }
@@ -291,14 +290,14 @@ fun ImportWalletScreen(
     }
 
     // Detect the key prefix for the bare key (after origin bracket if present)
-    // zpub/ypub/vpub/upub signal SegWit derivation — Legacy is inappropriate
+    // zpub signal SegWit derivation — Legacy is inappropriate
     val bareKeyPrefix =
         if (isOriginPrefixed) {
             trimmedInput.substringAfter("]").take(4)
         } else {
             trimmedInput.take(4)
         }
-    val isSegwitVersionKey = bareKeyPrefix in listOf("zpub", "ypub", "vpub", "upub")
+    val isSegwitVersionKey = bareKeyPrefix == "zpub"
     val isLegacyDisabled = isWatchOnly && isSegwitVersionKey
 
     // Auto-switch away from Legacy if a SegWit-versioned key is entered
@@ -319,8 +318,6 @@ fun ImportWalletScreen(
             showAdvancedOptions = true
         }
     }
-
-    val context = LocalContext.current
 
     // Validate seed phrase word count
     val words =
@@ -383,7 +380,10 @@ fun ImportWalletScreen(
     val isValidMnemonic = mnemonicValidation is MnemonicValidation.Valid ||
         mnemonicValidation is MnemonicValidation.ValidElectrum
 
-    val isValidInput = isWatchOnlyKey || isExtendedKey || isValidMnemonic || isWifKey || isBitcoinAddress
+    val isValidInput =
+        unsupportedNonMainnetReason == null &&
+            unsupportedNestedSegwitReason == null &&
+            (isWatchOnlyKey || isExtendedKey || isValidMnemonic || isWifKey || isBitcoinAddress)
 
     // Auto-generate wallet name based on input type with incremental suffix
     val autoWalletName =
@@ -448,7 +448,6 @@ fun ImportWalletScreen(
                             val descriptor =
                                 when (selectedAddressType) {
                                     AddressType.LEGACY -> Descriptor.newBip44(secretKey, KeychainKind.EXTERNAL, Network.BITCOIN)
-                                    AddressType.NESTED_SEGWIT -> Descriptor.newBip49(secretKey, KeychainKind.EXTERNAL, Network.BITCOIN)
                                     AddressType.SEGWIT -> Descriptor.newBip84(secretKey, KeychainKind.EXTERNAL, Network.BITCOIN)
                                     AddressType.TAPROOT -> Descriptor.newBip86(secretKey, KeychainKind.EXTERNAL, Network.BITCOIN)
                                 }
@@ -473,10 +472,67 @@ fun ImportWalletScreen(
             onCodeScanned = { scannedText ->
                 // The ImportQrScannerDialog already handles UR decoding internally.
                 // For non-UR content, run through QrFormatParser for SeedQR/CompactSeedQR.
-                keyMaterial = QrFormatParser.parseWalletQr(context, scannedText, selectedAddressType)
-                showQrScanner = false
+                try {
+                    keyMaterial = QrFormatParser.parseWalletQr(context, scannedText, selectedAddressType)
+                    scannerError = null
+                    showQrScanner = false
+                } catch (e: IllegalArgumentException) {
+                    scannerError = e.message ?: BitcoinUtils.UNSUPPORTED_NESTED_SEGWIT_MESSAGE
+                    showQrScanner = false
+                }
             },
             onDismiss = { showQrScanner = false },
+        )
+    }
+
+    if (showBackupRestoreDialog && backupFileUri != null) {
+        BackupRestoreDialog(
+            fileName = backupFileName ?: "backup.json",
+            backupParsedJson = backupParsedJson,
+            backupIsEncrypted = backupIsEncrypted,
+            backupPassword = backupPassword,
+            onBackupPasswordChange = { backupPassword = it },
+            showBackupPassword = showBackupPassword,
+            onToggleShowBackupPassword = { showBackupPassword = !showBackupPassword },
+            backupError = backupError,
+            isParsingBackup = isParsingBackup,
+            importServerSettings = importServerSettings,
+            onImportServerSettingsChange = { importServerSettings = it },
+            isLoading = isLoading,
+            onDecrypt = {
+                backupCoroutineScope.launch {
+                    isParsingBackup = true
+                    backupError = null
+                    try {
+                        val json = onParseBackupFile(backupFileUri!!, backupPassword)
+                        backupParsedJson = json
+                        backupError = null
+                    } catch (e: Exception) {
+                        backupError =
+                            if (e.message?.contains("mac", ignoreCase = true) == true ||
+                                e.message?.contains("tag", ignoreCase = true) == true ||
+                                e.message?.contains("AEADBadTagException", ignoreCase = true) == true
+                            ) {
+                                "Incorrect password"
+                            } else {
+                                e.message ?: "Decryption failed"
+                            }
+                        backupParsedJson = null
+                    } finally {
+                        isParsingBackup = false
+                    }
+                }
+            },
+            onConfirmRestore = {
+                backupParsedJson?.let { json ->
+                    onImportFromBackup(json, importServerSettings)
+                }
+            },
+            onChooseDifferentFile = {
+                showBackupRestoreDialog = false
+                backupFilePickerLauncher.launch(arrayOf("application/json", "*/*"))
+            },
+            onDismiss = { showBackupRestoreDialog = false },
         )
     }
 
@@ -534,6 +590,12 @@ fun ImportWalletScreen(
             ) {
                 // Wallet Name
                 Text(
+                    text = "Wallet Details",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onBackground,
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
                     text = "Wallet Name",
                     style = MaterialTheme.typography.labelLarge,
                     color = TextSecondary,
@@ -569,21 +631,19 @@ fun ImportWalletScreen(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    AddressType.entries
-                        .filter { it != AddressType.NESTED_SEGWIT }
-                        .forEach { addressType ->
-                            val enabled =
-                                !isElectrumSeed &&
-                                    !(addressType == AddressType.LEGACY && isLegacyDisabled) &&
-                                    !(isBitcoinAddress && detectedAddressType != null && addressType != detectedAddressType)
-                            AddressTypeButton(
-                                addressType = addressType,
-                                isSelected = selectedAddressType == addressType,
-                                enabled = enabled,
-                                onClick = { selectedAddressType = addressType },
-                                modifier = Modifier.weight(1f),
-                            )
-                        }
+                    AddressType.entries.forEach { addressType ->
+                        val enabled =
+                            !isElectrumSeed &&
+                                !(addressType == AddressType.LEGACY && isLegacyDisabled) &&
+                                !(isBitcoinAddress && detectedAddressType != null && addressType != detectedAddressType)
+                        AddressTypeButton(
+                            addressType = addressType,
+                            isSelected = selectedAddressType == addressType,
+                            enabled = enabled,
+                            onClick = { selectedAddressType = addressType },
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
                 }
 
                 Spacer(modifier = Modifier.height(8.dp))
@@ -599,7 +659,7 @@ fun ImportWalletScreen(
 
                 // Seed Phrase / Extended Key / WIF / Address Input
                 Text(
-                    text = "Seed Phrase, Private Key, Extended Key, or Address",
+                    text = "Import",
                     style = MaterialTheme.typography.labelLarge,
                     color = TextSecondary,
                 )
@@ -608,28 +668,27 @@ fun ImportWalletScreen(
                     OutlinedTextField(
                         value = keyMaterial,
                         onValueChange = { input ->
+                            scannerError = null
                             val trimmed = input.trim()
                             val isKeyOrDescriptor =
                                 trimmed.let { text ->
                                     text.startsWith("xpub") || text.startsWith("ypub") ||
-                                        text.startsWith("zpub") || text.startsWith("tpub") ||
-                                        text.startsWith("vpub") || text.startsWith("upub") ||
+                                        text.startsWith("zpub") || text.startsWith("upub") ||
                                         text.startsWith("xprv") || text.startsWith("yprv") ||
-                                        text.startsWith("zprv") || text.startsWith("tprv") ||
+                                        text.startsWith("zprv") ||
                                         text.startsWith("[") || // Origin-prefixed key
                                         text.startsWith("{") || // JSON format (ColdCard, Specter)
                                         listOf("pkh(", "wpkh(", "tr(", "sh(").any {
                                             text.lowercase().startsWith(it)
                                         } // Output descriptor
                                 }
-                            // WIF private keys: K/L/5 (mainnet), c/9 (testnet)
+                            // WIF private keys: K/L/5 (mainnet)
                             val isWifInput =
                                 trimmed.let { text ->
                                     (
                                         text.length <= 52 && text.isNotEmpty() &&
                                             (
-                                                text[0] == 'K' || text[0] == 'L' || text[0] == '5' ||
-                                                    text[0] == 'c' || text[0] == '9'
+                                                text[0] == 'K' || text[0] == 'L' || text[0] == '5'
                                             )
                                     ) &&
                                         !text.contains(" ")
@@ -640,9 +699,7 @@ fun ImportWalletScreen(
                                     text.isNotEmpty() && !text.contains(" ") &&
                                         (
                                             text.startsWith("1") || text.startsWith("3") ||
-                                                text.startsWith("bc1") || text.startsWith("tb1") ||
-                                                text.startsWith("m") || text.startsWith("n") ||
-                                                text.startsWith("2")
+                                                text.startsWith("bc1")
                                         )
                                 }
                             keyMaterial =
@@ -664,7 +721,7 @@ fun ImportWalletScreen(
                         shape = RoundedCornerShape(8.dp),
                         placeholder = {
                             Text(
-                                "BIP39 seed, Electrum seed, WIF private key, xpub/zpub, or any address",
+                                "BIP39 seed, Electrum seed, WIF private key, xpub/zpub, descriptor, or address",
                                 color = TextSecondary.copy(alpha = 0.5f),
                             )
                         },
@@ -909,7 +966,7 @@ fun ImportWalletScreen(
                                     modifier =
                                         Modifier
                                             .fillMaxWidth()
-                                            .height(36.dp)
+                                            .heightIn(min = 40.dp)
                                             .clip(RoundedCornerShape(8.dp))
                                             .clickable { useCustomFingerprint = !useCustomFingerprint },
                                     verticalAlignment = Alignment.CenterVertically,
@@ -985,7 +1042,7 @@ fun ImportWalletScreen(
                             modifier =
                                 Modifier
                                     .fillMaxWidth()
-                                    .height(36.dp)
+                                    .heightIn(min = 40.dp)
                                     .clip(RoundedCornerShape(8.dp))
                                     .clickable(enabled = !isExtendedKey) { usePassphrase = !usePassphrase },
                             verticalAlignment = Alignment.CenterVertically,
@@ -1077,7 +1134,7 @@ fun ImportWalletScreen(
                             modifier =
                                 Modifier
                                     .fillMaxWidth()
-                                    .height(36.dp)
+                                    .heightIn(min = 40.dp)
                                     .clip(RoundedCornerShape(8.dp))
                                     .clickable(enabled = !isExtendedKey) { useCustomPath = !useCustomPath },
                             verticalAlignment = Alignment.CenterVertically,
@@ -1151,7 +1208,7 @@ fun ImportWalletScreen(
                             modifier =
                                 Modifier
                                     .fillMaxWidth()
-                                    .height(36.dp)
+                                    .heightIn(min = 40.dp)
                                     .clip(RoundedCornerShape(8.dp))
                                     .clickable { useCustomGapLimit = !useCustomGapLimit },
                             verticalAlignment = Alignment.CenterVertically,
@@ -1226,7 +1283,8 @@ fun ImportWalletScreen(
         }
 
         // Error message
-        if (error != null) {
+        val displayError = unsupportedNonMainnetReason ?: unsupportedNestedSegwitReason ?: scannerError ?: error
+        if (displayError != null) {
             Spacer(modifier = Modifier.height(8.dp))
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -1237,7 +1295,7 @@ fun ImportWalletScreen(
                     ),
             ) {
                 Text(
-                    text = error,
+                    text = displayError,
                     style = MaterialTheme.typography.bodyMedium,
                     color = ErrorRed,
                     modifier = Modifier.padding(16.dp),
@@ -1287,7 +1345,7 @@ fun ImportWalletScreen(
                         addressType = selectedAddressType,
                         passphrase = passphraseValue,
                         customDerivationPath = customPathValue,
-                        network = selectedNetwork,
+                        network = WalletNetwork.BITCOIN,
                         isWatchOnly = isWatchOnly || isBitcoinAddress,
                         masterFingerprint = fingerprintValue,
                         seedFormat = seedFormat,
@@ -1352,7 +1410,7 @@ fun ImportWalletScreen(
 
         // Restore from Backup Section
         Text(
-            text = "Restore from Backup",
+            text = "Restore Wallet File",
             style = MaterialTheme.typography.titleMedium,
             color = MaterialTheme.colorScheme.onBackground,
         )
@@ -1388,284 +1446,16 @@ fun ImportWalletScreen(
             )
         }
 
-        // Parsing indicator
-        if (isParsingBackup) {
+        if (backupFileUri != null) {
             Spacer(modifier = Modifier.height(8.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(16.dp),
+            TextButton(
+                onClick = { showBackupRestoreDialog = true },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !isParsingBackup,
+            ) {
+                Text(
+                    text = if (isParsingBackup) "Reading backup file..." else "Review selected backup",
                     color = BitcoinOrange,
-                    strokeWidth = 2.dp,
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = "Reading backup file...",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = TextSecondary,
-                )
-            }
-        }
-
-        // Backup file info and restore flow
-        if (backupFileUri != null && !isParsingBackup) {
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // Encrypted backup - show password field
-            if (backupIsEncrypted == true) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = Icons.Default.Lock,
-                        contentDescription = null,
-                        tint = BitcoinOrange,
-                        modifier = Modifier.size(16.dp),
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = "Encrypted backup - enter password to decrypt",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = BitcoinOrange,
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                OutlinedTextField(
-                    value = backupPassword,
-                    onValueChange = { backupPassword = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    label = { Text("Backup Password", color = TextSecondary) },
-                    singleLine = true,
-                    visualTransformation =
-                        if (showBackupPassword) {
-                            VisualTransformation.None
-                        } else {
-                            PasswordVisualTransformation()
-                        },
-                    keyboardOptions =
-                        KeyboardOptions(
-                            autoCorrectEnabled = false,
-                            keyboardType = KeyboardType.Password,
-                        ),
-                    trailingIcon = {
-                        IconButton(onClick = { showBackupPassword = !showBackupPassword }) {
-                            Icon(
-                                imageVector =
-                                    if (showBackupPassword) {
-                                        Icons.Default.Visibility
-                                    } else {
-                                        Icons.Default.VisibilityOff
-                                    },
-                                contentDescription = null,
-                                tint = TextSecondary,
-                            )
-                        }
-                    },
-                    shape = RoundedCornerShape(8.dp),
-                    colors =
-                        OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = BitcoinOrange,
-                            unfocusedBorderColor = BorderColor,
-                            cursorColor = BitcoinOrange,
-                        ),
-                )
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                IbisButton(
-                    onClick = {
-                        backupCoroutineScope.launch {
-                            isParsingBackup = true
-                            backupError = null
-                            try {
-                                val json = onParseBackupFile(backupFileUri!!, backupPassword)
-                                backupParsedJson = json
-                                backupWalletName = json.optJSONObject("wallet")?.optString("name")
-                                backupError = null
-                            } catch (e: Exception) {
-                                backupError =
-                                    if (e.message?.contains("mac", ignoreCase = true) == true ||
-                                        e.message?.contains("tag", ignoreCase = true) == true ||
-                                        e.message?.contains("AEADBadTagException", ignoreCase = true) == true
-                                    ) {
-                                        "Incorrect password"
-                                    } else {
-                                        e.message ?: "Decryption failed"
-                                    }
-                                backupParsedJson = null
-                            } finally {
-                                isParsingBackup = false
-                            }
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                    enabled = backupPassword.isNotEmpty(),
-                ) {
-                    Text(
-                        text = "Decrypt",
-                        style = MaterialTheme.typography.titleMedium,
-                    )
-                }
-            }
-
-            // Successfully parsed - show wallet info and restore button
-            if (backupParsedJson != null && backupWalletName != null) {
-                Spacer(modifier = Modifier.height(8.dp))
-
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(8.dp),
-                    colors =
-                        CardDefaults.cardColors(
-                            containerColor = SuccessGreen.copy(alpha = 0.1f),
-                        ),
-                ) {
-                    Column(
-                        modifier = Modifier.padding(12.dp),
-                    ) {
-                        Text(
-                            text = "Backup ready to restore",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = SuccessGreen,
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-
-                        val walletObj = backupParsedJson!!.optJSONObject("wallet")
-                        Text(
-                            text = "Wallet: ${walletObj?.optString("name", "Unknown")}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = TextSecondary,
-                        )
-                        val addressType = walletObj?.optString("addressType", "")
-                        val isWatchOnly = walletObj?.optBoolean("isWatchOnly", false) == true
-                        Text(
-                            text = "Type: $addressType${if (isWatchOnly) " (Watch Only)" else ""}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = TextSecondary,
-                        )
-
-                        val hasLabels = backupParsedJson!!.optJSONObject("labels") != null
-                        if (hasLabels) {
-                            val labelsObj = backupParsedJson!!.optJSONObject("labels")
-                            val addrCount = labelsObj?.optJSONObject("addresses")?.length() ?: 0
-                            val txCount = labelsObj?.optJSONObject("transactions")?.length() ?: 0
-                            Text(
-                                text = "Labels: $addrCount address, $txCount transaction",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = TextSecondary,
-                            )
-                        }
-
-                        val hasServerSettings = backupParsedJson!!.optJSONObject("serverSettings") != null
-                        if (hasServerSettings) {
-                            val settingsObj = backupParsedJson!!.optJSONObject("serverSettings")!!
-                            val serverCount = settingsObj.optJSONArray("electrumServers")?.length() ?: 0
-                            val explorerType = settingsObj.optJSONObject("blockExplorer")?.optString("type", "") ?: ""
-                            val feeType = settingsObj.optJSONObject("feeSource")?.optString("type", "") ?: ""
-
-                            val parts = mutableListOf<String>()
-                            if (serverCount > 0) parts.add("$serverCount Electrum server${if (serverCount != 1) "s" else ""}")
-                            if (explorerType.isNotBlank()) parts.add("block explorer")
-                            if (feeType.isNotBlank()) parts.add("fee source")
-
-                            Text(
-                                text = "Server settings: ${parts.joinToString(", ")}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = TextSecondary,
-                            )
-                        }
-                    }
-                }
-
-                // Import Server Settings toggle (only shown if backup contains them)
-                val hasServerSettingsForToggle = backupParsedJson!!.optJSONObject("serverSettings") != null
-                if (hasServerSettingsForToggle) {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Row(
-                        modifier =
-                            Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(8.dp))
-                                .clickable { importServerSettings = !importServerSettings },
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Import Server Settings",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onBackground,
-                            )
-                            Text(
-                                text = "Electrum servers, block explorer, fee source",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = TextSecondary,
-                            )
-                        }
-                        SquareToggle(
-                            checked = importServerSettings,
-                            onCheckedChange = { importServerSettings = it },
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                Button(
-                    onClick = {
-                        backupParsedJson?.let { json ->
-                            onImportFromBackup(json, importServerSettings)
-                        }
-                    },
-                    modifier =
-                        Modifier
-                            .fillMaxWidth()
-                            .height(48.dp),
-                    shape = RoundedCornerShape(8.dp),
-                    enabled = !isLoading,
-                    colors =
-                        ButtonDefaults.buttonColors(
-                            containerColor = BitcoinOrange,
-                            disabledContainerColor = BitcoinOrange.copy(alpha = 0.3f),
-                        ),
-                ) {
-                    if (isLoading) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(20.dp),
-                            color = MaterialTheme.colorScheme.onPrimary,
-                            strokeWidth = 2.dp,
-                        )
-                    } else {
-                        Icon(
-                            imageVector = Icons.Default.Upload,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp),
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = "Restore Wallet",
-                            style = MaterialTheme.typography.titleMedium,
-                        )
-                    }
-                }
-            }
-
-            // Error display
-            if (backupError != null) {
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = backupError!!,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = ErrorRed,
-                )
-            }
-
-            // Unencrypted backup detected
-            if (backupIsEncrypted == false && backupParsedJson == null && backupError == null) {
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = "Unencrypted backup detected",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = TextSecondary,
                 )
             }
         }
@@ -1718,7 +1508,7 @@ fun ImportWalletScreen(
             )
             Spacer(modifier = Modifier.width(8.dp))
             Text(
-                text = "Input Private Key",
+                text = "Input WIF Key",
                 style = MaterialTheme.typography.titleMedium,
             )
         }
@@ -1773,6 +1563,385 @@ private fun AddressTypeButton(
             )
         }
     }
+}
+
+@Composable
+private fun BackupRestoreDialog(
+    fileName: String,
+    backupParsedJson: JSONObject?,
+    backupIsEncrypted: Boolean?,
+    backupPassword: String,
+    onBackupPasswordChange: (String) -> Unit,
+    showBackupPassword: Boolean,
+    onToggleShowBackupPassword: () -> Unit,
+    backupError: String?,
+    isParsingBackup: Boolean,
+    importServerSettings: Boolean,
+    onImportServerSettingsChange: (Boolean) -> Unit,
+    isLoading: Boolean,
+    onDecrypt: () -> Unit,
+    onChooseDifferentFile: () -> Unit,
+    onConfirmRestore: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val canDismiss = !isParsingBackup && !isLoading
+    val scrollState = rememberScrollState()
+    val walletObj = backupParsedJson?.optJSONObject("wallet")
+    val labelsObj = backupParsedJson?.optJSONObject("labels")
+    val serverSettingsObj = backupParsedJson?.optJSONObject("serverSettings")
+    val hasServerSettings = serverSettingsObj != null
+
+    Dialog(
+        onDismissRequest = {
+            if (canDismiss) {
+                onDismiss()
+            }
+        },
+        properties =
+            DialogProperties(
+                usePlatformDefaultWidth = false,
+                dismissOnBackPress = canDismiss,
+                dismissOnClickOutside = canDismiss,
+            ),
+    ) {
+        Surface(
+            modifier =
+                Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+            shape = RoundedCornerShape(12.dp),
+            color = DarkCard,
+        ) {
+            Column(
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp)
+                        .verticalScroll(scrollState),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = "Restore Wallet File",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onBackground,
+                    )
+                    IconButton(
+                        onClick = onDismiss,
+                        enabled = canDismiss,
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Close",
+                            tint = if (canDismiss) TextSecondary else TextSecondary.copy(alpha = 0.4f),
+                        )
+                    }
+                }
+
+                Text(
+                    text = fileName,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextSecondary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                when {
+                    isParsingBackup -> {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(18.dp),
+                                color = BitcoinOrange,
+                                strokeWidth = 2.dp,
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text(
+                                text = "Reading backup file...",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = TextSecondary,
+                            )
+                        }
+                    }
+
+                    backupParsedJson != null -> {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(8.dp),
+                            colors =
+                                CardDefaults.cardColors(
+                                    containerColor = SuccessGreen.copy(alpha = 0.1f),
+                                ),
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(12.dp),
+                            ) {
+                                Text(
+                                    text = "Backup ready to restore",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = SuccessGreen,
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Text(
+                                    text = "Name: ${walletObj?.optString("name", "Unknown")}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = TextSecondary,
+                                )
+                                val addressType = walletObj?.optString("addressType", "")
+                                val isWatchOnly = walletObj?.optBoolean("isWatchOnly", false) == true
+                                Text(
+                                    text = "Type: $addressType${if (isWatchOnly) " (Watch Only)" else ""}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = TextSecondary,
+                                )
+
+                                labelsObj?.let {
+                                    val addressCount = it.optJSONObject("addresses")?.length() ?: 0
+                                    val transactionCount = it.optJSONObject("transactions")?.length() ?: 0
+                                    Text(
+                                        text = "Labels: $addressCount address, $transactionCount transaction",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = TextSecondary,
+                                    )
+                                }
+
+                                serverSettingsObj?.let {
+                                    val serverCount = it.optJSONArray("electrumServers")?.length() ?: 0
+                                    val explorerType =
+                                        it.optJSONObject("blockExplorer")?.optString("type", "") ?: ""
+                                    val feeType =
+                                        it.optJSONObject("feeSource")?.optString("type", "") ?: ""
+                                    val parts = mutableListOf<String>()
+                                    if (serverCount > 0) {
+                                        parts.add("$serverCount Electrum server${if (serverCount != 1) "s" else ""}")
+                                    }
+                                    if (explorerType.isNotBlank()) {
+                                        parts.add("block explorer")
+                                    }
+                                    if (feeType.isNotBlank()) {
+                                        parts.add("fee source")
+                                    }
+                                    Text(
+                                        text = "Server settings: ${parts.joinToString(", ")}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = TextSecondary,
+                                    )
+                                }
+                            }
+                        }
+
+                        if (hasServerSettings) {
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Row(
+                                modifier =
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .clickable { onImportServerSettingsChange(!importServerSettings) }
+                                        .padding(vertical = 4.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "Import Server Settings",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onBackground,
+                                    )
+                                    Text(
+                                        text = "Electrum servers and custom URLs",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = TextSecondary,
+                                    )
+                                }
+                                SquareToggle(
+                                    checked = importServerSettings,
+                                    onCheckedChange = onImportServerSettingsChange,
+                                )
+                            }
+                        }
+                    }
+
+                    backupIsEncrypted == true -> {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Default.Lock,
+                                contentDescription = null,
+                                tint = BitcoinOrange,
+                                modifier = Modifier.size(16.dp),
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Encrypted backup",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = BitcoinOrange,
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        Text(
+                            text = "Enter the password to decrypt and review this backup.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = TextSecondary,
+                        )
+
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        OutlinedTextField(
+                            value = backupPassword,
+                            onValueChange = onBackupPasswordChange,
+                            modifier = Modifier.fillMaxWidth(),
+                            label = { Text("Backup Password", color = TextSecondary) },
+                            singleLine = true,
+                            visualTransformation =
+                                if (showBackupPassword) {
+                                    VisualTransformation.None
+                                } else {
+                                    PasswordVisualTransformation()
+                                },
+                            keyboardOptions =
+                                KeyboardOptions(
+                                    autoCorrectEnabled = false,
+                                    keyboardType = KeyboardType.Password,
+                                ),
+                            trailingIcon = {
+                                IconButton(onClick = onToggleShowBackupPassword) {
+                                    Icon(
+                                        imageVector =
+                                            if (showBackupPassword) {
+                                                Icons.Default.Visibility
+                                            } else {
+                                                Icons.Default.VisibilityOff
+                                            },
+                                        contentDescription = null,
+                                        tint = TextSecondary,
+                                    )
+                                }
+                            },
+                            shape = RoundedCornerShape(8.dp),
+                            colors =
+                                OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = BitcoinOrange,
+                                    unfocusedBorderColor = BorderColor,
+                                    cursorColor = BitcoinOrange,
+                                ),
+                        )
+                    }
+
+                    backupError != null -> {
+                        Text(
+                            text = backupError,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = ErrorRed,
+                        )
+                    }
+                }
+
+                if (backupError != null && (backupParsedJson != null || backupIsEncrypted == true)) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        text = backupError,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = ErrorRed,
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                when {
+                    backupParsedJson != null -> {
+                        IbisButton(
+                            onClick = onConfirmRestore,
+                            modifier =
+                                Modifier
+                                    .fillMaxWidth()
+                                    .height(48.dp),
+                            enabled = !isLoading,
+                        ) {
+                            if (isLoading) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(20.dp),
+                                    color = MaterialTheme.colorScheme.onPrimary,
+                                    strokeWidth = 2.dp,
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Default.Upload,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp),
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "Restore Wallet",
+                                    style = MaterialTheme.typography.titleMedium,
+                                )
+                            }
+                        }
+                    }
+
+                    backupIsEncrypted == true -> {
+                        IbisButton(
+                            onClick = onDecrypt,
+                            modifier =
+                                Modifier
+                                    .fillMaxWidth()
+                                    .height(48.dp),
+                            enabled = backupPassword.isNotEmpty(),
+                        ) {
+                            Text(
+                                text = "Decrypt Backup",
+                                style = MaterialTheme.typography.titleMedium,
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                TextButton(
+                    onClick = onChooseDifferentFile,
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !isLoading && !isParsingBackup,
+                ) {
+                    Text(
+                        text = "Choose Different File",
+                        color = BitcoinOrange,
+                    )
+                }
+
+                IbisButton(
+                    onClick = onDismiss,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp),
+                    enabled = canDismiss,
+                ) {
+                    Text("Cancel", style = MaterialTheme.typography.titleMedium)
+                }
+            }
+        }
+    }
+}
+
+private fun getDisplayNameFromUri(
+    context: Context,
+    uri: Uri,
+): String? {
+    return runCatching {
+        context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+            val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            if (nameIndex >= 0 && cursor.moveToFirst()) {
+                cursor.getString(nameIndex)
+            } else {
+                null
+            }
+        }
+    }.getOrNull()
 }
 
 /**

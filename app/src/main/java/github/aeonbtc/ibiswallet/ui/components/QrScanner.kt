@@ -145,6 +145,7 @@ private fun CameraPreviewBox(
     DisposableEffect(lifecycleOwner) {
         val scanned = AtomicBoolean(false)
         val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+        val analyzerExecutor = Executors.newSingleThreadExecutor()
 
         val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
         cameraProviderFuture.addListener({
@@ -160,7 +161,7 @@ private fun CameraPreviewBox(
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .build()
                     .also {
-                        it.setAnalyzer(Executors.newSingleThreadExecutor()) { imageProxy ->
+                        it.setAnalyzer(analyzerExecutor) { imageProxy ->
                             processFrame(imageProxy, scanned, mainHandler, onCodeScanned)
                         }
                     }
@@ -186,6 +187,7 @@ private fun CameraPreviewBox(
             } catch (_: Exception) {
                 // Cleanup failed
             }
+            analyzerExecutor.shutdown()
         }
     }
 

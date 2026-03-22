@@ -1,6 +1,7 @@
 package github.aeonbtc.ibiswallet.ui.screens
 
 import android.content.Intent
+import androidx.compose.foundation.Image
 import androidx.core.net.toUri
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -73,12 +74,10 @@ fun AboutScreen(onBack: () -> Unit = {}) {
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center,
         ) {
-            // Ibis icon
-            Icon(
-                painter = painterResource(id = R.drawable.ic_ibis),
-                contentDescription = null,
-                tint = TextPrimary,
-                modifier = Modifier.size(72.dp),
+            Image(
+                painter = painterResource(id = R.drawable.ibis),
+                contentDescription = "Ibis Wallet logo",
+                modifier = Modifier.size(180.dp),
             )
 
             Spacer(modifier = Modifier.height(16.dp))
@@ -87,18 +86,18 @@ fun AboutScreen(onBack: () -> Unit = {}) {
                 text = "Ibis Wallet",
                 style = MaterialTheme.typography.headlineMedium,
                 fontWeight = FontWeight.Bold,
-                color = BitcoinOrange,
+                color = TextPrimary,
             )
 
             Spacer(modifier = Modifier.height(4.dp))
 
             Text(
-                text = "Version ${BuildConfig.VERSION_NAME}",
+                text = "Version: ${BuildConfig.VERSION_NAME}",
                 style = MaterialTheme.typography.bodyMedium,
                 color = TextSecondary,
             )
 
-            Spacer(modifier = Modifier.height(32.dp))
+            Spacer(modifier = Modifier.height(24.dp))
 
             // GitHub link
             Row(
@@ -112,14 +111,14 @@ fun AboutScreen(onBack: () -> Unit = {}) {
                                 )
                             context.startActivity(intent)
                         }
-                        .padding(12.dp),
+                        .padding(start = 12.dp, top = 12.dp, end = 12.dp, bottom = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Icon(
                     painter = painterResource(id = R.drawable.ic_github),
                     contentDescription = "GitHub",
                     tint = BitcoinOrange,
-                    modifier = Modifier.size(20.dp),
+                    modifier = Modifier.size(24.dp),
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
@@ -128,11 +127,8 @@ fun AboutScreen(onBack: () -> Unit = {}) {
                     color = BitcoinOrange,
                 )
             }
-
-            Spacer(modifier = Modifier.height(4.dp))
-
             Text(
-                text = "Report bugs and request features on GitHub",
+                text = "Request features and report bugs on GitHub",
                 style = MaterialTheme.typography.bodySmall,
                 color = TextSecondary,
             )

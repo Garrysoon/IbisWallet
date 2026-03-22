@@ -3,11 +3,8 @@
 package github.aeonbtc.ibiswallet.ui.screens
 
 import android.graphics.Bitmap
-import android.nfc.NfcAdapter
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
-import androidx.core.graphics.createBitmap
-import androidx.core.graphics.set
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -50,16 +47,17 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import github.aeonbtc.ibiswallet.data.local.SecureStorage
 import github.aeonbtc.ibiswallet.data.model.WalletState
+import github.aeonbtc.ibiswallet.nfc.NdefHostApduService
 import github.aeonbtc.ibiswallet.ui.components.IbisButton
 import github.aeonbtc.ibiswallet.ui.components.SquareToggle
 import github.aeonbtc.ibiswallet.ui.theme.BitcoinOrange
@@ -68,8 +66,11 @@ import github.aeonbtc.ibiswallet.ui.theme.DarkCard
 import github.aeonbtc.ibiswallet.ui.theme.DarkSurface
 import github.aeonbtc.ibiswallet.ui.theme.SuccessGreen
 import github.aeonbtc.ibiswallet.ui.theme.TextSecondary
-import github.aeonbtc.ibiswallet.nfc.NdefHostApduService
 import github.aeonbtc.ibiswallet.util.SecureClipboard
+import github.aeonbtc.ibiswallet.util.generateQrBitmap
+import github.aeonbtc.ibiswallet.util.getNfcAvailability
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.util.Locale
 
 @Composable
@@ -118,11 +119,20 @@ fun ReceiveScreen(
 
     // Build the URI/content for QR code
     val qrContent =
-        remember(walletState.currentAddress, amountInSats, showAmountField) {
+        remember(walletState.currentAddress, amountInSats, showAmountField, labelText, showLabelField) {
             walletState.currentAddress?.let { address ->
-                if (showAmountField && amountInSats != null && amountInSats > 0) {
-                    val btcAmount = amountInSats.toDouble() / 100_000_000.0
-                    "bitcoin:$address?amount=${String.format(Locale.US, "%.8f", btcAmount)}"
+                val bitcoinAmountSats = amountInSats?.takeIf { showAmountField && it > 0 }
+                val label = labelText.trim().takeIf { showLabelField && it.isNotBlank() }
+                if (bitcoinAmountSats != null || label != null) {
+                    val params = mutableListOf<String>()
+                    bitcoinAmountSats?.let {
+                        val btcAmount = it.toDouble() / 100_000_000.0
+                        params += "amount=${String.format(Locale.US, "%.8f", btcAmount)}"
+                    }
+                    label?.let {
+                        params += "label=${java.net.URLEncoder.encode(it, "UTF-8")}"
+                    }
+                    "bitcoin:$address?${params.joinToString("&")}"
                 } else {
                     address
                 }
@@ -132,18 +142,18 @@ fun ReceiveScreen(
     // Generate QR code when content changes
     LaunchedEffect(qrContent) {
         qrContent?.let { content ->
-            qrBitmap = generateQrCode(content)
+            qrBitmap =
+                withContext(Dispatchers.Default) {
+                    generateQrBitmap(content)
+                }
         }
     }
 
     // NFC broadcasting: set NDEF payload to current address/BIP21 URI while on this screen.
     // Another phone tapping this device will receive the same data as scanning the QR code.
     // Respects the NFC setting in Settings — user can disable broadcasting entirely.
-    val nfcAvailable = remember {
-        NfcAdapter.getDefaultAdapter(context) != null &&
-            SecureStorage(context).isNfcEnabled()
-    }
-    DisposableEffect(qrContent) {
+    val nfcAvailable = context.getNfcAvailability().canBroadcast
+    DisposableEffect(qrContent, nfcAvailable) {
         if (nfcAvailable && qrContent != null) {
             NdefHostApduService.setNdefPayload(qrContent)
         }
@@ -211,6 +221,9 @@ fun ReceiveScreen(
                 .padding(horizontal = 16.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
+        // ════════════════════════════════════════════
+        // Layer 1 Receive (existing Bitcoin content)
+        // ════════════════════════════════════════════
         // QR Code Card
         Card(
             modifier = Modifier.fillMaxWidth(),
@@ -374,7 +387,7 @@ fun ReceiveScreen(
                     ) {
                         Text(
                             text = "Amount",
-                            style = MaterialTheme.typography.bodyMedium,
+                            style = MaterialTheme.typography.bodyMedium.copy(fontSize = 15.sp, lineHeight = 21.sp),
                             color = MaterialTheme.colorScheme.onBackground,
                         )
                         SquareToggle(
@@ -498,10 +511,7 @@ fun ReceiveScreen(
                                     if (privacyMode) {
                                         "≈ ****"
                                     } else if (isUsdMode) {
-                                        "≈ ${formatAmountForReceive(
-                                            amountInSats.toULong(),
-                                            useSats,
-                                        )} ${if (useSats) "sats" else "BTC"}"
+                                        "≈ ${formatAmount(amountInSats.toULong(), useSats, includeUnit = true)}"
                                     } else {
                                         val usdValue = (amountInSats / 100_000_000.0) * btcPrice
                                         "≈ $${String.format(Locale.US, "%,.2f", usdValue)}"
@@ -531,7 +541,7 @@ fun ReceiveScreen(
                     ) {
                         Text(
                             text = "Label",
-                            style = MaterialTheme.typography.bodyMedium,
+                            style = MaterialTheme.typography.bodyMedium.copy(fontSize = 15.sp, lineHeight = 21.sp),
                             color = MaterialTheme.colorScheme.onBackground,
                         )
                         SquareToggle(
@@ -576,7 +586,6 @@ fun ReceiveScreen(
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        // Show All Addresses and Show All UTXOs buttons
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -605,54 +614,6 @@ fun ReceiveScreen(
         }
 
         Spacer(modifier = Modifier.height(12.dp))
-    }
-}
-
-/**
- * Format amount for display based on denomination
- */
-private fun formatAmountForReceive(
-    sats: ULong,
-    useSats: Boolean,
-): String {
-    return if (useSats) {
-        java.text.NumberFormat.getNumberInstance(Locale.US).format(sats.toLong())
-    } else {
-        val btc = sats.toDouble() / 100_000_000.0
-        String.format(Locale.US, "%.8f", btc)
-    }
-}
-
-/**
- * Generate a QR code bitmap for the given content
- */
-private fun generateQrCode(content: String): Bitmap? {
-    return try {
-        val size = 512
-        val qrCodeWriter = com.google.zxing.qrcode.QRCodeWriter()
-        val hints =
-            mapOf(
-                com.google.zxing.EncodeHintType.MARGIN to 1, // Minimal margin
-            )
-        val bitMatrix =
-            qrCodeWriter.encode(
-                content,
-                com.google.zxing.BarcodeFormat.QR_CODE,
-                size,
-                size,
-                hints,
-            )
-
-        val bitmap = createBitmap(size, size, Bitmap.Config.ARGB_8888)
-        for (x in 0 until size) {
-            for (y in 0 until size) {
-                bitmap[x, y] =
-                    if (bitMatrix[x, y]) Color.Black.toArgb() else Color.White.toArgb()
-            }
-        }
-        bitmap
-    } catch (_: Exception) {
-        null
     }
 }
 

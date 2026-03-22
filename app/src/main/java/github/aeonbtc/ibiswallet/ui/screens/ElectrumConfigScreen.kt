@@ -27,8 +27,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Storage
@@ -39,10 +39,12 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
@@ -64,7 +66,6 @@ import github.aeonbtc.ibiswallet.R
 import github.aeonbtc.ibiswallet.data.model.ElectrumConfig
 import github.aeonbtc.ibiswallet.tor.TorState
 import github.aeonbtc.ibiswallet.tor.TorStatus
-import github.aeonbtc.ibiswallet.ui.components.IbisButton
 import github.aeonbtc.ibiswallet.ui.components.QrScannerDialog
 import github.aeonbtc.ibiswallet.ui.components.SquareToggle
 import github.aeonbtc.ibiswallet.ui.components.SquareToggleGreen
@@ -75,13 +76,17 @@ import github.aeonbtc.ibiswallet.ui.theme.DarkCard
 import github.aeonbtc.ibiswallet.ui.theme.DarkSurface
 import github.aeonbtc.ibiswallet.ui.theme.DarkSurfaceVariant
 import github.aeonbtc.ibiswallet.ui.theme.ErrorRed
+import github.aeonbtc.ibiswallet.ui.theme.LightningYellow
 import github.aeonbtc.ibiswallet.ui.theme.SuccessGreen
 import github.aeonbtc.ibiswallet.ui.theme.TextSecondary
+import github.aeonbtc.ibiswallet.ui.theme.TorPurple
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ElectrumConfigScreen(
+    modifier: Modifier = Modifier,
     onBack: () -> Unit,
+    showHeader: Boolean = true,
     isConnecting: Boolean = false,
     isConnected: Boolean = false,
     error: String? = null,
@@ -185,278 +190,270 @@ fun ElectrumConfigScreen(
         )
     }
 
-    Column(
-        modifier =
-            Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        // Header
-        Row(
+    Box(modifier = modifier.fillMaxSize()) {
+        Column(
             modifier =
                 Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            IconButton(onClick = onBack) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                    contentDescription = "Back",
-                )
-            }
-            Spacer(modifier = Modifier.width(8.dp))
-            Text(
-                text = "Electrum Server",
-                style = MaterialTheme.typography.titleLarge,
-                color = MaterialTheme.colorScheme.onBackground,
-            )
-        }
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        // 1. Add Server Button (at top, always visible)
-        Button(
-            onClick = { if (!showAddServerForm) showAddServerForm = true },
-            modifier =
-                Modifier
-                    .fillMaxWidth()
-                    .height(48.dp),
-            shape = RoundedCornerShape(8.dp),
-            enabled = !showAddServerForm,
-            colors =
-                ButtonDefaults.buttonColors(
-                    containerColor = BitcoinOrange,
-                    disabledContainerColor = BitcoinOrange.copy(alpha = 0.3f),
-                ),
-        ) {
-            Icon(
-                imageVector = Icons.Default.Add,
-                contentDescription = null,
-                modifier = Modifier.size(20.dp),
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-            Text(
-                text = "Add Server",
-                style = MaterialTheme.typography.titleMedium,
-            )
-        }
-
-        Spacer(modifier = Modifier.height(6.dp))
-
-        // 2. Current Server / Connection Status Card (always shown)
-        val activeServer = savedServers.find { it.id == activeServerId }
-        CurrentServerCard(
-            server = activeServer,
-            isConnecting = isConnecting,
-            isConnected = isConnected,
-            error = error,
-            serverVersion = serverVersion,
-            blockHeight = blockHeight,
-            onConnect = { activeServerId?.let { onConnectToServer(it) } },
-            onDisconnect = onDisconnect,
-            onCancelConnection = onCancelConnection,
-            onEdit =
-                activeServer?.let { server ->
-                    {
-                        serverToEdit = server
-                        serverUrl = server.url
-                        serverPort = server.port.toString()
-                        serverName = server.name ?: ""
-                        useSsl = server.useSsl
-                        showAddServerForm = true
-                    }
-                },
-        )
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        // 3. Tor Network Card
-        TorStatusCard(
-            torState = torState,
-            isTorEnabled = isTorEnabled,
-            onTorEnabledChange = onTorEnabledChange,
-            isActiveServerOnion = isActiveServerOnion,
-        )
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        // 4. Saved Servers Section
-        if (savedServers.isNotEmpty()) {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(12.dp),
-                colors = CardDefaults.cardColors(containerColor = DarkCard),
-            ) {
-                Column(
-                    modifier = Modifier.fillMaxWidth(),
+            if (showHeader) {
+                // Header
+                Row(
+                    modifier =
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    // Header (non-clickable)
-                    Row(
-                        modifier =
-                            Modifier
-                                .fillMaxWidth()
-                                .padding(16.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
+                    IconButton(onClick = onBack) {
                         Icon(
-                            imageVector = Icons.Default.Storage,
-                            contentDescription = null,
-                            tint = BitcoinOrange,
-                            modifier = Modifier.size(22.dp),
-                        )
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Text(
-                            text = "Saved Servers",
-                            style = MaterialTheme.typography.titleMedium,
-                            color = MaterialTheme.colorScheme.onBackground,
+                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = "Back",
                         )
                     }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Electrum Server",
+                        style = MaterialTheme.typography.titleLarge,
+                        color = MaterialTheme.colorScheme.onBackground,
+                    )
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+            }
 
-                    // Server list (always visible)
+            // 1. Current Server / Connection Status Card (always shown)
+            val activeServer = savedServers.find { it.id == activeServerId }
+            CurrentServerCard(
+                server = activeServer,
+                isConnecting = isConnecting,
+                isConnected = isConnected,
+                error = error,
+                serverVersion = serverVersion,
+                blockHeight = blockHeight,
+                torState = torState,
+                isOnionServer = isActiveServerOnion,
+                onConnect = { activeServerId?.let { onConnectToServer(it) } },
+                onDisconnect = onDisconnect,
+                onCancelConnection = onCancelConnection,
+                onEdit =
+                    activeServer?.let { server ->
+                        {
+                            serverToEdit = server
+                            serverUrl = server.url
+                            serverPort = server.port.toString()
+                            serverName = server.name ?: ""
+                            useSsl = server.useSsl
+                            showAddServerForm = true
+                        }
+                    },
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // 3. Tor Network Card
+            TorStatusCard(
+                torState = torState,
+                isTorEnabled = isTorEnabled,
+                onTorEnabledChange = onTorEnabledChange,
+                isActiveServerOnion = isActiveServerOnion,
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // 4. Saved Servers Section
+            if (savedServers.isNotEmpty()) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.cardColors(containerColor = DarkCard),
+                ) {
                     Column(
-                        modifier =
-                            Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 16.dp)
-                                .padding(bottom = 16.dp),
+                        modifier = Modifier.fillMaxWidth(),
                     ) {
-                        HorizontalDivider(color = BorderColor)
-
-                        Spacer(modifier = Modifier.height(12.dp))
-
-                        // List of saved servers
-                        savedServers.forEach { server ->
-                            val isActive = server.id == activeServerId
-
-                            SavedServerItem(
-                                server = server,
-                                isActive = isActive,
-                                isConnected = isConnected && isActive,
-                                onConnect = {
-                                    // Tor auto-toggle is handled by ViewModel's
-                                    // connectToServer — it checks both server type
-                                    // and fee source before disabling Tor
-                                    server.id?.let { onConnectToServer(it) }
-                                },
-                                onEdit = {
-                                    // Populate form with server values
-                                    serverToEdit = server
-                                    serverUrl = server.url
-                                    serverPort = server.port.toString()
-                                    serverName = server.name ?: ""
-                                    useSsl = server.useSsl
-                                    showAddServerForm = true
-                                },
-                                onDelete = { serverToDelete = server },
+                        // Header (non-clickable)
+                        Row(
+                            modifier =
+                                Modifier
+                                    .fillMaxWidth()
+                                    .padding(16.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Storage,
+                                contentDescription = null,
+                                tint = BitcoinOrange,
+                                modifier = Modifier.size(22.dp),
                             )
-
-                            if (server != savedServers.last()) {
-                                Spacer(modifier = Modifier.height(12.dp))
-                            }
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text(
+                                text = "Saved Servers",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = MaterialTheme.colorScheme.onBackground,
+                            )
                         }
 
-                        // Auto-switch toggle
-                        if (savedServers.size >= 2) {
-                            Spacer(modifier = Modifier.height(12.dp))
+                        // Server list (always visible)
+                        Column(
+                            modifier =
+                                Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp)
+                                    .padding(bottom = 16.dp),
+                        ) {
                             HorizontalDivider(color = BorderColor)
-                            Row(
-                                modifier =
-                                    Modifier
-                                        .fillMaxWidth()
-                                        .padding(vertical = 10.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = "Auto-switch on disconnect",
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        color = MaterialTheme.colorScheme.onBackground,
-                                    )
-                                    Text(
-                                        text = "Try next server if connection drops",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = TextSecondary,
+
+                            Spacer(modifier = Modifier.height(12.dp))
+
+                            // List of saved servers
+                            savedServers.forEach { server ->
+                                val isActive = server.id == activeServerId
+
+                                SavedServerItem(
+                                    server = server,
+                                    isActive = isActive,
+                                    isConnected = isConnected && isActive,
+                                    onConnect = {
+                                        // Tor auto-toggle is handled by ViewModel's
+                                        // connectToServer — it checks both server type
+                                        // and fee source before disabling Tor
+                                        server.id?.let { onConnectToServer(it) }
+                                    },
+                                    onEdit = {
+                                        // Populate form with server values
+                                        serverToEdit = server
+                                        serverUrl = server.url
+                                        serverPort = server.port.toString()
+                                        serverName = server.name ?: ""
+                                        useSsl = server.useSsl
+                                        showAddServerForm = true
+                                    },
+                                    onDelete = { serverToDelete = server },
+                                )
+
+                                if (server != savedServers.last()) {
+                                    Spacer(modifier = Modifier.height(12.dp))
+                                }
+                            }
+
+                            // Auto-switch toggle
+                            if (savedServers.size >= 2) {
+                                Spacer(modifier = Modifier.height(12.dp))
+                                HorizontalDivider(color = BorderColor)
+                                Row(
+                                    modifier =
+                                        Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = "Auto-switch on disconnect",
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = MaterialTheme.colorScheme.onBackground,
+                                        )
+                                        Text(
+                                            text = "Try next server if connection drops",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = TextSecondary,
+                                        )
+                                    }
+                                    SquareToggle(
+                                        checked = autoSwitchServer,
+                                        onCheckedChange = onAutoSwitchServerChange,
                                     )
                                 }
-                                SquareToggle(
-                                    checked = autoSwitchServer,
-                                    onCheckedChange = onAutoSwitchServerChange,
-                                )
                             }
                         }
                     }
                 }
+
+                Spacer(modifier = Modifier.height(12.dp))
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            // Server configuration dialog
+            if (showAddServerForm) {
+                ServerConfigDialog(
+                    isEditMode = isEditMode,
+                    serverName = serverName,
+                    serverUrl = serverUrl,
+                    serverPort = serverPort,
+                    useSsl = useSsl,
+                    isValidName = isValidName,
+                    isValidUrl = isValidUrl,
+                    isValidPort = isValidPort,
+                    onNameChange = { serverName = it },
+                    onUrlChange = { serverUrl = it },
+                    onPortChange = { serverPort = it },
+                    onScanQr = { showQrScanner = true },
+                    onSslChange = { newUseSsl ->
+                        useSsl = newUseSsl
+                        if (newUseSsl && serverPort == "50001") {
+                            serverPort = "50002"
+                        } else if (!newUseSsl && serverPort == "50002") {
+                            serverPort = "50001"
+                        }
+                    },
+                    onSave = {
+                        // Cancel any in-progress connection before saving
+                        if (isConnecting) {
+                            onCancelConnection()
+                        }
+
+                        val config =
+                            ElectrumConfig(
+                                id = serverToEdit?.id,
+                                url = serverUrl.trim(),
+                                port = portNumber ?: 50001,
+                                useSsl = useSsl,
+                                name = serverName.trim(),
+                                useTor = serverUrl.trim().endsWith(".onion"),
+                            )
+                        val savedConfig = onSaveServer(config)
+
+                        // Tor auto-toggle is handled by ViewModel's connectToServer
+                        savedConfig.id?.let { onConnectToServer(it) }
+
+                        serverUrl = ""
+                        serverPort = "50001"
+                        serverName = ""
+                        useSsl = false
+                        serverToEdit = null
+                        showAddServerForm = false
+                    },
+                    onCancel = {
+                        showAddServerForm = false
+                        serverToEdit = null
+                        serverUrl = ""
+                        serverPort = "50001"
+                        serverName = ""
+                        useSsl = false
+                    },
+                )
+            }
+
+            // Bottom spacing for scroll area
+            Spacer(modifier = Modifier.height(16.dp))
         }
 
-        // Server configuration dialog
-        if (showAddServerForm) {
-            ServerConfigDialog(
-                isEditMode = isEditMode,
-                serverName = serverName,
-                serverUrl = serverUrl,
-                serverPort = serverPort,
-                useSsl = useSsl,
-                isValidName = isValidName,
-                isValidUrl = isValidUrl,
-                isValidPort = isValidPort,
-                onNameChange = { serverName = it },
-                onUrlChange = { serverUrl = it },
-                onPortChange = { serverPort = it },
-                onScanQr = { showQrScanner = true },
-                onSslChange = { newUseSsl ->
-                    useSsl = newUseSsl
-                    if (newUseSsl && serverPort == "50001") {
-                        serverPort = "50002"
-                    } else if (!newUseSsl && serverPort == "50002") {
-                        serverPort = "50001"
-                    }
-                },
-                onSave = {
-                    // Cancel any in-progress connection before saving
-                    if (isConnecting) {
-                        onCancelConnection()
-                    }
-
-                    val config =
-                        ElectrumConfig(
-                            id = serverToEdit?.id,
-                            url = serverUrl.trim(),
-                            port = portNumber ?: 50001,
-                            useSsl = useSsl,
-                            name = serverName.trim(),
-                            useTor = serverUrl.trim().endsWith(".onion"),
-                        )
-                    val savedConfig = onSaveServer(config)
-
-                    // Tor auto-toggle is handled by ViewModel's connectToServer
-                    savedConfig.id?.let { onConnectToServer(it) }
-
-                    serverUrl = ""
-                    serverPort = "50001"
-                    serverName = ""
-                    useSsl = false
-                    serverToEdit = null
-                    showAddServerForm = false
-                },
-                onCancel = {
-                    showAddServerForm = false
-                    serverToEdit = null
-                    serverUrl = ""
-                    serverPort = "50001"
-                    serverName = ""
-                    useSsl = false
-                },
+        FloatingActionButton(
+            onClick = { if (!showAddServerForm) showAddServerForm = true },
+            modifier =
+                Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(16.dp),
+            shape = CircleShape,
+            containerColor = if (showAddServerForm) BitcoinOrange.copy(alpha = 0.3f) else BitcoinOrange,
+            contentColor = MaterialTheme.colorScheme.onPrimary,
+        ) {
+            Icon(
+                imageVector = Icons.Default.Add,
+                contentDescription = "Add Server",
             )
         }
-
-        // Bottom spacing for scroll area
-        Spacer(modifier = Modifier.height(16.dp))
     }
 }
 
@@ -467,13 +464,13 @@ fun ElectrumConfigScreen(
 private fun ProtocolBadge(useSsl: Boolean) {
     Surface(
         shape = RoundedCornerShape(4.dp),
-        color = if (useSsl) SuccessGreen.copy(alpha = 0.15f) else TextSecondary.copy(alpha = 0.15f),
-        border = BorderStroke(1.dp, if (useSsl) SuccessGreen.copy(alpha = 0.4f) else TextSecondary.copy(alpha = 0.3f)),
+        color = if (useSsl) LightningYellow.copy(alpha = 0.15f) else TextSecondary.copy(alpha = 0.15f),
+        border = BorderStroke(1.dp, if (useSsl) LightningYellow.copy(alpha = 0.4f) else TextSecondary.copy(alpha = 0.3f)),
     ) {
         Text(
             text = if (useSsl) "SSL" else "TCP",
             style = MaterialTheme.typography.labelSmall,
-            color = if (useSsl) SuccessGreen else TextSecondary,
+            color = if (useSsl) LightningYellow else TextSecondary,
             modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
         )
     }
@@ -533,20 +530,31 @@ private fun ServerDetailRow(
  * Current Server Card - shows connection state and server info
  */
 @Composable
-private fun CurrentServerCard(
+fun CurrentServerCard(
     server: ElectrumConfig?,
     isConnecting: Boolean,
     isConnected: Boolean,
     error: String? = null,
     serverVersion: String? = null,
     blockHeight: UInt? = null,
+    torState: TorState = TorState(),
+    isOnionServer: Boolean = false,
+    headerTitle: String = "Current Server",
+    headerLeadingContent: (@Composable () -> Unit)? = null,
+    headerTrailingContent: (@Composable () -> Unit)? = null,
     onConnect: () -> Unit = {},
     onDisconnect: () -> Unit = {},
     onCancelConnection: () -> Unit = {},
     onEdit: (() -> Unit)? = null,
+    onAddServer: (() -> Unit)? = null,
 ) {
+    val isTorBootstrapping =
+        isConnecting && isOnionServer &&
+            torState.status != TorStatus.CONNECTED
+
     val statusColor =
         when {
+            isTorBootstrapping -> TorPurple
             isConnecting -> BitcoinOrange
             isConnected -> SuccessGreen
             else -> TextSecondary
@@ -572,18 +580,26 @@ private fun CurrentServerCard(
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.Cloud,
-                        contentDescription = null,
-                        tint = BitcoinOrange,
-                        modifier = Modifier.size(22.dp),
-                    )
+                    if (headerLeadingContent != null) {
+                        headerLeadingContent()
+                    } else {
+                        Icon(
+                            imageVector = Icons.Default.Dns,
+                            contentDescription = null,
+                            tint = BitcoinOrange,
+                            modifier = Modifier.size(22.dp),
+                        )
+                    }
                     Spacer(modifier = Modifier.width(10.dp))
                     Text(
-                        text = "Current Server",
+                        text = headerTitle,
                         style = MaterialTheme.typography.titleMedium,
                         color = MaterialTheme.colorScheme.onBackground,
                     )
+                    if (headerTrailingContent != null) {
+                        Spacer(modifier = Modifier.width(6.dp))
+                        headerTrailingContent()
+                    }
                 }
 
                 // Connect/Disconnect buttons
@@ -601,9 +617,7 @@ private fun CurrentServerCard(
                                     color =
                                         when {
                                             canConnect -> BorderColor
-                                            isConnected -> SuccessGreen
-                                            isConnecting -> BitcoinOrange
-                                            else -> BorderColor
+                                            else -> statusColor
                                         },
                                     shape = RoundedCornerShape(8.dp),
                                 )
@@ -629,7 +643,7 @@ private fun CurrentServerCard(
                             if (isConnecting) {
                                 CircularProgressIndicator(
                                     modifier = Modifier.size(12.dp),
-                                    color = BitcoinOrange,
+                                    color = statusColor,
                                     strokeWidth = 1.5.dp,
                                 )
                                 Spacer(modifier = Modifier.width(6.dp))
@@ -637,11 +651,13 @@ private fun CurrentServerCard(
                             Text(
                                 text =
                                     when {
+                                        isTorBootstrapping -> "Starting Tor"
                                         isConnecting -> "Connecting"
                                         isConnected -> "Connected"
                                         else -> "Connect"
                                     },
                                 style = MaterialTheme.typography.labelMedium,
+                                color = statusColor,
                             )
                         }
                     }
@@ -783,21 +799,27 @@ private fun CurrentServerCard(
                     )
                 }
             } else {
-                // No server selected
-                Box(
+                // No server — show add button
+                OutlinedButton(
+                    onClick = { onAddServer?.invoke() },
                     modifier =
                         Modifier
                             .fillMaxWidth()
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(DarkSurfaceVariant)
-                            .padding(16.dp),
-                    contentAlignment = Alignment.Center,
+                            .height(48.dp),
+                    shape = RoundedCornerShape(8.dp),
+                    border = BorderStroke(1.dp, BorderColor),
+                    colors =
+                        ButtonDefaults.outlinedButtonColors(
+                            contentColor = TextSecondary,
+                        ),
                 ) {
-                    Text(
-                        text = "Add a server to connect",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = TextSecondary,
+                    Icon(
+                        imageVector = Icons.Default.Add,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
                     )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Configure server")
                 }
             }
         }
@@ -993,7 +1015,6 @@ private fun TorStatusCard(
                 Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(8.dp))
-                    .clickable { onTorEnabledChange(!isTorEnabled) }
                     .padding(16.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,

@@ -1,25 +1,21 @@
 package github.aeonbtc.ibiswallet
 
 import android.app.ActivityManager
-import android.app.PendingIntent
 import android.content.ComponentName
 import android.content.Intent
-import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.nfc.NdefMessage
 import android.nfc.NdefRecord
 import android.nfc.NfcAdapter
-import android.nfc.tech.IsoDep
+import android.nfc.Tag
 import android.nfc.tech.Ndef
-import android.nfc.tech.NfcA
-import android.nfc.tech.NfcB
-import android.nfc.tech.NfcF
-import android.nfc.tech.NfcV
+import android.nfc.tech.IsoDep
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
+import android.util.Log
 import android.view.WindowManager
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -28,11 +24,13 @@ import androidx.biometric.BiometricPrompt
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
+import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.ViewModelProvider
 import github.aeonbtc.ibiswallet.data.local.SecureStorage
 import github.aeonbtc.ibiswallet.ui.IbisWalletApp
@@ -40,82 +38,270 @@ import github.aeonbtc.ibiswallet.ui.screens.CalculatorScreen
 import github.aeonbtc.ibiswallet.ui.screens.LockScreen
 import github.aeonbtc.ibiswallet.ui.theme.DarkBackground
 import github.aeonbtc.ibiswallet.ui.theme.IbisWalletTheme
+import github.aeonbtc.ibiswallet.util.getNfcAvailability
+import github.aeonbtc.ibiswallet.util.isRecognizedSendInput
+import github.aeonbtc.ibiswallet.viewmodel.LiquidViewModel
 import github.aeonbtc.ibiswallet.viewmodel.WalletViewModel
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 
 class MainActivity : FragmentActivity() {
+    companion object {
+        private const val TAG = "MainActivity"
+
+        private val NFC_SW_OK = byteArrayOf(0x90.toByte(), 0x00)
+        private val NFC_SELECT_AID = byteArrayOf(
+            0x00, 0xA4.toByte(), 0x04, 0x00, 0x07,
+            0xD2.toByte(), 0x76, 0x00, 0x00, 0x85.toByte(), 0x01, 0x01,
+        )
+        private val NFC_SELECT_AID_WITH_LE = NFC_SELECT_AID + byteArrayOf(0x00)
+        private val NFC_SELECT_CC_FILE = byteArrayOf(
+            0x00, 0xA4.toByte(), 0x00, 0x0C, 0x02,
+            0xE1.toByte(), 0x03,
+        )
+        private val NFC_READ_CC = byteArrayOf(
+            0x00, 0xB0.toByte(), 0x00, 0x00, 0x0F,
+        )
+        private val NFC_SELECT_NDEF_FILE = byteArrayOf(
+            0x00, 0xA4.toByte(), 0x00, 0x0C, 0x02,
+            0xE1.toByte(), 0x04,
+        )
+        private val NFC_READ_NDEF_LENGTH = byteArrayOf(
+            0x00, 0xB0.toByte(), 0x00, 0x00, 0x02,
+        )
+        private const val NFC_READ_CHUNK_SIZE = 59
+    }
+
     private lateinit var secureStorage: SecureStorage
     private lateinit var walletViewModel: WalletViewModel
+    private lateinit var liquidViewModel: LiquidViewModel
     private var isUnlocked by mutableStateOf(false)
+    private var appUnlockCounter by mutableIntStateOf(0)
     private var cloakBypassed by mutableStateOf(false)
     private var biometricPrompt: BiometricPrompt? = null
     private var wasInBackground = false
     private val biometricAutoCancelHandler = Handler(Looper.getMainLooper())
     private var isCloakActive = false
 
-    // NFC foreground dispatch — enabled when Send screen is active so NFC tag
-    // reads go directly to this activity instead of triggering the system chooser.
+    // NFC reader mode — enabled when Send/Balance screen is active.
+    // Uses enableReaderMode() instead of enableForegroundDispatch() to suppress
+    // NFC peer-to-peer negotiation, which prevents two phones from communicating
+    // when one uses HCE (broadcasting) and the other reads.
     private var nfcAdapter: NfcAdapter? = null
-    private var nfcForegroundRequested = false
-    private var nfcForegroundActive = false
+    private var nfcReaderRequested = false
+    private var nfcReaderActive = false
 
     /**
-     * Enable NFC foreground dispatch so this activity receives NFC tag reads
-     * with priority over the manifest intent filter. Called when the Send screen
-     * becomes visible and NFC is enabled in settings.
+     * NFC ReaderCallback — invoked on a background thread when a tag is detected.
+     * Reads NDEF message from the tag (or HCE peer), extracts a supported send payload,
+     * and posts it to the ViewModel on the main thread.
      */
-    fun enableNfcForegroundDispatch() {
-        nfcForegroundRequested = true
-        activateNfcForegroundDispatch()
-    }
-
-    /**
-     * Disable NFC foreground dispatch. Called when the Send screen is no longer visible.
-     */
-    fun disableNfcForegroundDispatch() {
-        nfcForegroundRequested = false
-        deactivateNfcForegroundDispatch()
-    }
-
-    private fun activateNfcForegroundDispatch() {
-        val adapter = nfcAdapter ?: return
-        if (nfcForegroundActive) return
-        if (!secureStorage.isNfcEnabled()) return
-        val intent = Intent(this, javaClass).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
-        val pendingIntent = PendingIntent.getActivity(
-            this, 0, intent,
-            PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-        )
-        // Catch all NDEF tags, plus tech-discovered for non-NDEF NFC devices (HCE peers)
-        val ndefFilter = IntentFilter(NfcAdapter.ACTION_NDEF_DISCOVERED).apply {
-            try { addDataScheme("bitcoin") } catch (_: Exception) { }
+    private val nfcReaderCallback = NfcAdapter.ReaderCallback { tag: Tag ->
+        val sendInput = readSendInputFromTag(tag) ?: return@ReaderCallback
+        runOnUiThread {
+            walletViewModel.setPendingSendInput(sendInput)
         }
-        val techFilter = IntentFilter(NfcAdapter.ACTION_TECH_DISCOVERED)
-        val tagFilter = IntentFilter(NfcAdapter.ACTION_TAG_DISCOVERED)
-        val filters = arrayOf(ndefFilter, techFilter, tagFilter)
-        val techLists = arrayOf(
-            arrayOf(Ndef::class.java.name),
-            arrayOf(IsoDep::class.java.name),
-            arrayOf(NfcA::class.java.name),
-            arrayOf(NfcB::class.java.name),
-            arrayOf(NfcF::class.java.name),
-            arrayOf(NfcV::class.java.name),
-        )
-        try {
-            adapter.enableForegroundDispatch(this, pendingIntent, filters, techLists)
-            nfcForegroundActive = true
-        } catch (_: Exception) { }
     }
 
-    private fun deactivateNfcForegroundDispatch() {
-        if (!nfcForegroundActive) return
+    private fun readSendInputFromTag(tag: Tag): String? {
+        return readSendInputFromCachedNdef(tag) ?: readSendInputFromIsoDep(tag)
+    }
+
+    /**
+     * Fast path for regular NDEF tags where Android already cached the NDEF message.
+     */
+    private fun readSendInputFromCachedNdef(tag: Tag): String? {
+        val ndef = Ndef.get(tag) ?: return null
+        val message = ndef.cachedNdefMessage ?: return null
+        return extractRecognizedSendInput(message)
+    }
+
+    /**
+     * Fallback path for HCE peers that expose ISO-DEP but do not surface a cached NDEF tag.
+     * Mirrors the NFC Forum Type 4 read sequence used by Phoenix.
+     */
+    private fun readSendInputFromIsoDep(tag: Tag): String? {
+        val isoDep = IsoDep.get(tag) ?: return null
+
+        return try {
+            isoDep.connect()
+
+            val selectAidResponse = transceiveSelectAid(isoDep)
+            if (!selectAidResponse.contentEquals(NFC_SW_OK)) {
+                Log.w(TAG, "Unexpected SELECT AID response: ${selectAidResponse.toHexString()}")
+                return null
+            }
+
+            val selectCcResponse = isoDep.transceive(NFC_SELECT_CC_FILE)
+            if (!selectCcResponse.contentEquals(NFC_SW_OK)) {
+                Log.w(TAG, "Unexpected SELECT CC response: ${selectCcResponse.toHexString()}")
+                return null
+            }
+
+            val readCcResponse = isoDep.transceive(NFC_READ_CC)
+            if (!hasSuccessStatus(readCcResponse)) {
+                Log.w(TAG, "Unexpected READ CC response: ${readCcResponse.toHexString()}")
+                return null
+            }
+
+            val selectNdefResponse = isoDep.transceive(NFC_SELECT_NDEF_FILE)
+            if (!selectNdefResponse.contentEquals(NFC_SW_OK)) {
+                Log.w(TAG, "Unexpected SELECT NDEF response: ${selectNdefResponse.toHexString()}")
+                return null
+            }
+
+            val lengthResponse = isoDep.transceive(NFC_READ_NDEF_LENGTH)
+            if (!hasSuccessStatus(lengthResponse)) {
+                Log.w(TAG, "Unexpected NDEF length response: ${lengthResponse.toHexString()}")
+                return null
+            }
+
+            val lengthBytes = responsePayload(lengthResponse)
+            if (lengthBytes.size != 2) {
+                Log.w(TAG, "Unexpected NDEF length payload size: ${lengthBytes.size}")
+                return null
+            }
+
+            val messageLength = ((lengthBytes[0].toInt() and 0xFF) shl 8) or (lengthBytes[1].toInt() and 0xFF)
+            if (messageLength <= 0) return null
+
+            val messageBytes = ByteArray(messageLength)
+            var bytesRead = 0
+            var offset = 2
+
+            while (bytesRead < messageLength) {
+                val chunkSize = minOf(NFC_READ_CHUNK_SIZE, messageLength - bytesRead)
+                val response =
+                    isoDep.transceive(
+                        byteArrayOf(
+                            0x00,
+                            0xB0.toByte(),
+                            ((offset shr 8) and 0xFF).toByte(),
+                            (offset and 0xFF).toByte(),
+                            chunkSize.toByte(),
+                        ),
+                    )
+
+                if (!hasSuccessStatus(response)) {
+                    Log.w(TAG, "Unexpected READ NDEF response at offset $offset: ${response.toHexString()}")
+                    return null
+                }
+
+                val chunk = responsePayload(response)
+                if (chunk.isEmpty()) {
+                    Log.w(TAG, "Empty READ NDEF chunk at offset $offset")
+                    return null
+                }
+
+                chunk.copyInto(messageBytes, destinationOffset = bytesRead)
+                bytesRead += chunk.size
+                offset += chunk.size
+            }
+
+            extractRecognizedSendInput(NdefMessage(messageBytes))
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to read NFC tag via ISO-DEP", e)
+            null
+        } finally {
+            runCatching { isoDep.close() }
+        }
+    }
+
+    private fun transceiveSelectAid(isoDep: IsoDep): ByteArray {
+        val primaryResponse = isoDep.transceive(NFC_SELECT_AID)
+        return if (primaryResponse.contentEquals(NFC_SW_OK)) {
+            primaryResponse
+        } else {
+            isoDep.transceive(NFC_SELECT_AID_WITH_LE)
+        }
+    }
+
+    private fun extractRecognizedSendInput(message: NdefMessage): String? {
+        for (record in message.records) {
+            val text = parseNdefRecord(record) ?: continue
+            val trimmed = text.trim()
+            if (isRecognizedSendInput(trimmed)) {
+                return trimmed
+            }
+        }
+        return null
+    }
+
+    private fun hasSuccessStatus(response: ByteArray): Boolean {
+        return response.size >= 2 && response.takeLast(2).toByteArray().contentEquals(NFC_SW_OK)
+    }
+
+    private fun responsePayload(response: ByteArray): ByteArray {
+        if (response.size <= 2) return byteArrayOf()
+        return response.copyOfRange(0, response.size - 2)
+    }
+
+    private fun ByteArray.toHexString(): String = joinToString("") { "%02X".format(it) }
+
+    /**
+     * Enable NFC reader mode so this activity can read NFC tags and HCE peers.
+     * Disables P2P negotiation so two phones (one broadcasting via HCE, one reading)
+     * can communicate. Called when Send/Balance screen becomes visible.
+     */
+    fun enableNfcReaderMode() {
+        nfcReaderRequested = true
+        activateNfcReaderMode()
+    }
+
+    /**
+     * Disable NFC reader mode. Called when Send/Balance screen is no longer visible.
+     */
+    fun disableNfcReaderMode() {
+        nfcReaderRequested = false
+        deactivateNfcReaderMode()
+    }
+
+    private fun activateNfcReaderMode() {
+        if (nfcReaderActive) return
+
+        val nfcAvailability = getNfcAvailability(secureStorage.isNfcEnabled())
+        if (!nfcAvailability.hasHardware || !nfcAvailability.isAppEnabled) {
+            nfcReaderActive = false
+            return
+        }
+        if (!nfcAvailability.isSystemEnabled) {
+            nfcReaderActive = false
+            Log.w(TAG, "NFC reader mode unavailable because system NFC is disabled")
+            return
+        }
+
+        val adapter = nfcAdapter
+        if (adapter == null) {
+            nfcReaderActive = false
+            Log.w(TAG, "NFC reader mode unavailable because the adapter could not be acquired")
+            return
+        }
+
+        val flags = NfcAdapter.FLAG_READER_NFC_A or
+            NfcAdapter.FLAG_READER_NFC_B or
+            NfcAdapter.FLAG_READER_NFC_F or
+            NfcAdapter.FLAG_READER_NFC_V or
+            NfcAdapter.FLAG_READER_NO_PLATFORM_SOUNDS
         try {
-            nfcAdapter?.disableForegroundDispatch(this)
+            adapter.enableReaderMode(this, nfcReaderCallback, flags, null)
+            nfcReaderActive = true
+        } catch (e: Exception) {
+            nfcReaderActive = false
+            Log.w(TAG, "Failed to enable NFC reader mode", e)
+        }
+    }
+
+    private fun deactivateNfcReaderMode() {
+        if (!nfcReaderActive) return
+        try {
+            nfcAdapter?.disableReaderMode(this)
         } catch (_: Exception) { }
-        nfcForegroundActive = false
+        nfcReaderActive = false
     }
 
     /**
@@ -171,38 +357,42 @@ class MainActivity : FragmentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        // Prevent tapjacking/overlay attacks
-        window.decorView.filterTouchesWhenObscured = true
+            // Prevent tapjacking/overlay attacks
+            window.decorView.filterTouchesWhenObscured = true
 
-        secureStorage = SecureStorage(this)
-        walletViewModel = ViewModelProvider(this)[WalletViewModel::class.java]
-        nfcAdapter = NfcAdapter.getDefaultAdapter(this)
+            secureStorage = SecureStorage.getInstance(this)
+            walletViewModel = ViewModelProvider(this)[WalletViewModel::class.java]
+            liquidViewModel = ViewModelProvider(this)[LiquidViewModel::class.java]
+            nfcAdapter = NfcAdapter.getDefaultAdapter(this)
 
-        // Apply pending icon swap before any UI
-        applyPendingIconSwap()
+            // Apply pending icon swap before any UI
+            applyPendingIconSwap()
 
-        // Check cloak mode
-        isCloakActive = secureStorage.isCloakModeEnabled() && secureStorage.getCloakCode() != null
-        updateTaskDescription()
+            // Check cloak mode
+            isCloakActive = secureStorage.isCloakModeEnabled() && secureStorage.getCloakCode() != null
+            updateTaskDescription()
 
-        // Apply screenshot prevention if enabled
-        if (secureStorage.getDisableScreenshots()) {
-            window.setFlags(
-                WindowManager.LayoutParams.FLAG_SECURE,
-                WindowManager.LayoutParams.FLAG_SECURE,
-            )
-        }
+            // Apply screenshot prevention if enabled
+            if (secureStorage.getDisableScreenshots()) {
+                window.setFlags(
+                    WindowManager.LayoutParams.FLAG_SECURE,
+                    WindowManager.LayoutParams.FLAG_SECURE,
+                )
+            }
 
-        // Check if security is enabled - always locked on fresh start
-        // When cloak mode is active, stay locked so the calculator screen shows first
-        val securityMethod = secureStorage.getSecurityMethod()
-        isUnlocked = securityMethod == SecureStorage.SecurityMethod.NONE && !isCloakActive
+            // Check if security is enabled - always locked on fresh start
+            // When cloak mode is active, stay locked so the calculator screen shows first
+            val securityMethod = secureStorage.getSecurityMethod()
+            isUnlocked = securityMethod == SecureStorage.SecurityMethod.NONE && !isCloakActive
 
-        // Setup biometric prompt
-        setupBiometricPrompt()
+            // Setup biometric prompt
+            setupBiometricPrompt()
+            if (securityMethod == SecureStorage.SecurityMethod.BIOMETRIC) {
+                prewarmBiometricCipher()
+            }
 
-        // Check for incoming bitcoin: URI intent
-        handleBitcoinIntent(intent)
+            // Check for incoming send intent
+            handleSendIntent(intent)
 
         setContent {
             IbisWalletTheme {
@@ -213,6 +403,7 @@ class MainActivity : FragmentActivity() {
                     if (isUnlocked) {
                         IbisWalletApp(
                             onLockApp = { isUnlocked = false },
+                            appUnlockCounter = appUnlockCounter,
                         )
                     } else if (isCloakActive && !cloakBypassed) {
                         // Show calculator disguise — entering the secret code bypasses it
@@ -248,33 +439,45 @@ class MainActivity : FragmentActivity() {
                                 // For BIOMETRIC mode with duress: only duress PIN works
                                 //   (real wallet accessed via biometric through the C button)
                                 val isRealPin =
-                                    secMethod == SecureStorage.SecurityMethod.PIN &&
-                                        secureStorage.verifyPin(pin)
+                                    withContext(Dispatchers.Default) {
+                                        secMethod == SecureStorage.SecurityMethod.PIN &&
+                                            secureStorage.verifyPin(pin)
+                                    }
                                 // When verifyPin already ran and failed, it incremented
                                 // the shared counter — don't double-count in verifyDuressPin
                                 val realPinWasTried = secMethod == SecureStorage.SecurityMethod.PIN
                                 val isDuressPin =
                                     !isRealPin && isDuressEnabled &&
-                                        secureStorage.verifyDuressPin(pin, incrementFailedAttempts = !realPinWasTried)
+                                        withContext(Dispatchers.Default) {
+                                            secureStorage.verifyDuressPin(
+                                                pin,
+                                                incrementFailedAttempts = !realPinWasTried,
+                                            )
+                                        }
 
                                 when {
                                     isRealPin -> {
                                         walletViewModel.exitDuressMode()
+                                        appUnlockCounter++
                                         isUnlocked = true
                                         true
                                     }
                                     isDuressPin -> {
                                         walletViewModel.enterDuressMode()
+                                        appUnlockCounter++
                                         isUnlocked = true
                                         true
                                     }
                                     else -> {
                                         // Check if failed attempts reached auto-wipe threshold
                                         if (secureStorage.shouldAutoWipe()) {
-                                            walletViewModel.wipeAllData {
-                                                // Kill the process to simulate a crash — no restart,
-                                                // no fresh state visible. The app simply vanishes.
-                                                android.os.Process.killProcess(android.os.Process.myPid())
+                                            lifecycleScope.launch {
+                                                liquidViewModel.prepareForFullWipe()
+                                                walletViewModel.wipeAllData {
+                                                    // Kill the process to simulate a crash — no restart,
+                                                    // no fresh state visible. The app simply vanishes.
+                                                    android.os.Process.killProcess(android.os.Process.myPid())
+                                                }
                                             }
                                         }
                                         false
@@ -302,10 +505,10 @@ class MainActivity : FragmentActivity() {
     override fun onResume() {
         super.onResume()
 
-        // Re-enable NFC foreground dispatch if the Send screen requested it
+        // Re-enable NFC reader mode if the Send/Balance screen requested it
         // (Android requires disabling in onPause and re-enabling in onResume)
-        if (nfcForegroundRequested) {
-            activateNfcForegroundDispatch()
+        if (nfcReaderRequested) {
+            activateNfcReaderMode()
         }
 
         val securityMethod = secureStorage.getSecurityMethod()
@@ -348,13 +551,14 @@ class MainActivity : FragmentActivity() {
             !secureStorage.isDuressEnabled() &&
             !(isCloakActive && !cloakBypassed)
         ) {
+            prewarmBiometricCipher()
             showBiometricPrompt()
         }
     }
 
     override fun onPause() {
         super.onPause()
-        deactivateNfcForegroundDispatch()
+        deactivateNfcReaderMode()
     }
 
     override fun onStop() {
@@ -392,62 +596,26 @@ class MainActivity : FragmentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        handleBitcoinIntent(intent)
+        handleSendIntent(intent)
     }
 
     /**
-     * Extract a bitcoin: URI from the intent and store it in the ViewModel.
-     * Handles regular VIEW intents (browser/app links) and NFC foreground dispatch
-     * intents (only active on the Send screen).
+     * Extract a supported send payload from the intent and store it in the ViewModel.
+     * Handles ACTION_VIEW intents (browser/app links) for Bitcoin, Lightning, and Liquid.
+     * NFC tag reading is handled separately by [nfcReaderCallback].
      */
-    private fun handleBitcoinIntent(intent: Intent?) {
+    private fun handleSendIntent(intent: Intent?) {
         if (intent == null) return
 
-        // 1. Check intent data URI (covers ACTION_VIEW with bitcoin: scheme)
         intent.data?.let { data ->
-            if (data.scheme?.lowercase() == "bitcoin") {
-                walletViewModel.setPendingBitcoinUri(data.toString())
-                return
+            when (data.scheme?.lowercase()) {
+                "bitcoin",
+                "lightning",
+                "liquidnetwork",
+                "liquid",
+                -> walletViewModel.setPendingSendInput(data.toString())
             }
         }
-
-        // 2. NFC intents — only process when foreground dispatch is active (Send screen)
-        if (!nfcForegroundRequested) return
-        if (intent.action == NfcAdapter.ACTION_NDEF_DISCOVERED ||
-            intent.action == NfcAdapter.ACTION_TECH_DISCOVERED ||
-            intent.action == NfcAdapter.ACTION_TAG_DISCOVERED
-        ) {
-            val bitcoinUri = extractBitcoinFromNdef(intent)
-            if (bitcoinUri != null) {
-                walletViewModel.setPendingBitcoinUri(bitcoinUri)
-            }
-        }
-    }
-
-    /**
-     * Extract a bitcoin URI or address from NDEF message payloads.
-     * Handles NDEF Text records and URI records that may not have been auto-dispatched.
-     */
-    @Suppress("DEPRECATION")
-    private fun extractBitcoinFromNdef(intent: Intent): String? {
-        val messages = intent.getParcelableArrayExtra(NfcAdapter.EXTRA_NDEF_MESSAGES)
-            ?: return null
-
-        for (raw in messages) {
-            val message = raw as? NdefMessage ?: continue
-            for (record in message.records) {
-                val text = parseNdefRecord(record) ?: continue
-                val trimmed = text.trim()
-                // Accept bitcoin: URIs or bare addresses (common prefixes)
-                when {
-                    trimmed.lowercase().startsWith("bitcoin:") -> return trimmed
-                    trimmed.startsWith("bc1") -> return "bitcoin:$trimmed"
-                    trimmed.startsWith("1") && trimmed.length in 25..34 -> return "bitcoin:$trimmed"
-                    trimmed.startsWith("3") && trimmed.length in 25..34 -> return "bitcoin:$trimmed"
-                }
-            }
-        }
-        return null
     }
 
     /**
@@ -493,6 +661,7 @@ class MainActivity : FragmentActivity() {
                         biometricAutoCancelHandler.removeCallbacksAndMessages(null)
                         // Biometric always opens the real wallet
                         walletViewModel.exitDuressMode()
+                        appUnlockCounter++
                         isUnlocked = true
                     }
 
@@ -523,28 +692,34 @@ class MainActivity : FragmentActivity() {
 
         // Tie authentication to a KeyStore cryptographic operation so it cannot
         // be bypassed by injecting a success callback on rooted/instrumented devices.
-        val cryptoObject =
-            try {
-                val cipher = getBiometricCipher()
-                BiometricPrompt.CryptoObject(cipher)
-            } catch (_: Exception) {
-                // KeyStore unavailable — fall back to prompt-only auth
-                null
+        lifecycleScope.launch {
+            val cryptoObject =
+                withContext(Dispatchers.Default) {
+                    runCatching {
+                        BiometricPrompt.CryptoObject(getBiometricCipher())
+                    }.getOrNull()
+                }
+
+            if (cryptoObject != null) {
+                biometricPrompt?.authenticate(promptInfo, cryptoObject)
+            } else {
+                biometricPrompt?.authenticate(promptInfo)
             }
 
-        if (cryptoObject != null) {
-            biometricPrompt?.authenticate(promptInfo, cryptoObject)
-        } else {
-            biometricPrompt?.authenticate(promptInfo)
+            // In duress+biometric mode, auto-cancel the biometric prompt after 2 seconds
+            // so an attacker who accidentally hits C sees it disappear quickly
+            if (autoCancelAfter2s) {
+                biometricAutoCancelHandler.removeCallbacksAndMessages(null)
+                biometricAutoCancelHandler.postDelayed({
+                    biometricPrompt?.cancelAuthentication()
+                }, 2000L)
+            }
         }
+    }
 
-        // In duress+biometric mode, auto-cancel the biometric prompt after 2 seconds
-        // so an attacker who accidentally hits C sees it disappear quickly
-        if (autoCancelAfter2s) {
-            biometricAutoCancelHandler.removeCallbacksAndMessages(null)
-            biometricAutoCancelHandler.postDelayed({
-                biometricPrompt?.cancelAuthentication()
-            }, 2000L)
+    private fun prewarmBiometricCipher() {
+        lifecycleScope.launch(Dispatchers.Default) {
+            runCatching { getBiometricCipher() }
         }
     }
 
