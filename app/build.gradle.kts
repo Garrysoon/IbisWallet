@@ -13,8 +13,8 @@ android {
         applicationId = "github.aeonbtc.ibiswallet"
         minSdk = 26
         targetSdk = 36
-        versionCode = 5
-        versionName = "2.2-beta"
+        versionCode = 6
+        versionName = "3.0-beta"
 
         vectorDrawables {
             useSupportLibrary = true
@@ -24,7 +24,7 @@ android {
         // x86/x86_64 emulators have compatibility issues
         ndk {
             //noinspection ChromeOsAbiSupport
-            abiFilters += listOf("armeabi-v7a", "arm64-v8a")
+            abiFilters += listOf("arm64-v8a")
         }
     }
 
@@ -101,7 +101,9 @@ tasks.register<JacocoReport>("jacocoUnitTestReport") {
 dependencies {
     // Core Android
     implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.core.splashscreen)
     implementation(libs.androidx.lifecycle.runtime.ktx)
+    implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.lifecycle.process)
     implementation(libs.androidx.activity.compose)
 
@@ -145,10 +147,14 @@ dependencies {
     // BC-UR (Uniform Resources) for animated QR codes (PSBT exchange with hardware wallets)
     implementation(libs.hummingbird)
 
+    // Liquid Wallet Kit (LWK) - Blockstream's Liquid Network wallet toolkit
+    implementation(libs.lwk)
+    implementation(libs.jna) { artifact { type = "aar" } }
+    implementation(libs.lightning.kmp.core.jvm)
+
     // Testing
     testImplementation(libs.kotest.runner.junit5)
     testImplementation(libs.kotest.assertions.core)
-    testImplementation(libs.kotest.property)
     testImplementation(libs.mockk)
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.org.json)

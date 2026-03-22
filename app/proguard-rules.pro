@@ -47,6 +47,21 @@
 #noinspection ShrinkerKeepRule
 -keep class org.rustbitcoin.** { *; }
 
+# ==================== LWK (Liquid Wallet Kit) ====================
+# LWK's generated Android bindings live in the `lwk` package, not
+# `com.blockstream.lwk`. These UniFFI/JNA bridge classes are accessed by
+# reflection/native code, so they must not be renamed or stripped.
+#noinspection ShrinkerKeepRule
+-keep class lwk.** {
+    native <methods>;
+    *;
+}
+
+# ==================== Layer 2 enums persisted via .name/valueOf() ====================
+-keepclassmembers enum github.aeonbtc.ibiswallet.data.model.WalletLayer { *; }
+-keepclassmembers enum github.aeonbtc.ibiswallet.data.model.SwapDirection { *; }
+-keepclassmembers enum github.aeonbtc.ibiswallet.data.model.SwapService { *; }
+
 # ==================== JNA (used by BDK via UniFFI) ====================
 # BDK's native code accesses JNA fields/classes via JNI reflection (e.g.
 # Pointer.peer). R8 must not rename or strip them.
