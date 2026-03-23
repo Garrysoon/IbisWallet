@@ -4,7 +4,7 @@ A self-custody Bitcoin wallet for Android, inspired by [Sparrow Wallet](https://
 
 Ibis gives you complete control over your wallet and is designed for experienced users - no hand-holding, no training wheels.
 
-<img src="https://github.com/user-attachments/assets/756811a8-a96d-4f31-8bab-e1d69800c64d" width="400" height="419" alt="description">
+<img width="1700" height="841" alt="1" src="https://github.com/user-attachments/assets/839e9230-0280-4f16-84cc-5525ad9cbef9" />
 
 [<img src="https://user-images.githubusercontent.com/663460/26973090-f8fdc986-4d14-11e7-995a-e7c5e79ed925.png" alt="Get APK from GitHub" height="80">](https://github.com/aeonBTC/ibiswallet/releases)
 
