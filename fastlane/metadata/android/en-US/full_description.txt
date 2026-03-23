@@ -1,0 +1,5 @@
+Ibis Wallet is a self-custody Bitcoin wallet built for power users, no hand-holding - no training wheels. It supports multiple wallets, watch-only imports, hardware-wallet signing (QR and PSBT files), custom servers, coin control, RBF/CPFP, batch sends, BIP329 labels, and optional Liquid (L-BTC) with swaps and Lightning via Boltz.
+
+Privacy and security features include built-in Tor, PIN and biometrics, per-wallet lock, duress PIN, optional auto-wipe, and a calculator disguise mode. Connect to your own Electrum and fee servers. NFC can broadcast or read payment requests where enabled.
+
+See GitHub page complete feature list.

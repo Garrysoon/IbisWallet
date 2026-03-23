@@ -1,0 +1,5 @@
+- Fixed display bug when selecting UTXOs
+- Fixed Liquid wallet auto-sync trigger
+- Hardened Lightning payment refund logic
+
+See full changelogs on GitHub.
