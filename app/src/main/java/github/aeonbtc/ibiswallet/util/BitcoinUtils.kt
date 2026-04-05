@@ -19,7 +19,7 @@ object BitcoinUtils {
 
     private const val BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
     private val supportedDescriptorPrefixes = listOf("pkh(", "wpkh(", "tr(")
-    private val liquidDescriptorBranchRegex = Regex("""/[01]/\*(\)+)$""")
+    private val liquidDescriptorBranchRegex = Regex("""/([01])/\*(\)+)$""")
 
     fun parseSupportedAddressType(
         rawAddressType: String?,
