@@ -2,6 +2,7 @@ package github.aeonbtc.ibiswallet.ui.screens
 
 import java.text.NumberFormat
 import java.text.SimpleDateFormat
+import java.util.Currency
 import java.util.Date
 import java.util.Locale
 
@@ -24,7 +25,27 @@ fun formatAmount(
     return if (useSats) "$amount sats" else "$amount BTC"
 }
 
-fun formatUsd(amount: Double): String = NumberFormat.getCurrencyInstance(Locale.US).format(amount)
+fun formatFiat(
+    amount: Double,
+    currencyCode: String,
+): String {
+    val normalizedCode = currencyCode.uppercase(Locale.US)
+    return try {
+        NumberFormat.getCurrencyInstance(Locale.getDefault()).run {
+            currency = Currency.getInstance(normalizedCode)
+            format(amount)
+        }
+    } catch (_: IllegalArgumentException) {
+        val fallback =
+            NumberFormat.getNumberInstance(Locale.US).apply {
+                minimumFractionDigits = 2
+                maximumFractionDigits = 2
+            }
+        "$normalizedCode ${fallback.format(amount)}"
+    }
+}
+
+fun formatUsd(amount: Double): String = formatFiat(amount, "USD")
 
 fun formatFullTimestamp(timestamp: Long): String {
     val sdf = SimpleDateFormat("MMM d, yyyy HH:mm", Locale.getDefault())

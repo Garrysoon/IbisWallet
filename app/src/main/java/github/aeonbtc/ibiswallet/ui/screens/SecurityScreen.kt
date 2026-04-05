@@ -37,8 +37,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -49,7 +51,11 @@ import github.aeonbtc.ibiswallet.data.model.SeedFormat
 import github.aeonbtc.ibiswallet.data.model.StoredWallet
 import github.aeonbtc.ibiswallet.data.model.WalletImportConfig
 import github.aeonbtc.ibiswallet.data.model.WalletNetwork
+import github.aeonbtc.ibiswallet.ui.components.Bip39SuggestionRow
+import github.aeonbtc.ibiswallet.ui.components.ScrollableAlertDialog
+import github.aeonbtc.ibiswallet.ui.components.SensitiveSeedIme
 import github.aeonbtc.ibiswallet.ui.components.SquareToggle
+import github.aeonbtc.ibiswallet.ui.components.sensitiveSeedKeyboardOptions
 import github.aeonbtc.ibiswallet.ui.theme.*
 import github.aeonbtc.ibiswallet.util.BitcoinUtils
 import github.aeonbtc.ibiswallet.util.ElectrumSeedUtil
@@ -694,7 +700,7 @@ fun SecurityScreen(
 
         // Disable Cloak Mode Confirmation Dialog
         if (showDisableCloakDialog) {
-            AlertDialog(
+            ScrollableAlertDialog(
                 onDismissRequest = { showDisableCloakDialog = false },
                 title = {
                     Text(
@@ -733,7 +739,7 @@ fun SecurityScreen(
 
         // Cloak Mode Restart Prompt
         if (showCloakRestartDialog) {
-            AlertDialog(
+            ScrollableAlertDialog(
                 onDismissRequest = { showCloakRestartDialog = false },
                 title = {
                     Text(
@@ -771,7 +777,7 @@ fun SecurityScreen(
 
         // Disable Duress Confirmation Dialog
         if (showDisableDuressDialog) {
-            AlertDialog(
+            ScrollableAlertDialog(
                 onDismissRequest = { showDisableDuressDialog = false },
                 title = {
                     Text(
@@ -809,7 +815,7 @@ fun SecurityScreen(
 
         // Enable Auto-Wipe Confirmation Dialog
         if (showAutoWipeConfirmDialog) {
-            AlertDialog(
+            ScrollableAlertDialog(
                 onDismissRequest = { showAutoWipeConfirmDialog = false },
                 title = {
                     Text(
@@ -854,7 +860,7 @@ fun SecurityScreen(
 
         // Disable Security Confirmation Dialog
         if (showDisableConfirmDialog) {
-            AlertDialog(
+            ScrollableAlertDialog(
                 onDismissRequest = { showDisableConfirmDialog = false },
                 title = {
                     Text(
@@ -1297,7 +1303,8 @@ private fun DuressSetupScreen(
     var error by remember { mutableStateOf<String?>(null) }
     var walletName by remember { mutableStateOf("") }
     var seedSource by remember { mutableStateOf(DuressSeedSource.GENERATE) }
-    var manualSeedPhrase by remember { mutableStateOf("") }
+    var manualSeedPhraseField by remember { mutableStateOf(TextFieldValue("")) }
+    val manualSeedPhrase = manualSeedPhraseField.text
     var generatedSeedPhrase by remember { mutableStateOf<String?>(null) }
     var selectedWordCount by remember { mutableStateOf(WordCount.WORDS12) }
     var backedUpGeneratedSeed by remember { mutableStateOf(false) }
@@ -1317,7 +1324,8 @@ private fun DuressSetupScreen(
     val context = LocalContext.current
     val secureStorage = remember { SecureStorage.getInstance(context) }
 
-    val bip39WordSet = remember { QrFormatParser.getWordlist(context).toSet() }
+    val bip39WordList = remember { QrFormatParser.getWordlist(context) }
+    val bip39WordSet = remember { bip39WordList.toSet() }
     val bip39PrefixSet = remember { bip39WordSet.map { it.take(4) }.toSet() }
     val isGenerateMode = seedSource == DuressSeedSource.GENERATE
     val trimmedImportInput = manualSeedPhrase.trim()
@@ -1442,6 +1450,17 @@ private fun DuressSetupScreen(
             } else {
                 emptyList()
             }
+        }
+    val seedEntryStatus: Pair<String, Color>? =
+        when {
+            invalidWords.isNotEmpty() -> {
+                val display = invalidWords.take(3).joinToString(", ") { "\"${it.second}\"" }
+                "Invalid word(s): $display" to ErrorRed
+            }
+            isValidWordCount -> "$wordCount words entered" to TextSecondary
+            wordCount in 1..11 -> "$wordCount ${if (wordCount == 1) "word" else "words"} entered" to TextSecondary
+            wordCount > 11 -> "$wordCount words — need 12, 15, 18, 21, or 24" to ErrorRed
+            else -> null
         }
     val allTypedWordsValid =
         importWords.isNotEmpty() && invalidWords.isEmpty() &&
@@ -2067,73 +2086,108 @@ private fun DuressSetupScreen(
                                 .fillMaxWidth()
                                 .padding(16.dp),
                     ) {
-                        Text(
-                            text = "Import",
-                            style = MaterialTheme.typography.titleMedium,
-                            color = MaterialTheme.colorScheme.onBackground,
-                        )
-                        Spacer(modifier = Modifier.height(12.dp))
-                        OutlinedTextField(
-                            value = manualSeedPhrase,
-                            onValueChange = { input ->
-                                val trimmed = input.trim()
-                                val isKeyOrDescriptor =
-                                    trimmed.let { text ->
-                                        text.startsWith("xpub") || text.startsWith("ypub") ||
-                                            text.startsWith("zpub") || text.startsWith("upub") ||
-                                            text.startsWith("xprv") || text.startsWith("yprv") ||
-                                            text.startsWith("zprv") ||
-                                            text.startsWith("[") ||
-                                            text.startsWith("{") ||
-                                            listOf("pkh(", "wpkh(", "tr(", "sh(").any {
-                                                text.lowercase().startsWith(it)
-                                            }
-                                    }
-                                val isWifInput =
-                                    trimmed.let { text ->
-                                        (
-                                            text.length <= 52 && text.isNotEmpty() &&
-                                                (text[0] == 'K' || text[0] == 'L' || text[0] == '5')
-                                        ) && !text.contains(" ")
-                                    }
-                                val isAddressInput =
-                                    trimmed.let { text ->
-                                        text.isNotEmpty() && !text.contains(" ") &&
-                                            (text.startsWith("1") || text.startsWith("3") || text.startsWith("bc1"))
-                                    }
-                                manualSeedPhrase =
-                                    if (isKeyOrDescriptor || isWifInput || isAddressInput) {
-                                        input
-                                    } else {
-                                        QrFormatParser.expandAbbreviatedMnemonic(
-                                            context,
-                                            input.lowercase(),
-                                        )
-                                    }
-                            },
-                            modifier =
-                                Modifier
-                                    .fillMaxWidth()
-                                    .height(120.dp),
-                            placeholder = {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                text = "Import",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = MaterialTheme.colorScheme.onBackground,
+                            )
+                            seedEntryStatus?.let { (text, color) ->
                                 Text(
-                                    text = "BIP39 seed, Electrum seed, WIF private key, xpub/zpub, or address",
-                                    color = TextSecondary,
+                                    text = text,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = color,
+                                    textAlign = TextAlign.End,
                                 )
-                            },
-                            keyboardOptions = KeyboardOptions(autoCorrectEnabled = false),
-                            shape = RoundedCornerShape(8.dp),
-                            colors =
-                                OutlinedTextFieldDefaults.colors(
-                                    focusedBorderColor = BitcoinOrange,
-                                    focusedTextColor = MaterialTheme.colorScheme.onBackground,
-                                    unfocusedTextColor = MaterialTheme.colorScheme.onBackground,
-                                    unfocusedBorderColor = BorderColor,
-                                    cursorColor = BitcoinOrange,
-                                ),
-                        )
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(12.dp))
+                        SensitiveSeedIme {
+                            OutlinedTextField(
+                                value = manualSeedPhraseField,
+                                onValueChange = { input ->
+                                    val trimmed = input.text.trim()
+                                    val isKeyOrDescriptor =
+                                        trimmed.let { text ->
+                                            text.startsWith("xpub") || text.startsWith("ypub") ||
+                                                text.startsWith("zpub") || text.startsWith("upub") ||
+                                                text.startsWith("xprv") || text.startsWith("yprv") ||
+                                                text.startsWith("zprv") ||
+                                                text.startsWith("[") ||
+                                                text.startsWith("{") ||
+                                                listOf("pkh(", "wpkh(", "tr(", "sh(").any {
+                                                    text.lowercase().startsWith(it)
+                                                }
+                                        }
+                                    val isWifInput =
+                                        trimmed.let { text ->
+                                            (
+                                                text.length <= 52 && text.isNotEmpty() &&
+                                                    (text[0] == 'K' || text[0] == 'L' || text[0] == '5')
+                                            ) && !text.contains(" ")
+                                        }
+                                    val isAddressInput =
+                                        trimmed.let { text ->
+                                            text.isNotEmpty() && !text.contains(" ") &&
+                                                (text.startsWith("1") || text.startsWith("3") || text.startsWith("bc1"))
+                                        }
+                                    manualSeedPhraseField =
+                                        if (isKeyOrDescriptor || isWifInput || isAddressInput) {
+                                            input
+                                        } else {
+                                            val normalizedInput =
+                                                QrFormatParser.expandAbbreviatedMnemonic(
+                                                context,
+                                                input.text.lowercase(),
+                                            )
+                                            input.copy(
+                                                text = normalizedInput,
+                                                selection =
+                                                    TextRange(
+                                                        input.selection.end.coerceAtMost(normalizedInput.length),
+                                                    ),
+                                            )
+                                        }
+                                },
+                                modifier =
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .height(120.dp),
+                                placeholder = {
+                                    Text(
+                                        text = "BIP39 seed, Electrum seed, WIF private key, xpub/zpub, or address",
+                                        color = TextSecondary,
+                                    )
+                                },
+                                keyboardOptions = sensitiveSeedKeyboardOptions(),
+                                shape = RoundedCornerShape(8.dp),
+                                colors =
+                                    OutlinedTextFieldDefaults.colors(
+                                        focusedBorderColor = BitcoinOrange,
+                                        focusedTextColor = MaterialTheme.colorScheme.onBackground,
+                                        unfocusedTextColor = MaterialTheme.colorScheme.onBackground,
+                                        unfocusedBorderColor = BorderColor,
+                                        cursorColor = BitcoinOrange,
+                                    ),
+                            )
+                        }
 
-                        Spacer(modifier = Modifier.height(8.dp))
+                        Bip39SuggestionRow(
+                            input = manualSeedPhrase,
+                            wordlist = bip39WordList,
+                            onWordSelected = { completedInput ->
+                                manualSeedPhraseField =
+                                    TextFieldValue(
+                                        text = completedInput,
+                                        selection = TextRange(completedInput.length),
+                                    )
+                            },
+                            modifier = Modifier.padding(top = 4.dp),
+                        )
 
                         when {
                             unsupportedNonMainnetReason != null -> {
@@ -2232,35 +2286,6 @@ private fun DuressSetupScreen(
                             mnemonicValidation is DuressMnemonicValidation.Invalid -> {
                                 Text(
                                     text = mnemonicValidation.error,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = ErrorRed,
-                                )
-                            }
-                            invalidWords.isNotEmpty() -> {
-                                val display = invalidWords.take(3).joinToString(", ") { "\"${it.second}\"" }
-                                Text(
-                                    text = "Invalid word(s): $display",
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = ErrorRed,
-                                )
-                            }
-                            isValidWordCount -> {
-                                Text(
-                                    text = "$wordCount words entered",
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = TextSecondary,
-                                )
-                            }
-                            wordCount in 1..11 -> {
-                                Text(
-                                    text = "$wordCount ${if (wordCount == 1) "word" else "words"} entered",
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = TextSecondary,
-                                )
-                            }
-                            wordCount > 11 -> {
-                                Text(
-                                    text = "$wordCount words — need 12, 15, 18, 21, or 24",
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = ErrorRed,
                                 )

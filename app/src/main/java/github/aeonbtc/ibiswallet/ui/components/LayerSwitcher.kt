@@ -56,6 +56,7 @@ fun LayerSwitcher(
     modifier: Modifier = Modifier,
     isSwapSelected: Boolean = false,
     isSwapEnabled: Boolean = true,
+    isLayer1Enabled: Boolean = true,
     onSwap: () -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
@@ -77,8 +78,9 @@ fun LayerSwitcher(
                 label = "Layer 1",
                 isSelected = !isSwapSelected && activeLayer == WalletLayer.LAYER1,
                 selectedColor = BitcoinOrange,
+                enabled = isLayer1Enabled,
                 onClick = {
-                    if (!layerSwitchLocked && (isSwapSelected || activeLayer != WalletLayer.LAYER1)) {
+                    if (isLayer1Enabled && !layerSwitchLocked && (isSwapSelected || activeLayer != WalletLayer.LAYER1)) {
                         layerSwitchLocked = true
                         onLayerSelected(WalletLayer.LAYER1)
                         scope.launch {
@@ -187,6 +189,7 @@ private fun LayerPill(
     label: String,
     isSelected: Boolean,
     selectedColor: androidx.compose.ui.graphics.Color,
+    enabled: Boolean = true,
     onClick: () -> Unit,
 ) {
     val bgColor by animateColorAsState(
@@ -194,7 +197,12 @@ private fun LayerPill(
         label = "pillBg",
     )
     val textColor by animateColorAsState(
-        targetValue = if (isSelected) TextPrimary else TextSecondary,
+        targetValue =
+            when {
+                isSelected -> TextPrimary
+                enabled -> TextSecondary
+                else -> TextSecondary.copy(alpha = 0.4f)
+            },
         label = "pillText",
     )
 
@@ -204,7 +212,7 @@ private fun LayerPill(
             .widthIn(min = 84.dp)
             .clip(RoundedCornerShape(18.dp))
             .background(bgColor)
-            .clickable(onClick = onClick)
+            .clickable(enabled = enabled, onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 4.dp),
         contentAlignment = Alignment.Center,
     ) {

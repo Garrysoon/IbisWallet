@@ -7,6 +7,8 @@ import android.database.sqlite.SQLiteOpenHelper
 import android.util.Log
 import androidx.core.database.sqlite.transaction
 import github.aeonbtc.ibiswallet.BuildConfig
+import github.aeonbtc.ibiswallet.data.model.ConfirmationTime
+import github.aeonbtc.ibiswallet.data.model.TransactionDetails
 import java.io.File
 
 /**
@@ -37,7 +39,7 @@ class ElectrumCache(context: Context) : SQLiteOpenHelper(
     companion object {
         private const val TAG = "ElectrumCache"
         private const val DATABASE_NAME = "electrum_cache.db"
-        private const val DATABASE_VERSION = 2
+        private const val DATABASE_VERSION = 4
         private const val SQLITE_IN_CHUNK_SIZE = 900
         private const val SQLITE_DELETE_CHUNK_SIZE = 500
 
@@ -58,6 +60,29 @@ class ElectrumCache(context: Context) : SQLiteOpenHelper(
         private const val COL_SCRIPT_HASH = "script_hash"
         private const val COL_STATUS = "status"
         // COL_CACHED_AT reused from above
+
+        // Table: cached scripthash history responses keyed by the status hash that
+        // validated them. If the current status differs, the history is stale.
+        private const val TABLE_SCRIPT_HASH_HISTORY = "script_hash_history"
+        private const val COL_HISTORY_JSON = "history_json"
+
+        // Table: wallet-specific confirmed transaction display rows.
+        // Lets us reuse expensive per-tx enrichment work across launches.
+        private const val TABLE_WALLET_TX_DETAILS = "wallet_tx_details"
+        private const val COL_WALLET_ID = "wallet_id"
+        private const val COL_DESCRIPTOR_KEY = "descriptor_key"
+        // COL_TXID reused from above
+        private const val COL_AMOUNT_SATS = "amount_sats"
+        // COL_FEE reused from below
+        private const val COL_FEE = "fee"
+        private const val COL_WEIGHT = "weight"
+        private const val COL_CONFIRMATION_HEIGHT = "confirmation_height"
+        private const val COL_CONFIRMATION_TIMESTAMP = "confirmation_timestamp"
+        private const val COL_ADDRESS = "address"
+        private const val COL_ADDRESS_AMOUNT = "address_amount"
+        private const val COL_CHANGE_ADDRESS = "change_address"
+        private const val COL_CHANGE_AMOUNT = "change_amount"
+        private const val COL_IS_SELF_TRANSFER = "is_self_transfer"
 
         // Prune unconfirmed verbose tx entries older than this
         private const val UNCONFIRMED_TTL_MS = 3_600_000L // 1 hour
@@ -94,6 +119,39 @@ class ElectrumCache(context: Context) : SQLiteOpenHelper(
             )
             """.trimIndent(),
         )
+
+        db.execSQL(
+            """
+            CREATE TABLE $TABLE_SCRIPT_HASH_HISTORY (
+                $COL_SCRIPT_HASH TEXT PRIMARY KEY,
+                $COL_STATUS TEXT NOT NULL,
+                $COL_HISTORY_JSON TEXT NOT NULL,
+                $COL_CACHED_AT INTEGER NOT NULL
+            )
+            """.trimIndent(),
+        )
+
+        db.execSQL(
+            """
+            CREATE TABLE $TABLE_WALLET_TX_DETAILS (
+                $COL_WALLET_ID TEXT NOT NULL,
+                $COL_DESCRIPTOR_KEY TEXT NOT NULL,
+                $COL_TXID TEXT NOT NULL,
+                $COL_AMOUNT_SATS INTEGER NOT NULL,
+                $COL_FEE INTEGER,
+                $COL_WEIGHT INTEGER,
+                $COL_CONFIRMATION_HEIGHT INTEGER NOT NULL,
+                $COL_CONFIRMATION_TIMESTAMP INTEGER NOT NULL,
+                $COL_ADDRESS TEXT,
+                $COL_ADDRESS_AMOUNT INTEGER,
+                $COL_CHANGE_ADDRESS TEXT,
+                $COL_CHANGE_AMOUNT INTEGER,
+                $COL_IS_SELF_TRANSFER INTEGER NOT NULL DEFAULT 0,
+                $COL_CACHED_AT INTEGER NOT NULL,
+                PRIMARY KEY ($COL_WALLET_ID, $COL_DESCRIPTOR_KEY, $COL_TXID)
+            )
+            """.trimIndent(),
+        )
     }
 
     override fun onUpgrade(
@@ -107,6 +165,41 @@ class ElectrumCache(context: Context) : SQLiteOpenHelper(
                 CREATE TABLE IF NOT EXISTS $TABLE_SCRIPT_HASH_STATUSES (
                     $COL_SCRIPT_HASH TEXT PRIMARY KEY,
                     $COL_STATUS TEXT,
+                    $COL_CACHED_AT INTEGER NOT NULL
+                )
+                """.trimIndent(),
+            )
+        }
+        if (oldVersion < 3) {
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS $TABLE_WALLET_TX_DETAILS (
+                    $COL_WALLET_ID TEXT NOT NULL,
+                    $COL_DESCRIPTOR_KEY TEXT NOT NULL,
+                    $COL_TXID TEXT NOT NULL,
+                    $COL_AMOUNT_SATS INTEGER NOT NULL,
+                    $COL_FEE INTEGER,
+                    $COL_WEIGHT INTEGER,
+                    $COL_CONFIRMATION_HEIGHT INTEGER NOT NULL,
+                    $COL_CONFIRMATION_TIMESTAMP INTEGER NOT NULL,
+                    $COL_ADDRESS TEXT,
+                    $COL_ADDRESS_AMOUNT INTEGER,
+                    $COL_CHANGE_ADDRESS TEXT,
+                    $COL_CHANGE_AMOUNT INTEGER,
+                    $COL_IS_SELF_TRANSFER INTEGER NOT NULL DEFAULT 0,
+                    $COL_CACHED_AT INTEGER NOT NULL,
+                    PRIMARY KEY ($COL_WALLET_ID, $COL_DESCRIPTOR_KEY, $COL_TXID)
+                )
+                """.trimIndent(),
+            )
+        }
+        if (oldVersion < 4) {
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS $TABLE_SCRIPT_HASH_HISTORY (
+                    $COL_SCRIPT_HASH TEXT PRIMARY KEY,
+                    $COL_STATUS TEXT NOT NULL,
+                    $COL_HISTORY_JSON TEXT NOT NULL,
                     $COL_CACHED_AT INTEGER NOT NULL
                 )
                 """.trimIndent(),
@@ -338,6 +431,206 @@ class ElectrumCache(context: Context) : SQLiteOpenHelper(
             }
         }
         return result
+    }
+
+    // ==================== Script Hash History ====================
+
+    /**
+     * Get cached script hash history when [currentStatus] still matches the
+     * status used to validate the cached history response.
+     */
+    fun getHistory(
+        scriptHash: String,
+        currentStatus: String,
+    ): String? {
+        return try {
+            readableDatabase.query(
+                TABLE_SCRIPT_HASH_HISTORY,
+                arrayOf(COL_STATUS, COL_HISTORY_JSON),
+                "$COL_SCRIPT_HASH = ?",
+                arrayOf(scriptHash),
+                null,
+                null,
+                null,
+            ).use { cursor ->
+                if (!cursor.moveToFirst()) return@use null
+                val cachedStatus = cursor.getString(0)
+                if (cachedStatus != currentStatus) return@use null
+                cursor.getString(1)
+            }
+        } catch (e: Exception) {
+            if (BuildConfig.DEBUG) Log.w(TAG, "Failed to read history cache for $scriptHash: ${e.message}")
+            null
+        }
+    }
+
+    fun putHistory(
+        scriptHash: String,
+        status: String,
+        historyJson: String,
+    ) {
+        try {
+            val values =
+                ContentValues().apply {
+                    put(COL_SCRIPT_HASH, scriptHash)
+                    put(COL_STATUS, status)
+                    put(COL_HISTORY_JSON, historyJson)
+                    put(COL_CACHED_AT, System.currentTimeMillis())
+                }
+            writableDatabase.insertWithOnConflict(
+                TABLE_SCRIPT_HASH_HISTORY,
+                null,
+                values,
+                SQLiteDatabase.CONFLICT_REPLACE,
+            )
+        } catch (e: Exception) {
+            if (BuildConfig.DEBUG) Log.w(TAG, "Failed to cache history for $scriptHash: ${e.message}")
+        }
+    }
+
+    fun clearAllHistory() {
+        try {
+            writableDatabase.delete(TABLE_SCRIPT_HASH_HISTORY, null, null)
+        } catch (e: Exception) {
+            if (BuildConfig.DEBUG) Log.w(TAG, "Failed to clear script hash history: ${e.message}")
+        }
+    }
+
+    // ==================== Confirmed Transaction Details ====================
+
+    fun loadConfirmedTransactionDetails(
+        walletId: String,
+        descriptorKey: String,
+        txids: List<String>,
+    ): Map<String, TransactionDetails> {
+        if (txids.isEmpty()) return emptyMap()
+
+        return try {
+            val result = linkedMapOf<String, TransactionDetails>()
+            txids.chunked(SQLITE_IN_CHUNK_SIZE).forEach { chunk ->
+                val placeholders = List(chunk.size) { "?" }.joinToString(",")
+                val args = arrayOf(walletId, descriptorKey, *chunk.toTypedArray())
+                readableDatabase.query(
+                    TABLE_WALLET_TX_DETAILS,
+                    arrayOf(
+                        COL_TXID,
+                        COL_AMOUNT_SATS,
+                        COL_FEE,
+                        COL_WEIGHT,
+                        COL_CONFIRMATION_HEIGHT,
+                        COL_CONFIRMATION_TIMESTAMP,
+                        COL_ADDRESS,
+                        COL_ADDRESS_AMOUNT,
+                        COL_CHANGE_ADDRESS,
+                        COL_CHANGE_AMOUNT,
+                        COL_IS_SELF_TRANSFER,
+                    ),
+                    "$COL_WALLET_ID = ? AND $COL_DESCRIPTOR_KEY = ? AND $COL_TXID IN ($placeholders)",
+                    args,
+                    null,
+                    null,
+                    null,
+                ).use { cursor ->
+                    while (cursor.moveToNext()) {
+                        val txid = cursor.getString(0)
+                        val amountSats = cursor.getLong(1)
+                        val fee = if (cursor.isNull(2)) null else cursor.getLong(2).toULong()
+                        val weight = if (cursor.isNull(3)) null else cursor.getLong(3).toULong()
+                        val confirmationHeight = cursor.getLong(4).toUInt()
+                        val confirmationTimestamp = cursor.getLong(5).toULong()
+                        val address = if (cursor.isNull(6)) null else cursor.getString(6)
+                        val addressAmount = if (cursor.isNull(7)) null else cursor.getLong(7).toULong()
+                        val changeAddress = if (cursor.isNull(8)) null else cursor.getString(8)
+                        val changeAmount = if (cursor.isNull(9)) null else cursor.getLong(9).toULong()
+                        val isSelfTransfer = cursor.getInt(10) != 0
+                        result[txid] =
+                            TransactionDetails(
+                                txid = txid,
+                                amountSats = amountSats,
+                                fee = fee,
+                                weight = weight,
+                                confirmationTime =
+                                    ConfirmationTime(
+                                        height = confirmationHeight,
+                                        timestamp = confirmationTimestamp,
+                                    ),
+                                isConfirmed = true,
+                                timestamp = confirmationTimestamp.toLong(),
+                                address = address,
+                                addressAmount = addressAmount,
+                                changeAddress = changeAddress,
+                                changeAmount = changeAmount,
+                                isSelfTransfer = isSelfTransfer,
+                            )
+                    }
+                }
+            }
+            result
+        } catch (e: Exception) {
+            if (BuildConfig.DEBUG) {
+                Log.w(TAG, "Failed to load cached transaction details for $walletId: ${e.message}")
+            }
+            emptyMap()
+        }
+    }
+
+    fun putConfirmedTransactionDetails(
+        walletId: String,
+        descriptorKey: String,
+        transactions: Collection<TransactionDetails>,
+    ) {
+        if (transactions.isEmpty()) return
+
+        try {
+            val now = System.currentTimeMillis()
+            writableDatabase.transaction {
+                transactions.forEach { tx ->
+                    if (!tx.isConfirmed) return@forEach
+                    val confirmationTime = tx.confirmationTime ?: return@forEach
+                    val values =
+                        ContentValues().apply {
+                            put(COL_WALLET_ID, walletId)
+                            put(COL_DESCRIPTOR_KEY, descriptorKey)
+                            put(COL_TXID, tx.txid)
+                            put(COL_AMOUNT_SATS, tx.amountSats)
+                            put(COL_FEE, tx.fee?.toLong())
+                            put(COL_WEIGHT, tx.weight?.toLong())
+                            put(COL_CONFIRMATION_HEIGHT, confirmationTime.height.toLong())
+                            put(COL_CONFIRMATION_TIMESTAMP, confirmationTime.timestamp.toLong())
+                            put(COL_ADDRESS, tx.address)
+                            put(COL_ADDRESS_AMOUNT, tx.addressAmount?.toLong())
+                            put(COL_CHANGE_ADDRESS, tx.changeAddress)
+                            put(COL_CHANGE_AMOUNT, tx.changeAmount?.toLong())
+                            put(COL_IS_SELF_TRANSFER, if (tx.isSelfTransfer) 1 else 0)
+                            put(COL_CACHED_AT, now)
+                        }
+                    insertWithOnConflict(
+                        TABLE_WALLET_TX_DETAILS,
+                        null,
+                        values,
+                        SQLiteDatabase.CONFLICT_REPLACE,
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            if (BuildConfig.DEBUG) {
+                Log.w(TAG, "Failed to cache confirmed transaction details for $walletId: ${e.message}")
+            }
+        }
+    }
+
+    fun clearConfirmedTransactionDetails(walletId: String) {
+        try {
+            writableDatabase.delete(
+                TABLE_WALLET_TX_DETAILS,
+                "$COL_WALLET_ID = ?",
+                arrayOf(walletId),
+            )
+        } catch (e: Exception) {
+            if (BuildConfig.DEBUG) {
+                Log.w(TAG, "Failed to clear cached transaction details for $walletId: ${e.message}")
+            }
+        }
     }
 
     // ==================== Maintenance ====================

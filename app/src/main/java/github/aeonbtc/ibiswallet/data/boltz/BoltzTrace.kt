@@ -64,7 +64,9 @@ internal fun logBoltzTrace(
     throwable: Throwable? = null,
     vararg extras: Pair<String, Any?>,
 ) {
-    if (!BuildConfig.DEBUG && (level == BoltzTraceLevel.DEBUG || level == BoltzTraceLevel.INFO)) return
+    if (level == BoltzTraceLevel.DEBUG || level == BoltzTraceLevel.INFO) {
+        if (!BuildConfig.DEBUG || !isVerboseBoltzTracingEnabled()) return
+    }
 
     val fields =
         buildList {
@@ -125,6 +127,10 @@ private fun MutableList<String>.addField(key: String, value: Any?) {
         is String -> if (value.isNotBlank()) add("$key=$value")
         else -> add("$key=$value")
     }
+}
+
+private fun isVerboseBoltzTracingEnabled(): Boolean {
+    return runCatching { Log.isLoggable(BOLTZ_LOG_TAG, Log.VERBOSE) }.getOrDefault(false)
 }
 
 private const val BOLTZ_LOG_TAG = "BoltzDebug"

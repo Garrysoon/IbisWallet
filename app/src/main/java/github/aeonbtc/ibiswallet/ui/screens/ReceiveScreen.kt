@@ -2,6 +2,7 @@
 
 package github.aeonbtc.ibiswallet.ui.screens
 
+import android.content.Intent
 import android.graphics.Bitmap
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
@@ -27,6 +28,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -58,7 +60,9 @@ import androidx.compose.ui.window.Dialog
 import github.aeonbtc.ibiswallet.data.local.SecureStorage
 import github.aeonbtc.ibiswallet.data.model.WalletState
 import github.aeonbtc.ibiswallet.nfc.NdefHostApduService
+import github.aeonbtc.ibiswallet.ui.components.AmountLabel
 import github.aeonbtc.ibiswallet.ui.components.IbisButton
+import github.aeonbtc.ibiswallet.ui.components.ReceiveActionButton
 import github.aeonbtc.ibiswallet.ui.components.SquareToggle
 import github.aeonbtc.ibiswallet.ui.theme.BitcoinOrange
 import github.aeonbtc.ibiswallet.ui.theme.BorderColor
@@ -78,11 +82,13 @@ fun ReceiveScreen(
     walletState: WalletState = WalletState(),
     denomination: String = SecureStorage.DENOMINATION_BTC,
     btcPrice: Double? = null,
+    fiatCurrency: String = SecureStorage.DEFAULT_PRICE_CURRENCY,
     privacyMode: Boolean = false,
     onGenerateAddress: () -> Unit = {},
     onSaveLabel: (String, String) -> Unit = { _, _ -> },
     onShowAllAddresses: () -> Unit = {},
     onShowAllUtxos: () -> Unit = {},
+    onToggleDenomination: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val useSats = denomination == SecureStorage.DENOMINATION_SATS
@@ -317,59 +323,54 @@ fun ReceiveScreen(
 
                 Spacer(modifier = Modifier.height(12.dp))
 
-                // Copy, Refresh (New Address)
                 Row(
-                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Box(
-                        contentAlignment = Alignment.Center,
-                        modifier =
-                            Modifier
-                                .size(44.dp)
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(DarkSurface)
-                                .clickable(enabled = walletState.currentAddress != null) {
-                                    qrContent?.let { content ->
-                                        SecureClipboard.copyAndScheduleClear(context, "Address", content)
-                                        Toast.makeText(context, "Address copied", Toast.LENGTH_SHORT).show()
+                    ReceiveActionButton(
+                        text = "Copy",
+                        icon = Icons.Default.ContentCopy,
+                        tint = BitcoinOrange,
+                        onClick = {
+                            qrContent?.let { content ->
+                                SecureClipboard.copyAndScheduleClear(context, "Address", content)
+                                Toast.makeText(context, "Address copied", Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                        enabled = walletState.currentAddress != null,
+                        iconSize = 17.dp,
+                    )
+                    ReceiveActionButton(
+                        text = "New",
+                        icon = Icons.Default.Refresh,
+                        tint = BitcoinOrange,
+                        onClick = onGenerateAddress,
+                        enabled = walletState.isInitialized,
+                        iconSize = 20.dp,
+                    )
+                    ReceiveActionButton(
+                        text = "Share",
+                        icon = Icons.Default.Share,
+                        tint = BitcoinOrange,
+                        onClick = {
+                            qrContent?.let { content ->
+                                val shareIntent =
+                                    Intent(Intent.ACTION_SEND).apply {
+                                        type = "text/plain"
+                                        putExtra(Intent.EXTRA_TEXT, content)
                                     }
-                                },
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.ContentCopy,
-                            contentDescription = "Copy",
-                            tint =
-                                if (walletState.currentAddress != null) {
-                                    BitcoinOrange
-                                } else {
-                                    TextSecondary.copy(alpha = 0.5f)
-                                },
-                            modifier = Modifier.size(20.dp),
-                        )
-                    }
-                    Box(
-                        contentAlignment = Alignment.Center,
-                        modifier =
-                            Modifier
-                                .size(44.dp)
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(DarkSurface)
-                                .clickable(enabled = walletState.isInitialized) {
-                                    onGenerateAddress()
-                                },
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Refresh,
-                            contentDescription = "Generate New Address",
-                            tint =
-                                if (walletState.isInitialized) {
-                                    BitcoinOrange
-                                } else {
-                                    TextSecondary.copy(alpha = 0.5f)
-                                },
-                            modifier = Modifier.size(24.dp),
-                        )
-                    }
+                                runCatching {
+                                    context.startActivity(
+                                        Intent.createChooser(shareIntent, "Share receive request"),
+                                    )
+                                }.onFailure {
+                                    Toast.makeText(context, "No app available to share", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        },
+                        enabled = qrContent != null,
+                    )
                 }
 
                 // Toggle switches for Amount and Label
@@ -408,15 +409,11 @@ fun ReceiveScreen(
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
-                                Text(
-                                    text =
-                                        when {
-                                            isUsdMode -> "Amount (USD)"
-                                            useSats -> "Amount (sats)"
-                                            else -> "Amount (BTC)"
-                                        },
-                                    style = MaterialTheme.typography.labelLarge,
-                                    color = TextSecondary,
+                                AmountLabel(
+                                    useSats = useSats,
+                                    isUsdMode = isUsdMode,
+                                    fiatCurrency = fiatCurrency,
+                                    onToggleDenomination = onToggleDenomination,
                                 )
                                 // USD toggle button (only show if price is available)
                                 if (btcPrice != null && btcPrice > 0) {
@@ -443,10 +440,10 @@ fun ReceiveScreen(
                                         border = BorderStroke(1.dp, if (isUsdMode) BitcoinOrange else BorderColor),
                                     ) {
                                         Text(
-                                            text = "USD",
+                                            text = fiatCurrency,
                                             style = MaterialTheme.typography.labelMedium,
                                             color = if (isUsdMode) BitcoinOrange else TextSecondary,
-                                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
                                         )
                                     }
                                 }
@@ -485,7 +482,7 @@ fun ReceiveScreen(
                                 },
                                 leadingIcon =
                                     if (isUsdMode) {
-                                        { Text("$", color = TextSecondary) }
+                                        { Text(fiatCurrency, color = TextSecondary) }
                                     } else {
                                         null
                                     },
@@ -514,7 +511,7 @@ fun ReceiveScreen(
                                         "≈ ${formatAmount(amountInSats.toULong(), useSats, includeUnit = true)}"
                                     } else {
                                         val usdValue = (amountInSats / 100_000_000.0) * btcPrice
-                                        "≈ $${String.format(Locale.US, "%,.2f", usdValue)}"
+                                        "≈ ${formatFiat(usdValue, fiatCurrency)}"
                                     }
                                 Text(
                                     text = conversionText,

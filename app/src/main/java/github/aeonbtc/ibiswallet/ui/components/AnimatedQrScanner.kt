@@ -726,9 +726,10 @@ private fun handleScannedQrData(
         return
     }
 
-    // Not a UR - check if it's a plain base64 PSBT or raw hex transaction
-    // Base64 PSBT typically starts with "cHNidP" (base64 of "psbt\xff")
-    val isLikelyBase64Psbt = trimmed.startsWith("cHNidP")
+    // Not a UR - check if it's a plain base64 PSBT/PSET or raw hex transaction
+    // Base64 PSBT starts with "cHNidP" (base64 of "psbt\xff")
+    // Base64 PSET starts with "cHNl" (base64 of "pset")
+    val isLikelyBase64Psbt = trimmed.startsWith("cHNidP") || trimmed.startsWith("cHNl")
     val isLikelyHex =
         trimmed.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' } &&
             trimmed.length % 2 == 0 && trimmed.length > 20

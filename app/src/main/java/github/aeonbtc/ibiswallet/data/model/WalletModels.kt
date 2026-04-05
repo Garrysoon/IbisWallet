@@ -82,6 +82,7 @@ data class WalletState(
     val balanceSats: ULong = 0UL,
     val pendingIncomingSats: ULong = 0UL,
     val pendingOutgoingSats: ULong = 0UL,
+    val isTransactionHistoryLoading: Boolean = false,
     val transactions: List<TransactionDetails> = emptyList(),
     val currentAddress: String? = null,
     val currentAddressInfo: ReceiveAddressInfo? = null,
@@ -258,6 +259,7 @@ data class UtxoInfo(
     val label: String? = null,
     val isConfirmed: Boolean,
     val isFrozen: Boolean = false,
+    val assetId: String? = null,
 )
 
 /**
@@ -304,6 +306,7 @@ sealed class FeeEstimationResult {
 data class Recipient(
     val address: String,
     val amountSats: ULong,
+    val assetId: String? = null,
 )
 
 /**

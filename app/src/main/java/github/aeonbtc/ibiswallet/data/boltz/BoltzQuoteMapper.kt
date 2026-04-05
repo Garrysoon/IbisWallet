@@ -6,6 +6,36 @@ import github.aeonbtc.ibiswallet.data.model.SwapQuote
 import github.aeonbtc.ibiswallet.data.model.SwapService
 import kotlin.math.ceil
 
+internal fun calculateBoltzPercentageFee(
+    amountSats: Long,
+    pair: BoltzPairInfo,
+): Long = ceil(amountSats * pair.fees.percentage / 100.0).toLong()
+
+internal fun estimateBoltzReverseOnchainAmount(
+    invoiceAmountSats: Long,
+    pair: BoltzPairInfo,
+): Long {
+    val percentageFee = calculateBoltzPercentageFee(invoiceAmountSats, pair)
+    return (invoiceAmountSats - percentageFee - pair.fees.serverMinerFee).coerceAtLeast(0L)
+}
+
+internal fun estimateBoltzReverseInvoiceAmount(
+    desiredOnchainAmountSats: Long,
+    pair: BoltzPairInfo,
+): Long {
+    require(desiredOnchainAmountSats >= 0L) { "Desired onchain amount must be non-negative" }
+    val feeRate = pair.fees.percentage / 100.0
+    require(feeRate < 1.0) { "Invalid Boltz reverse fee rate" }
+
+    var invoiceAmount =
+        ceil((desiredOnchainAmountSats + pair.fees.serverMinerFee).toDouble() / (1.0 - feeRate)).toLong()
+            .coerceAtLeast(0L)
+    while (estimateBoltzReverseOnchainAmount(invoiceAmount, pair) < desiredOnchainAmountSats) {
+        invoiceAmount += 1L
+    }
+    return invoiceAmount
+}
+
 internal fun buildBoltzQuoteFromPair(
     direction: SwapDirection,
     amountSats: Long,
@@ -17,7 +47,7 @@ internal fun buildBoltzQuoteFromPair(
     serviceFeeOverride: Long? = null,
 ): SwapQuote {
     val fees = pair.fees
-    val percentageFee = serviceFeeOverride ?: ceil(amountSats * fees.percentage / 100.0).toLong()
+    val percentageFee = serviceFeeOverride ?: calculateBoltzPercentageFee(amountSats, pair)
 
     return when (direction) {
         SwapDirection.BTC_TO_LBTC -> {

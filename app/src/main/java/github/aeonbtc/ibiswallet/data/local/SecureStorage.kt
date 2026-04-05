@@ -39,6 +39,18 @@ import javax.crypto.spec.PBEKeySpec
  * Supports multiple wallets with unique IDs
  */
 class SecureStorage private constructor(private val context: Context) {
+    enum class QrDensity {
+        LOW,
+        MEDIUM,
+        HIGH,
+    }
+
+    enum class QrPlaybackSpeed {
+        SLOW,
+        MEDIUM,
+        FAST,
+    }
+
     private val masterKey =
         MasterKey.Builder(context)
             .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
@@ -87,7 +99,14 @@ class SecureStorage private constructor(private val context: Context) {
         val txLabels: Map<String, String>,
         val txSources: Map<String, LiquidTxSource>,
         val txSwapDetails: Map<String, LiquidSwapDetails>,
+        val txRecipients: Map<String, String>,
+        val txFeeDetails: Map<String, LiquidTxFeeDetails>,
         val pendingLightningReceives: List<PendingLightningReceive>,
+    )
+
+    data class LiquidTxFeeDetails(
+        val feeRate: Double,
+        val vsize: Double,
     )
 
     // ==================== Multi-Wallet Management ====================
@@ -478,6 +497,10 @@ class SecureStorage private constructor(private val context: Context) {
         regularPrefs.edit { putString(KEY_SERVER_IDS, jsonArray.toString()) }
     }
 
+    fun reorderElectrumServerIds(orderedIds: List<String>) {
+        regularPrefs.edit { putString(KEY_SERVER_IDS, JSONArray(orderedIds).toString()) }
+    }
+
     /**
      * Get the active server ID
      */
@@ -766,6 +789,8 @@ class SecureStorage private constructor(private val context: Context) {
             remove("${KEY_LIQUID_NEEDS_FULL_SYNC_PREFIX}$walletId")
             remove("${KEY_LAST_FULL_SYNC_PREFIX}$walletId")
             remove("${KEY_LIQUID_ENABLED_PREFIX}$walletId")
+            remove("${KEY_LIQUID_WATCH_ONLY_PREFIX}$walletId")
+            remove("${KEY_LIQUID_GAP_LIMIT_PREFIX}$walletId")
             remove("${KEY_ACTIVE_LAYER_PREFIX}$walletId")
             remove("${KEY_NOTIFIED_TXIDS_PREFIX}$walletId")
             remove("${KEY_NOTIFIED_LIQUID_TXIDS_PREFIX}$walletId")
@@ -786,6 +811,8 @@ class SecureStorage private constructor(private val context: Context) {
             "${KEY_LIQUID_TX_LABEL_PREFIX}${walletId}_",
             "${KEY_LIQUID_TX_SOURCE_PREFIX}${walletId}_",
             "${KEY_LIQUID_TX_SWAP_DETAILS_PREFIX}${walletId}_",
+            "${KEY_LIQUID_TX_RECIPIENT_PREFIX}${walletId}_",
+            "${KEY_LIQUID_TX_FEE_DETAILS_PREFIX}${walletId}_",
             "${KEY_LIQUID_SCRIPT_HASH_STATUS_ENTRY_PREFIX}${walletId}_",
             "${KEY_PENDING_PSBT_LABEL_PREFIX}${walletId}_",
             "${KEY_TX_FIRST_SEEN_PREFIX}${walletId}_",
@@ -879,6 +906,43 @@ class SecureStorage private constructor(private val context: Context) {
 
     fun setSwipeMode(mode: String) {
         regularPrefs.edit { putString(KEY_SWIPE_MODE, mode) }
+    }
+
+    fun getPsbtQrDensity(): QrDensity {
+        val storedValue = regularPrefs.getString(KEY_PSBT_QR_DENSITY, QrDensity.MEDIUM.name)
+        return try {
+            QrDensity.valueOf(storedValue ?: QrDensity.MEDIUM.name)
+        } catch (_: IllegalArgumentException) {
+            QrDensity.MEDIUM
+        }
+    }
+
+    fun setPsbtQrDensity(density: QrDensity) {
+        regularPrefs.edit { putString(KEY_PSBT_QR_DENSITY, density.name) }
+    }
+
+    fun getPsbtQrBrightness(): Float {
+        val brightness = regularPrefs.getFloat(KEY_PSBT_QR_BRIGHTNESS, DEFAULT_PSBT_QR_BRIGHTNESS)
+        return brightness.coerceIn(MIN_PSBT_QR_BRIGHTNESS, 1f)
+    }
+
+    fun setPsbtQrBrightness(brightness: Float) {
+        regularPrefs.edit {
+            putFloat(KEY_PSBT_QR_BRIGHTNESS, brightness.coerceIn(MIN_PSBT_QR_BRIGHTNESS, 1f))
+        }
+    }
+
+    fun getPsbtQrPlaybackSpeed(): QrPlaybackSpeed {
+        val storedValue = regularPrefs.getString(KEY_PSBT_QR_PLAYBACK_SPEED, QrPlaybackSpeed.MEDIUM.name)
+        return try {
+            QrPlaybackSpeed.valueOf(storedValue ?: QrPlaybackSpeed.MEDIUM.name)
+        } catch (_: IllegalArgumentException) {
+            QrPlaybackSpeed.MEDIUM
+        }
+    }
+
+    fun setPsbtQrPlaybackSpeed(speed: QrPlaybackSpeed) {
+        regularPrefs.edit { putString(KEY_PSBT_QR_PLAYBACK_SPEED, speed.name) }
     }
 
     /**
@@ -1093,7 +1157,7 @@ class SecureStorage private constructor(private val context: Context) {
         }
     }
 
-    // ==================== BTC/USD Price Source ====================
+    // ==================== BTC/Fiat Price Settings ====================
 
     /**
      * Get the BTC/USD price source
@@ -1108,6 +1172,14 @@ class SecureStorage private constructor(private val context: Context) {
      */
     fun setPriceSource(source: String) {
         regularPrefs.edit { putString(KEY_PRICE_SOURCE, source) }
+    }
+
+    fun getPriceCurrency(): String {
+        return regularPrefs.getString(KEY_PRICE_CURRENCY, DEFAULT_PRICE_CURRENCY) ?: DEFAULT_PRICE_CURRENCY
+    }
+
+    fun setPriceCurrency(currencyCode: String) {
+        regularPrefs.edit { putString(KEY_PRICE_CURRENCY, currencyCode) }
     }
 
     // ==================== Layer 2 External Services ====================
@@ -1338,6 +1410,30 @@ class SecureStorage private constructor(private val context: Context) {
         return getLiquidMetadataSnapshot(walletId).txSources
     }
 
+    fun saveLiquidTransactionRecipient(
+        walletId: String,
+        txid: String,
+        recipientAddress: String,
+    ) {
+        val key = "${KEY_LIQUID_TX_RECIPIENT_PREFIX}${walletId}_$txid"
+        regularPrefs.edit { putString(key, recipientAddress) }
+    }
+
+    fun saveLiquidTransactionFeeDetails(
+        walletId: String,
+        txid: String,
+        feeRate: Double,
+        vsize: Double,
+    ) {
+        val key = "${KEY_LIQUID_TX_FEE_DETAILS_PREFIX}${walletId}_$txid"
+        val json =
+            JSONObject().apply {
+                put("feeRate", feeRate)
+                put("vsize", vsize)
+            }
+        regularPrefs.edit { putString(key, json.toString()) }
+    }
+
     fun saveLiquidSwapDetails(
         walletId: String,
         txid: String,
@@ -1355,6 +1451,15 @@ class SecureStorage private constructor(private val context: Context) {
                 put("refundAddress", details.refundAddress)
                 put("sendAmountSats", details.sendAmountSats)
                 put("expectedReceiveAmountSats", details.expectedReceiveAmountSats)
+                put("paymentInput", details.paymentInput)
+                put("resolvedPaymentInput", details.resolvedPaymentInput)
+                put("invoice", details.invoice)
+                put("status", details.status)
+                put("timeoutBlockHeight", details.timeoutBlockHeight)
+                put("refundPublicKey", details.refundPublicKey)
+                put("claimPublicKey", details.claimPublicKey)
+                put("swapTree", details.swapTree)
+                put("blindingKey", details.blindingKey)
             }
         regularPrefs.edit(commit = true) {
             putString(key, json.toString())
@@ -1417,7 +1522,35 @@ class SecureStorage private constructor(private val context: Context) {
                 refundAddress = json.optString("refundAddress").takeIf { it.isNotBlank() },
                 sendAmountSats = json.optLong("sendAmountSats", 0L),
                 expectedReceiveAmountSats = json.optLong("expectedReceiveAmountSats", 0L),
+                paymentInput = json.optString("paymentInput").takeIf { it.isNotBlank() },
+                resolvedPaymentInput = json.optString("resolvedPaymentInput").takeIf { it.isNotBlank() },
+                invoice = json.optString("invoice").takeIf { it.isNotBlank() },
+                status = json.optString("status").takeIf { it.isNotBlank() },
+                timeoutBlockHeight =
+                    json.optInt("timeoutBlockHeight").takeIf {
+                        !json.isNull("timeoutBlockHeight")
+                    },
+                refundPublicKey = json.optString("refundPublicKey").takeIf { it.isNotBlank() },
+                claimPublicKey = json.optString("claimPublicKey").takeIf { it.isNotBlank() },
+                swapTree = json.optString("swapTree").takeIf { it.isNotBlank() },
+                blindingKey = json.optString("blindingKey").takeIf { it.isNotBlank() },
             )
+        }.getOrNull()
+    }
+
+    private fun parseLiquidTxFeeDetails(raw: String): LiquidTxFeeDetails? {
+        return runCatching {
+            val json = JSONObject(raw)
+            val feeRate = json.optDouble("feeRate", Double.NaN)
+            val vsize = json.optDouble("vsize", Double.NaN)
+            if (feeRate.isNaN() || vsize.isNaN() || feeRate <= 0.0 || vsize <= 0.0) {
+                null
+            } else {
+                LiquidTxFeeDetails(
+                    feeRate = feeRate,
+                    vsize = vsize,
+                )
+            }
         }.getOrNull()
     }
 
@@ -1425,12 +1558,16 @@ class SecureStorage private constructor(private val context: Context) {
         val txLabelPrefix = "${KEY_LIQUID_TX_LABEL_PREFIX}${walletId}_"
         val txSourcePrefix = "${KEY_LIQUID_TX_SOURCE_PREFIX}${walletId}_"
         val txSwapPrefix = "${KEY_LIQUID_TX_SWAP_DETAILS_PREFIX}${walletId}_"
+        val txRecipientPrefix = "${KEY_LIQUID_TX_RECIPIENT_PREFIX}${walletId}_"
+        val txFeeDetailsPrefix = "${KEY_LIQUID_TX_FEE_DETAILS_PREFIX}${walletId}_"
         val pendingAddressPrefix = "${KEY_PENDING_LIQUID_LIGHTNING_RECEIVE_ADDRESS_PREFIX}${walletId}_"
         val pendingLabelPrefix = "${KEY_PENDING_LIQUID_LIGHTNING_RECEIVE_LABEL_PREFIX}${walletId}_"
 
         val txLabels = mutableMapOf<String, String>()
         val txSources = mutableMapOf<String, LiquidTxSource>()
         val txSwapDetails = mutableMapOf<String, LiquidSwapDetails>()
+        val txRecipients = mutableMapOf<String, String>()
+        val txFeeDetails = mutableMapOf<String, LiquidTxFeeDetails>()
         val pendingAddresses = mutableMapOf<String, String>()
         val pendingLabels = mutableMapOf<String, String>()
 
@@ -1452,6 +1589,16 @@ class SecureStorage private constructor(private val context: Context) {
                     txSwapDetails[txid] = details
                 }
 
+                key.startsWith(txRecipientPrefix) && value is String -> {
+                    txRecipients[key.removePrefix(txRecipientPrefix)] = value
+                }
+
+                key.startsWith(txFeeDetailsPrefix) && value is String -> {
+                    val txid = key.removePrefix(txFeeDetailsPrefix)
+                    val details = parseLiquidTxFeeDetails(value) ?: return@forEach
+                    txFeeDetails[txid] = details
+                }
+
                 key.startsWith(pendingAddressPrefix) && value is String -> {
                     pendingAddresses[key.removePrefix(pendingAddressPrefix)] = value
                 }
@@ -1466,6 +1613,8 @@ class SecureStorage private constructor(private val context: Context) {
             txLabels = txLabels,
             txSources = txSources,
             txSwapDetails = txSwapDetails,
+            txRecipients = txRecipients,
+            txFeeDetails = txFeeDetails,
             pendingLightningReceives =
                 pendingAddresses.map { (swapId, claimAddress) ->
                     PendingLightningReceive(
@@ -1655,6 +1804,7 @@ class SecureStorage private constructor(private val context: Context) {
             put("direction", pendingSwap.direction.name)
             put("sendAmount", pendingSwap.sendAmount)
             put("requestKey", pendingSwap.requestKey)
+            put("label", pendingSwap.label)
             put("usesMaxAmount", pendingSwap.usesMaxAmount)
             put("selectedFundingOutpoints", JSONArray(pendingSwap.selectedFundingOutpoints))
             put("estimatedTerms", estimatedTermsToJson(pendingSwap.estimatedTerms))
@@ -1689,6 +1839,10 @@ class SecureStorage private constructor(private val context: Context) {
                 requestKey =
                     json.optString("requestKey", "").takeIf {
                         it.isNotBlank() && !json.isNull("requestKey")
+                    },
+                label =
+                    json.optString("label", "").takeIf {
+                        it.isNotBlank() && !json.isNull("label")
                     },
                 usesMaxAmount = json.optBoolean("usesMaxAmount", false),
                 selectedFundingOutpoints =
@@ -1938,6 +2092,7 @@ class SecureStorage private constructor(private val context: Context) {
             JSONObject().apply {
                 put("swapId", session.swapId)
                 put("snapshot", session.snapshot)
+                put("invoice", session.invoice)
                 put("amountSats", session.amountSats)
                 put("createdAt", session.createdAt)
             }.toString()
@@ -1953,6 +2108,7 @@ class SecureStorage private constructor(private val context: Context) {
             PendingLightningInvoiceSession(
                 swapId = json.getString("swapId"),
                 snapshot = json.getString("snapshot"),
+                invoice = json.optString("invoice"),
                 amountSats = json.optLong("amountSats", 0L),
                 createdAt = json.optLong("createdAt", System.currentTimeMillis()),
             )
@@ -2793,6 +2949,12 @@ class SecureStorage private constructor(private val context: Context) {
         const val SWIPE_MODE_WALLETS = "WALLETS"
         const val SWIPE_MODE_LAYERS = "LAYERS"
 
+        private const val KEY_PSBT_QR_DENSITY = "psbt_qr_density"
+        private const val KEY_PSBT_QR_BRIGHTNESS = "psbt_qr_brightness"
+        private const val KEY_PSBT_QR_PLAYBACK_SPEED = "psbt_qr_playback_speed"
+        const val MIN_PSBT_QR_BRIGHTNESS = 0.2f
+        const val DEFAULT_PSBT_QR_BRIGHTNESS = 1f
+
         // Mempool server settings
         private const val KEY_MEMPOOL_SERVER = "mempool_server"
         private const val KEY_MEMPOOL_CUSTOM_URL = "mempool_custom_url"
@@ -2819,12 +2981,14 @@ class SecureStorage private constructor(private val context: Context) {
         const val FEE_SOURCE_ELECTRUM = "ELECTRUM_SERVER"
         const val FEE_SOURCE_CUSTOM = "CUSTOM"
 
-        // BTC/USD price source settings
+        // BTC/fiat price settings
         private const val KEY_PRICE_SOURCE = "price_source"
+        private const val KEY_PRICE_CURRENCY = "price_currency"
         const val PRICE_SOURCE_OFF = "OFF"
         const val PRICE_SOURCE_MEMPOOL = "MEMPOOL_SPACE"
         const val PRICE_SOURCE_MEMPOOL_ONION = "MEMPOOL_ONION"
         const val PRICE_SOURCE_COINGECKO = "COINGECKO"
+        const val DEFAULT_PRICE_CURRENCY = "USD"
 
         // Layer 2 external service settings
         private const val KEY_BOLTZ_API_SOURCE = "boltz_api_source"
@@ -2846,6 +3010,8 @@ class SecureStorage private constructor(private val context: Context) {
         private const val KEY_LIQUID_TX_LABEL_PREFIX = "liquid_tx_label_"
         private const val KEY_LIQUID_TX_SOURCE_PREFIX = "liquid_tx_source_"
         private const val KEY_LIQUID_TX_SWAP_DETAILS_PREFIX = "liquid_tx_swap_details_"
+        private const val KEY_LIQUID_TX_RECIPIENT_PREFIX = "liquid_tx_recipient_"
+        private const val KEY_LIQUID_TX_FEE_DETAILS_PREFIX = "liquid_tx_fee_details_"
         private const val KEY_PENDING_LIQUID_LIGHTNING_RECEIVE_ADDRESS_PREFIX = "pending_liquid_ln_receive_address_"
         private const val KEY_PENDING_LIQUID_LIGHTNING_RECEIVE_LABEL_PREFIX = "pending_liquid_ln_receive_label_"
         private const val KEY_PENDING_SWAP_PREFIX = "pending_swap_"
@@ -2915,6 +3081,7 @@ class SecureStorage private constructor(private val context: Context) {
         // Layer 2 (Liquid)
         private const val KEY_LAYER2_ENABLED = "layer2_enabled"
         private const val KEY_LIQUID_ENABLED_PREFIX = "liquid_enabled_"
+        private const val KEY_LIQUID_GAP_LIMIT_PREFIX = "liquid_gap_limit_"
         private const val KEY_ACTIVE_LAYER_PREFIX = "active_layer_"
         private const val KEY_LIQUID_SERVER_IDS = "liquid_server_ids"
         private const val KEY_ACTIVE_LIQUID_SERVER = "active_liquid_server_id"
@@ -2922,6 +3089,7 @@ class SecureStorage private constructor(private val context: Context) {
         private const val KEY_LIQUID_SERVER_PREFIX = "liquid_server_"
         private const val KEY_LIQUID_DEFAULT_SERVERS_SEEDED = "liquid_default_servers_seeded"
         private const val KEY_LIQUID_DESCRIPTOR_PREFIX = "liquid_descriptor_"
+        private const val KEY_LIQUID_WATCH_ONLY_PREFIX = "liquid_watch_only_"
         private const val KEY_LIQUID_SCRIPT_HASH_STATUS_PREFIX = "liquid_script_hash_status_"
     }
 
@@ -2944,6 +3112,14 @@ class SecureStorage private constructor(private val context: Context) {
         regularPrefs.edit { putBoolean("${KEY_LIQUID_ENABLED_PREFIX}$walletId", enabled) }
     }
 
+    /** Per-wallet Liquid gap limit (derivation index for fullScanToIndex) */
+    fun getLiquidGapLimit(walletId: String): Int =
+        regularPrefs.getInt("${KEY_LIQUID_GAP_LIMIT_PREFIX}$walletId", StoredWallet.DEFAULT_GAP_LIMIT)
+
+    fun setLiquidGapLimit(walletId: String, gapLimit: Int) {
+        regularPrefs.edit { putInt("${KEY_LIQUID_GAP_LIMIT_PREFIX}$walletId", gapLimit) }
+    }
+
     /** Active layer per wallet (persisted across restarts) */
     fun getActiveLayer(walletId: String): String =
         regularPrefs.getString("${KEY_ACTIVE_LAYER_PREFIX}$walletId", "LAYER1") ?: "LAYER1"
@@ -2962,6 +3138,14 @@ class SecureStorage private constructor(private val context: Context) {
 
     fun removeLiquidDescriptor(walletId: String) {
         securePrefs.edit { remove("${KEY_LIQUID_DESCRIPTOR_PREFIX}$walletId") }
+    }
+
+    /** Per-wallet Liquid watch-only flag (descriptor-only, no signer available) */
+    fun isLiquidWatchOnly(walletId: String): Boolean =
+        regularPrefs.getBoolean("${KEY_LIQUID_WATCH_ONLY_PREFIX}$walletId", false)
+
+    fun setLiquidWatchOnly(walletId: String, watchOnly: Boolean) {
+        regularPrefs.edit { putBoolean("${KEY_LIQUID_WATCH_ONLY_PREFIX}$walletId", watchOnly) }
     }
 
     /**
@@ -3139,6 +3323,10 @@ class SecureStorage private constructor(private val context: Context) {
             setActiveLiquidServerId(null)
             setUserSelectedLiquidServer(false)
         }
+    }
+
+    fun reorderLiquidServerIds(orderedIds: List<String>) {
+        saveLiquidServerIds(orderedIds)
     }
 
     fun isLiquidDefaultServersSeeded(): Boolean =

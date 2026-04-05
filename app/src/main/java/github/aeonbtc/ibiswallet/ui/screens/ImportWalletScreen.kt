@@ -68,10 +68,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
@@ -81,9 +85,12 @@ import github.aeonbtc.ibiswallet.data.model.SeedFormat
 import github.aeonbtc.ibiswallet.data.model.StoredWallet
 import github.aeonbtc.ibiswallet.data.model.WalletImportConfig
 import github.aeonbtc.ibiswallet.data.model.WalletNetwork
+import github.aeonbtc.ibiswallet.ui.components.Bip39SuggestionRow
 import github.aeonbtc.ibiswallet.ui.components.IbisButton
 import github.aeonbtc.ibiswallet.ui.components.ImportQrScannerDialog
+import github.aeonbtc.ibiswallet.ui.components.SensitiveSeedIme
 import github.aeonbtc.ibiswallet.ui.components.SquareToggle
+import github.aeonbtc.ibiswallet.ui.components.sensitiveSeedKeyboardOptions
 import github.aeonbtc.ibiswallet.ui.theme.AccentTeal
 import github.aeonbtc.ibiswallet.ui.theme.BitcoinOrange
 import github.aeonbtc.ibiswallet.ui.theme.BorderColor
@@ -110,6 +117,7 @@ import org.json.JSONObject
 @Composable
 fun ImportWalletScreen(
     onImport: (config: WalletImportConfig) -> Unit,
+    onImportLiquidWatchOnly: (name: String, ctDescriptor: String, gapLimit: Int) -> Unit = { _, _, _ -> },
     onImportFromBackup: (backupJson: JSONObject, importServerSettings: Boolean) -> Unit = { _, _ -> },
     onParseBackupFile: suspend (uri: Uri, password: String?) -> JSONObject = { _, _ -> JSONObject() },
     onBack: () -> Unit,
@@ -120,7 +128,8 @@ fun ImportWalletScreen(
 ) {
     var walletName by remember { mutableStateOf("") }
     var selectedAddressType by remember { mutableStateOf(AddressType.SEGWIT) }
-    var keyMaterial by remember { mutableStateOf("") }
+    var keyMaterialField by remember { mutableStateOf(TextFieldValue("")) }
+    val keyMaterial = keyMaterialField.text
 
     // QR scanner state
     var showQrScanner by remember { mutableStateOf(false) }
@@ -220,7 +229,34 @@ fun ImportWalletScreen(
     // Detect ColdCard/Specter JSON format
     val isJsonFormat = trimmedInput.startsWith("{") && trimmedInput.endsWith("}")
 
-    val isWatchOnlyKey = isExtendedKey || isOriginPrefixed || isOutputDescriptor || isJsonFormat
+    val liquidDescriptorLines =
+        remember(keyMaterial) {
+            trimmedInput.lineSequence()
+                .map { BitcoinUtils.stripDescriptorChecksum(it).trim() }
+                .filter { it.isNotBlank() }
+                .toList()
+        }
+    val looksLikeLiquidDescriptorInput =
+        liquidDescriptorLines.isNotEmpty() &&
+            liquidDescriptorLines.all { it.lowercase().startsWith("ct(") }
+    val normalizedLiquidDescriptor =
+        remember(keyMaterial) {
+            BitcoinUtils.normalizeLiquidDescriptorInput(trimmedInput)
+        }
+    val isLiquidCtDescriptor = normalizedLiquidDescriptor != null
+    val liquidDescriptorError =
+        when {
+            liquidDescriptorLines.size > 1 && looksLikeLiquidDescriptorInput && normalizedLiquidDescriptor == null ->
+                "Invalid Liquid descriptor pair. Paste one combined ct(...) descriptor or a matching /0/* and /1/* pair."
+            looksLikeLiquidDescriptorInput &&
+                normalizedLiquidDescriptor == null &&
+                trimmedInput.endsWith(")") ->
+                "Invalid Liquid descriptor."
+            else -> null
+        }
+
+    val isWatchOnlyKey =
+        isExtendedKey || isOriginPrefixed || isOutputDescriptor || isJsonFormat || looksLikeLiquidDescriptorInput
     val isWatchOnly =
         isWatchOnlyKey &&
             !trimmedInput.let {
@@ -333,7 +369,8 @@ fun ImportWalletScreen(
     // BIP39 guarantees the first 4 chars uniquely identify each word, so we can
     // check validity as soon as 4 characters are typed — no need to wait for space.
     // Words with <4 chars are skipped (still being typed).
-    val bip39WordSet = remember { QrFormatParser.getWordlist(context).toSet() }
+    val bip39WordList = remember { QrFormatParser.getWordlist(context) }
+    val bip39WordSet = remember { bip39WordList.toSet() }
     val bip39PrefixSet = remember { bip39WordSet.map { it.take(4) }.toSet() }
     val invalidWords =
         remember(keyMaterial) {
@@ -349,6 +386,18 @@ fun ImportWalletScreen(
             } else {
                 emptyList()
             }
+        }
+    val seedEntryStatus: Pair<String, Color>? =
+        when {
+            invalidWords.isNotEmpty() -> {
+                val badWords = invalidWords.take(3).joinToString(", ") { "\"${it.second}\"" }
+                val suffix = if (invalidWords.size > 3) " +${invalidWords.size - 3} more" else ""
+                "Invalid word${if (invalidWords.size > 1) "s" else ""}: $badWords$suffix" to ErrorRed
+            }
+            isValidWordCount -> "$wordCount words entered" to TextSecondary
+            wordCount in 1..11 -> "$wordCount ${if (wordCount == 1) "word" else "words"} entered" to TextSecondary
+            wordCount > 11 -> "$wordCount words - need 12, 15, 18, 21, or 24" to ErrorRed
+            else -> null
         }
 
     // Check if all words with 4+ chars have valid prefixes (for enabling mnemonic check)
@@ -383,13 +432,14 @@ fun ImportWalletScreen(
     val isValidInput =
         unsupportedNonMainnetReason == null &&
             unsupportedNestedSegwitReason == null &&
-            (isWatchOnlyKey || isExtendedKey || isValidMnemonic || isWifKey || isBitcoinAddress)
+            (isWatchOnlyKey || isExtendedKey || isValidMnemonic || isWifKey || isBitcoinAddress || isLiquidCtDescriptor)
 
     // Auto-generate wallet name based on input type with incremental suffix
     val autoWalletName =
-        remember(selectedAddressType, existingWalletNames, isWifKey, isBitcoinAddress) {
+        remember(selectedAddressType, existingWalletNames, isWifKey, isBitcoinAddress, isLiquidCtDescriptor) {
             val base =
                 when {
+                    isLiquidCtDescriptor -> "Liquid_WatchOnly"
                     isBitcoinAddress -> "Watch_${selectedAddressType.displayName}"
                     isWifKey -> "Key_${selectedAddressType.displayName}"
                     else -> selectedAddressType.displayName
@@ -473,7 +523,12 @@ fun ImportWalletScreen(
                 // The ImportQrScannerDialog already handles UR decoding internally.
                 // For non-UR content, run through QrFormatParser for SeedQR/CompactSeedQR.
                 try {
-                    keyMaterial = QrFormatParser.parseWalletQr(context, scannedText, selectedAddressType)
+                    val parsedKeyMaterial = QrFormatParser.parseWalletQr(context, scannedText, selectedAddressType)
+                    keyMaterialField =
+                        TextFieldValue(
+                            text = parsedKeyMaterial,
+                            selection = TextRange(parsedKeyMaterial.length),
+                        )
                     scannerError = null
                     showQrScanner = false
                 } catch (e: IllegalArgumentException) {
@@ -658,83 +713,107 @@ fun ImportWalletScreen(
                 Spacer(modifier = Modifier.height(20.dp))
 
                 // Seed Phrase / Extended Key / WIF / Address Input
-                Text(
-                    text = "Import",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = TextSecondary,
-                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = "Import",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = TextSecondary,
+                    )
+                    seedEntryStatus?.let { (text, color) ->
+                        Text(
+                            text = text,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = color,
+                            textAlign = TextAlign.End,
+                        )
+                    }
+                }
                 Spacer(modifier = Modifier.height(6.dp))
                 Box(modifier = Modifier.fillMaxWidth()) {
-                    OutlinedTextField(
-                        value = keyMaterial,
-                        onValueChange = { input ->
-                            scannerError = null
-                            val trimmed = input.trim()
-                            val isKeyOrDescriptor =
-                                trimmed.let { text ->
-                                    text.startsWith("xpub") || text.startsWith("ypub") ||
-                                        text.startsWith("zpub") || text.startsWith("upub") ||
-                                        text.startsWith("xprv") || text.startsWith("yprv") ||
-                                        text.startsWith("zprv") ||
-                                        text.startsWith("[") || // Origin-prefixed key
-                                        text.startsWith("{") || // JSON format (ColdCard, Specter)
-                                        listOf("pkh(", "wpkh(", "tr(", "sh(").any {
-                                            text.lowercase().startsWith(it)
-                                        } // Output descriptor
-                                }
-                            // WIF private keys: K/L/5 (mainnet)
-                            val isWifInput =
-                                trimmed.let { text ->
-                                    (
-                                        text.length <= 52 && text.isNotEmpty() &&
-                                            (
-                                                text[0] == 'K' || text[0] == 'L' || text[0] == '5'
-                                            )
-                                    ) &&
-                                        !text.contains(" ")
-                                }
-                            // Bitcoin addresses (Base58/Bech32)
-                            val isAddressInput =
-                                trimmed.let { text ->
-                                    text.isNotEmpty() && !text.contains(" ") &&
+                    SensitiveSeedIme {
+                        OutlinedTextField(
+                            value = keyMaterialField,
+                            onValueChange = { input ->
+                                scannerError = null
+                                val trimmed = input.text.trim()
+                                val isKeyOrDescriptor =
+                                    trimmed.let { text ->
+                                        text.startsWith("xpub") || text.startsWith("ypub") ||
+                                            text.startsWith("zpub") || text.startsWith("upub") ||
+                                            text.startsWith("xprv") || text.startsWith("yprv") ||
+                                            text.startsWith("zprv") ||
+                                            text.startsWith("[") || // Origin-prefixed key
+                                            text.startsWith("{") || // JSON format (ColdCard, Specter)
+                                            listOf("pkh(", "wpkh(", "tr(", "sh(", "ct(").any {
+                                                text.lowercase().startsWith(it)
+                                            } // Output descriptor
+                                    }
+                                // WIF private keys: K/L/5 (mainnet)
+                                val isWifInput =
+                                    trimmed.let { text ->
                                         (
-                                            text.startsWith("1") || text.startsWith("3") ||
-                                                text.startsWith("bc1")
+                                            text.length <= 52 && text.isNotEmpty() &&
+                                                (
+                                                    text[0] == 'K' || text[0] == 'L' || text[0] == '5'
+                                                )
+                                        ) &&
+                                            !text.contains(" ")
+                                    }
+                                // Bitcoin addresses (Base58/Bech32)
+                                val isAddressInput =
+                                    trimmed.let { text ->
+                                        text.isNotEmpty() && !text.contains(" ") &&
+                                            (
+                                                text.startsWith("1") || text.startsWith("3") ||
+                                                    text.startsWith("bc1")
+                                            )
+                                    }
+                                keyMaterialField =
+                                    if (isKeyOrDescriptor || isWifInput || isAddressInput) {
+                                        input // Preserve case for keys/descriptors/addresses (Base58/Bech32 encoded)
+                                    } else {
+                                        // Lowercase for seed phrases, then expand abbreviated BIP39
+                                        // words (e.g. ColdCard exports first 4 letters of each word)
+                                        val normalizedInput =
+                                            QrFormatParser.expandAbbreviatedMnemonic(
+                                            context,
+                                            input.text.lowercase(),
                                         )
-                                }
-                            keyMaterial =
-                                if (isKeyOrDescriptor || isWifInput || isAddressInput) {
-                                    input // Preserve case for keys/descriptors/addresses (Base58/Bech32 encoded)
-                                } else {
-                                    // Lowercase for seed phrases, then expand abbreviated BIP39
-                                    // words (e.g. ColdCard exports first 4 letters of each word)
-                                    QrFormatParser.expandAbbreviatedMnemonic(
-                                        context,
-                                        input.lowercase(),
-                                    )
-                                }
-                        },
-                        modifier =
-                            Modifier
-                                .fillMaxWidth()
-                                .height(120.dp),
-                        shape = RoundedCornerShape(8.dp),
-                        placeholder = {
-                            Text(
-                                "BIP39 seed, Electrum seed, WIF private key, xpub/zpub, descriptor, or address",
-                                color = TextSecondary.copy(alpha = 0.5f),
-                            )
-                        },
-                        keyboardOptions = KeyboardOptions(autoCorrectEnabled = false),
-                        colors =
-                            OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = BitcoinOrange,
-                                unfocusedBorderColor = BorderColor,
-                                focusedTextColor = MaterialTheme.colorScheme.onBackground,
-                                unfocusedTextColor = MaterialTheme.colorScheme.onBackground,
-                                cursorColor = BitcoinOrange,
-                            ),
-                    )
+                                        input.copy(
+                                            text = normalizedInput,
+                                            selection =
+                                                TextRange(
+                                                    input.selection.end.coerceAtMost(normalizedInput.length),
+                                                ),
+                                        )
+                                    }
+                            },
+                            modifier =
+                                Modifier
+                                    .fillMaxWidth()
+                                    .height(120.dp),
+                            shape = RoundedCornerShape(8.dp),
+                            placeholder = {
+                                Text(
+                                    "BIP39 seed, Electrum seed, WIF private key, xpub/zpub, descriptor, or address",
+                                    color = TextSecondary.copy(alpha = 0.5f),
+                                )
+                            },
+                            keyboardOptions = sensitiveSeedKeyboardOptions(),
+                            colors =
+                                OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = BitcoinOrange,
+                                    unfocusedBorderColor = BorderColor,
+                                    focusedTextColor = MaterialTheme.colorScheme.onBackground,
+                                    unfocusedTextColor = MaterialTheme.colorScheme.onBackground,
+                                    cursorColor = BitcoinOrange,
+                                ),
+                        )
+                    }
                     Box(
                         contentAlignment = Alignment.Center,
                         modifier =
@@ -755,9 +834,21 @@ fun ImportWalletScreen(
                     }
                 }
 
+                Bip39SuggestionRow(
+                    input = keyMaterial,
+                    wordlist = bip39WordList,
+                    onWordSelected = { completedInput ->
+                        keyMaterialField =
+                            TextFieldValue(
+                                text = completedInput,
+                                selection = TextRange(completedInput.length),
+                            )
+                    },
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+
                 // Input validation feedback
                 if (keyMaterial.isNotBlank()) {
-                    Spacer(modifier = Modifier.height(8.dp))
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -767,6 +858,13 @@ fun ImportWalletScreen(
                             isJsonFormat -> {
                                 Text(
                                     text = "JSON wallet export detected",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = AccentTeal,
+                                )
+                            }
+                            looksLikeLiquidDescriptorInput -> {
+                                Text(
+                                    text = "Liquid CT descriptor detected",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = AccentTeal,
                                 )
@@ -846,37 +944,6 @@ fun ImportWalletScreen(
                             isValidWordCount && mnemonicValidation is MnemonicValidation.Invalid -> {
                                 Text(
                                     text = mnemonicValidation.error,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = ErrorRed,
-                                )
-                            }
-                            invalidWords.isNotEmpty() -> {
-                                val badWords = invalidWords.take(3).joinToString(", ") { "\"${it.second}\"" }
-                                val suffix = if (invalidWords.size > 3) " +${invalidWords.size - 3} more" else ""
-                                Text(
-                                    text = "Invalid word${if (invalidWords.size > 1) "s" else ""}: $badWords$suffix",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = ErrorRed,
-                                )
-                            }
-                            isValidWordCount -> {
-                                // Valid count, no bad words, but last word still being typed
-                                Text(
-                                    text = "$wordCount words entered",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = TextSecondary,
-                                )
-                            }
-                            wordCount < 12 -> {
-                                Text(
-                                    text = "$wordCount ${if (wordCount == 1) "word" else "words"} entered",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = TextSecondary,
-                                )
-                            }
-                            else -> {
-                                Text(
-                                    text = "$wordCount words - need 12, 15, 18, 21, or 24",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = ErrorRed,
                                 )
@@ -1282,8 +1349,8 @@ fun ImportWalletScreen(
             }
         }
 
-        // Error message
-        val displayError = unsupportedNonMainnetReason ?: unsupportedNestedSegwitReason ?: scannerError ?: error
+        val displayError =
+            unsupportedNonMainnetReason ?: unsupportedNestedSegwitReason ?: liquidDescriptorError ?: scannerError ?: error
         if (displayError != null) {
             Spacer(modifier = Modifier.height(8.dp))
             Card(
@@ -1308,10 +1375,23 @@ fun ImportWalletScreen(
         // Import button
         Button(
             onClick = {
+                val finalName = walletName.trim().ifBlank { autoWalletName }
+                val customGapLimit =
+                    if (useCustomGapLimit && gapLimitText.isNotBlank()) {
+                        gapLimitText.toIntOrNull()?.coerceIn(1, 10000)
+                            ?: StoredWallet.DEFAULT_GAP_LIMIT
+                    } else {
+                        StoredWallet.DEFAULT_GAP_LIMIT
+                    }
+
+                if (isLiquidCtDescriptor) {
+                    onImportLiquidWatchOnly(finalName, normalizedLiquidDescriptor, customGapLimit)
+                    return@Button
+                }
+
                 val passphraseValue = if (usePassphrase && passphrase.isNotBlank()) passphrase else null
                 val customPathValue = if (useCustomPath && customPath.isNotBlank()) customPath else null
 
-                // Use embedded fingerprint if available, then user-provided, then default
                 val fingerprintValue =
                     parsedFingerprint
                         ?: if (useCustomFingerprint && masterFingerprint.length == 8) {
@@ -1321,22 +1401,11 @@ fun ImportWalletScreen(
                                 ?: if (isWatchOnly) "00000000" else null
                         }
 
-                val finalName = walletName.trim().ifBlank { autoWalletName }
-
-                // Determine seed format for proper derivation in the repository
                 val seedFormat = when (electrumSeedType) {
                     ElectrumSeedUtil.ElectrumSeedType.STANDARD -> SeedFormat.ELECTRUM_STANDARD
                     ElectrumSeedUtil.ElectrumSeedType.SEGWIT -> SeedFormat.ELECTRUM_SEGWIT
                     null -> SeedFormat.BIP39
                 }
-
-                val customGapLimit =
-                    if (useCustomGapLimit && gapLimitText.isNotBlank()) {
-                        gapLimitText.toIntOrNull()?.coerceIn(1, 10000)
-                            ?: StoredWallet.DEFAULT_GAP_LIMIT
-                    } else {
-                        StoredWallet.DEFAULT_GAP_LIMIT
-                    }
 
                 val config =
                     WalletImportConfig(
@@ -1374,6 +1443,7 @@ fun ImportWalletScreen(
             } else {
                 Text(
                     text = when {
+                        isLiquidCtDescriptor -> "Import Liquid Watch-Only"
                         isBitcoinAddress -> "Watch Address"
                         isWifKey -> "Import Key"
                         else -> "Import Wallet"

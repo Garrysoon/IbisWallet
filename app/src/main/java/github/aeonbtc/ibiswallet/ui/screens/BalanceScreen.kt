@@ -75,6 +75,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -124,6 +125,28 @@ enum class SpeedUpMethod {
     REDIRECT,
 }
 
+private fun filterTransactionsForSearch(
+    transactions: List<TransactionDetails>,
+    transactionLabels: Map<String, String>,
+    addressLabels: Map<String, String>,
+    searchQuery: String,
+): List<TransactionDetails> {
+    val trimmedQuery = searchQuery.trim()
+    if (trimmedQuery.isBlank()) return transactions
+
+    return transactions.filter { tx ->
+        val txLabel = transactionLabels[tx.txid]
+        val addressLabel = tx.address?.let { addressLabels[it] }
+        val address = tx.address.orEmpty()
+
+        tx.txid.contains(trimmedQuery, ignoreCase = true) ||
+            txLabel?.contains(trimmedQuery, ignoreCase = true) == true ||
+            addressLabel?.contains(trimmedQuery, ignoreCase = true) == true ||
+            address.contains(trimmedQuery, ignoreCase = true) ||
+            matchesTimestampSearch(tx.timestamp, trimmedQuery)
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun BalanceScreen(
@@ -132,6 +155,7 @@ fun BalanceScreen(
     mempoolUrl: String = "https://mempool.space",
     mempoolServer: String = SecureStorage.MEMPOOL_DISABLED,
     btcPrice: Double? = null,
+    fiatCurrency: String = SecureStorage.DEFAULT_PRICE_CURRENCY,
     privacyMode: Boolean = false,
     onTogglePrivacy: () -> Unit = {},
     addressLabels: Map<String, String> = emptyMap(),
@@ -150,7 +174,17 @@ fun BalanceScreen(
     onToggleDenomination: () -> Unit = {},
     onManageWallets: () -> Unit = {},
     onScanQrResult: (String) -> Unit = {},
+    showLayer2RequiredPlaceholder: Boolean = false,
+    onOpenSettings: () -> Unit = {},
 ) {
+    if (showLayer2RequiredPlaceholder) {
+        Layer2RequiredPlaceholder(
+            walletName = walletState.activeWallet?.name,
+            onOpenSettings = onOpenSettings,
+        )
+        return
+    }
+
     // State for selected transaction dialog
     var selectedTransaction by remember { mutableStateOf<TransactionDetails?>(null) }
 
@@ -194,6 +228,7 @@ fun BalanceScreen(
             mempoolUrl = mempoolUrl,
             mempoolServer = mempoolServer,
             btcPrice = btcPrice,
+            fiatCurrency = fiatCurrency,
             privacyMode = privacyMode,
             label = txLabel,
             canRbf = txCanRbf,
@@ -225,6 +260,40 @@ fun BalanceScreen(
         if (!walletState.isSyncing) {
             isPullRefreshing = false
         }
+    }
+
+    var filteredTransactions by remember { mutableStateOf(walletState.transactions) }
+    var appliedSearchQuery by remember { mutableStateOf("") }
+    var isSearchFiltering by remember { mutableStateOf(false) }
+
+    LaunchedEffect(walletState.transactions, transactionLabels, addressLabels, searchQuery) {
+        val trimmedQuery = searchQuery.trim()
+        if (trimmedQuery.isBlank()) {
+            filteredTransactions = walletState.transactions
+            appliedSearchQuery = ""
+            isSearchFiltering = false
+            return@LaunchedEffect
+        }
+
+        isSearchFiltering = true
+        kotlinx.coroutines.delay(150)
+
+        val transactions = walletState.transactions.toList()
+        val txLabelMap = transactionLabels.toMap()
+        val addressLabelMap = addressLabels.toMap()
+        val filtered =
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                filterTransactionsForSearch(
+                    transactions = transactions,
+                    transactionLabels = txLabelMap,
+                    addressLabels = addressLabelMap,
+                    searchQuery = trimmedQuery,
+                )
+            }
+
+        filteredTransactions = filtered
+        appliedSearchQuery = trimmedQuery
+        isSearchFiltering = false
     }
 
     PullToRefreshBox(
@@ -370,7 +439,7 @@ fun BalanceScreen(
                             if (btcPrice != null && btcPrice > 0) {
                                 val usdValue = (walletState.balanceSats.toDouble() / 100_000_000.0) * btcPrice
                                 Text(
-                                    text = if (privacyMode) HIDDEN_AMOUNT else formatUsd(usdValue),
+                                    text = if (privacyMode) HIDDEN_AMOUNT else formatFiat(usdValue, fiatCurrency),
                                     style = MaterialTheme.typography.titleMedium,
                                     color = TextSecondary,
                                 )
@@ -537,35 +606,23 @@ fun BalanceScreen(
                                 unfocusedTextColor = MaterialTheme.colorScheme.onBackground,
                                 cursorColor = BitcoinOrange,
                             ),
+                        trailingIcon = {
+                            if (isSearchFiltering) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    color = BitcoinOrange,
+                                    strokeWidth = 2.dp,
+                                )
+                            }
+                        },
                     )
                 }
 
                 Spacer(modifier = Modifier.height(4.dp))
             }
 
-            // Filter transactions based on search query (always searches ALL transactions)
-            // NOTE: These computations are in LazyListScope (non-composable),
-            // so we use plain Kotlin instead of remember/derivedStateOf.
-            val filteredTransactions =
-                if (searchQuery.isBlank()) {
-                    walletState.transactions
-                } else {
-                    val query = searchQuery.lowercase()
-                    walletState.transactions.filter { tx ->
-                        val txLabel = transactionLabels[tx.txid]
-                        val addrLabel = tx.address?.let { addressLabels[it] }
-                        val address = tx.address ?: ""
-
-                        tx.txid.lowercase().contains(query) ||
-                            txLabel?.lowercase()?.contains(query) == true ||
-                            addrLabel?.lowercase()?.contains(query) == true ||
-                            address.lowercase().contains(query) ||
-                            matchesTimestampSearch(tx.timestamp, searchQuery)
-                    }
-                }
-
             // When searching, show all results; otherwise apply display limit
-            val isSearching = searchQuery.isNotBlank()
+            val isSearching = appliedSearchQuery.isNotBlank()
             val visibleTransactions =
                 if (isSearching) {
                     filteredTransactions
@@ -575,8 +632,64 @@ fun BalanceScreen(
             val totalCount = filteredTransactions.size
             val visibleCount = visibleTransactions.size
             val hasMore = !isSearching && visibleCount < totalCount
+            val showTransactionLoadingState =
+                filteredTransactions.isEmpty() &&
+                    (
+                        walletState.isTransactionHistoryLoading ||
+                            (walletState.isSyncing && walletState.transactions.isEmpty())
+                    )
 
-            if (filteredTransactions.isEmpty()) {
+            if (showTransactionLoadingState) {
+                item {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp),
+                        colors =
+                            CardDefaults.cardColors(
+                                containerColor = DarkCard,
+                            ),
+                    ) {
+                        Row(
+                            modifier =
+                                Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 18.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        ) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                color = BitcoinOrange,
+                                strokeWidth = 2.dp,
+                            )
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text =
+                                        walletState.syncProgress?.status
+                                            ?: if (walletState.isTransactionHistoryLoading) {
+                                                "Loading transaction history..."
+                                            } else {
+                                                "Syncing wallet..."
+                                            },
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    color = MaterialTheme.colorScheme.onBackground,
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text =
+                                        if (walletState.isTransactionHistoryLoading) {
+                                            "Balance is ready. Transactions will appear shortly."
+                                        } else {
+                                            "Recent activity will appear when sync completes."
+                                        },
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = TextSecondary,
+                                )
+                            }
+                        }
+                    }
+                }
+            } else if (filteredTransactions.isEmpty()) {
                 item {
                     // Empty state for transactions
                     Card(
@@ -598,14 +711,14 @@ fun BalanceScreen(
                                 horizontalAlignment = Alignment.CenterHorizontally,
                             ) {
                                 Text(
-                                    text = if (searchQuery.isNotBlank()) "No matching transactions" else "No transactions yet",
+                                    text = if (isSearching) "No matching transactions" else "No transactions yet",
                                     style = MaterialTheme.typography.bodyLarge,
                                     color = TextSecondary,
                                 )
                                 Spacer(modifier = Modifier.height(8.dp))
                                 Text(
                                     text =
-                                        if (searchQuery.isNotBlank()) {
+                                        if (isSearching) {
                                             "Try a different search term"
                                         } else if (walletState.isInitialized) {
                                             "Transactions will appear here after syncing"
@@ -631,6 +744,7 @@ fun BalanceScreen(
                         useSats = useSats,
                         label = label,
                         btcPrice = btcPrice,
+                        fiatCurrency = fiatCurrency,
                         privacyMode = privacyMode,
                         onClick = { selectedTransaction = tx },
                     )
@@ -789,11 +903,70 @@ fun BalanceScreen(
 }
 
 @Composable
+private fun Layer2RequiredPlaceholder(
+    walletName: String?,
+    onOpenSettings: () -> Unit,
+) {
+    LazyColumn(
+        modifier =
+            Modifier
+                .fillMaxSize()
+                .padding(horizontal = 16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        item {
+            Spacer(modifier = Modifier.height(16.dp))
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp),
+                colors =
+                    CardDefaults.cardColors(
+                        containerColor = DarkCard,
+                    ),
+            ) {
+                Column(
+                    modifier =
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 20.dp, vertical = 28.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Text(
+                        text = walletName ?: "Layer 2 required",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onBackground,
+                        textAlign = TextAlign.Center,
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Text(
+                        text = "Enable Layer 2 to view this Liquid watch-only wallet.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = TextSecondary,
+                        textAlign = TextAlign.Center,
+                    )
+                    Spacer(modifier = Modifier.height(18.dp))
+                    IbisButton(
+                        onClick = onOpenSettings,
+                        modifier =
+                            Modifier
+                                .fillMaxWidth()
+                                .height(48.dp),
+                    ) {
+                        Text("Open Settings", style = MaterialTheme.typography.titleMedium)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun TransactionItem(
     transaction: TransactionDetails,
     useSats: Boolean = false,
     label: String? = null,
     btcPrice: Double? = null,
+    fiatCurrency: String = SecureStorage.DEFAULT_PRICE_CURRENCY,
     privacyMode: Boolean = false,
     onClick: () -> Unit = {},
 ) {
@@ -893,7 +1066,7 @@ private fun TransactionItem(
                 if (btcPrice != null && btcPrice > 0 && !privacyMode) {
                     val usdValue = (absSats.toDouble() / 100_000_000.0) * btcPrice
                     Text(
-                        text = formatUsd(usdValue),
+                        text = formatFiat(usdValue, fiatCurrency),
                         style = MaterialTheme.typography.bodySmall.copy(fontSize = 14.sp, lineHeight = 18.sp),
                         color = TextSecondary,
                         textAlign = TextAlign.End,
@@ -930,6 +1103,7 @@ fun TransactionDetailDialog(
     mempoolUrl: String = "https://mempool.space",
     mempoolServer: String = SecureStorage.MEMPOOL_DISABLED,
     btcPrice: Double? = null,
+    fiatCurrency: String = SecureStorage.DEFAULT_PRICE_CURRENCY,
     privacyMode: Boolean = false,
     label: String? = null,
     canRbf: Boolean = false,
@@ -1206,7 +1380,7 @@ fun TransactionDetailDialog(
                         if (btcPrice != null && btcPrice > 0 && !privacyMode) {
                             val usdValue = (amountAbs.toDouble() / 100_000_000.0) * btcPrice
                             Text(
-                                text = formatUsd(usdValue),
+                                text = formatFiat(usdValue, fiatCurrency),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = TextSecondary,
                                 modifier = Modifier.padding(top = 2.dp),
@@ -1349,7 +1523,7 @@ fun TransactionDetailDialog(
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = TextSecondary,
                             )
-                            Spacer(modifier = Modifier.height(6.dp))
+                            Spacer(modifier = Modifier.height(4.dp))
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -1387,7 +1561,7 @@ fun TransactionDetailDialog(
                         }
 
                         HorizontalDivider(
-                            modifier = Modifier.padding(vertical = 8.dp),
+                            modifier = Modifier.padding(vertical = 6.dp),
                             color = TextSecondary.copy(alpha = 0.1f),
                         )
 
@@ -1398,11 +1572,11 @@ fun TransactionDetailDialog(
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = TextSecondary,
                             )
-                            Spacer(modifier = Modifier.height(6.dp))
+                            Spacer(modifier = Modifier.height(4.dp))
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically,
+                                verticalAlignment = Alignment.Top,
                             ) {
                                 Text(
                                     text = transaction.txid.take(20) + "..." + transaction.txid.takeLast(8),
@@ -1415,6 +1589,13 @@ fun TransactionDetailDialog(
                                     contentAlignment = Alignment.Center,
                                     modifier =
                                         Modifier
+                                            .layout { measurable, constraints ->
+                                                val placeable = measurable.measure(constraints)
+                                                val liftPx = 4.dp.roundToPx()
+                                                layout(placeable.width, (placeable.height - liftPx).coerceAtLeast(0)) {
+                                                    placeable.placeRelative(0, -liftPx)
+                                                }
+                                            }
                                             .size(32.dp)
                                             .clip(RoundedCornerShape(6.dp))
                                             .background(DarkSurfaceVariant)
@@ -1446,7 +1627,7 @@ fun TransactionDetailDialog(
                         }
 
                         HorizontalDivider(
-                            modifier = Modifier.padding(vertical = 8.dp),
+                            modifier = Modifier.padding(vertical = 6.dp),
                             color = TextSecondary.copy(alpha = 0.1f),
                         )
 
@@ -1470,10 +1651,10 @@ fun TransactionDetailDialog(
                                         )
                                     }
                                 }
-                                Spacer(modifier = Modifier.height(6.dp))
+                                Spacer(modifier = Modifier.height(4.dp))
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
-                                    verticalAlignment = Alignment.CenterVertically,
+                                    verticalAlignment = Alignment.Top,
                                 ) {
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text(
@@ -1503,6 +1684,13 @@ fun TransactionDetailDialog(
                                         contentAlignment = Alignment.Center,
                                         modifier =
                                             Modifier
+                                                .layout { measurable, constraints ->
+                                                    val placeable = measurable.measure(constraints)
+                                                    val liftPx = 4.dp.roundToPx()
+                                                    layout(placeable.width, (placeable.height - liftPx).coerceAtLeast(0)) {
+                                                        placeable.placeRelative(0, -liftPx)
+                                                    }
+                                                }
                                                 .size(32.dp)
                                                 .clip(RoundedCornerShape(6.dp))
                                                 .background(DarkSurfaceVariant)
@@ -1534,7 +1722,7 @@ fun TransactionDetailDialog(
                             }
 
                             HorizontalDivider(
-                                modifier = Modifier.padding(vertical = 8.dp),
+                                modifier = Modifier.padding(vertical = 6.dp),
                                 color = TextSecondary.copy(alpha = 0.1f),
                             )
 
@@ -1546,10 +1734,10 @@ fun TransactionDetailDialog(
                                         style = MaterialTheme.typography.bodyMedium,
                                         color = TextSecondary,
                                     )
-                                    Spacer(modifier = Modifier.height(6.dp))
+                                    Spacer(modifier = Modifier.height(4.dp))
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
-                                        verticalAlignment = Alignment.CenterVertically,
+                                        verticalAlignment = Alignment.Top,
                                     ) {
                                         Column(modifier = Modifier.weight(1f)) {
                                             Text(
@@ -1579,6 +1767,13 @@ fun TransactionDetailDialog(
                                             contentAlignment = Alignment.Center,
                                             modifier =
                                                 Modifier
+                                                    .layout { measurable, constraints ->
+                                                        val placeable = measurable.measure(constraints)
+                                                        val liftPx = 4.dp.roundToPx()
+                                                        layout(placeable.width, (placeable.height - liftPx).coerceAtLeast(0)) {
+                                                            placeable.placeRelative(0, -liftPx)
+                                                        }
+                                                    }
                                                     .size(32.dp)
                                                     .clip(RoundedCornerShape(6.dp))
                                                     .background(DarkSurfaceVariant)
@@ -1610,7 +1805,7 @@ fun TransactionDetailDialog(
                                 }
 
                                 HorizontalDivider(
-                                    modifier = Modifier.padding(vertical = 10.dp),
+                                    modifier = Modifier.padding(vertical = 6.dp),
                                     color = TextSecondary.copy(alpha = 0.1f),
                                 )
                             }
@@ -1624,7 +1819,7 @@ fun TransactionDetailDialog(
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = TextSecondary,
                                 )
-                                Spacer(modifier = Modifier.height(6.dp))
+                                Spacer(modifier = Modifier.height(4.dp))
                                 // Use fetched vsize from Electrum if available, otherwise fall back to BDK's weight/4.0
                                 val displayVsize: Double? = fetchedVsize ?: transaction.vsize
                                 // Recalculate fee rate using the fractional vsize
@@ -1661,7 +1856,7 @@ fun TransactionDetailDialog(
                             }
 
                             HorizontalDivider(
-                                modifier = Modifier.padding(vertical = 10.dp),
+                                modifier = Modifier.padding(vertical = 6.dp),
                                 color = TextSecondary.copy(alpha = 0.1f),
                             )
                         }
@@ -1673,7 +1868,7 @@ fun TransactionDetailDialog(
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = TextSecondary,
                             )
-                            Spacer(modifier = Modifier.height(6.dp))
+                            Spacer(modifier = Modifier.height(4.dp))
                             if (isEditingLabel) {
                                 OutlinedTextField(
                                     value = labelText,

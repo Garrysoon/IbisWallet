@@ -49,7 +49,6 @@ import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Warning
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -97,6 +96,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.zIndex
 import github.aeonbtc.ibiswallet.ui.components.IbisButton
+import github.aeonbtc.ibiswallet.ui.components.ScrollableAlertDialog
 import github.aeonbtc.ibiswallet.ui.components.SquareToggle
 import github.aeonbtc.ibiswallet.ui.theme.BitcoinOrange
 import github.aeonbtc.ibiswallet.ui.theme.BitcoinOrangeLight
@@ -107,6 +107,7 @@ import github.aeonbtc.ibiswallet.ui.theme.ErrorRed
 import github.aeonbtc.ibiswallet.ui.theme.LiquidTeal
 import github.aeonbtc.ibiswallet.ui.theme.SuccessGreen
 import github.aeonbtc.ibiswallet.ui.theme.TextSecondary
+import github.aeonbtc.ibiswallet.util.BitcoinUtils
 import github.aeonbtc.ibiswallet.util.Bip329LabelCounts
 import github.aeonbtc.ibiswallet.util.Bip329LabelScope
 import github.aeonbtc.ibiswallet.util.SecureClipboard
@@ -130,6 +131,8 @@ data class WalletInfo(
     val lastFullSyncTime: Long? = null,
     val masterFingerprint: String? = null,
     val gapLimit: Int = 20,
+    val liquidGapLimit: Int = 20,
+    val isLiquidWatchOnly: Boolean = false,
 )
 
 /**
@@ -145,6 +148,7 @@ data class KeyMaterialInfo(
     val masterFingerprint: String? = null, // Master key fingerprint (8 hex chars)
     val privateKey: String? = null, // WIF private key (single-key wallets)
     val watchAddress: String? = null, // Single watched address
+    val liquidDescriptor: String? = null, // Liquid CT descriptor for Liquid-enabled wallets
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -171,6 +175,7 @@ fun ManageWalletsScreen(
     layer2Enabled: Boolean = false,
     isLiquidEnabledForWallet: (walletId: String) -> Boolean = { false },
     onSetLiquidEnabledForWallet: (walletId: String, Boolean) -> Unit = { _, _ -> },
+    onEditLiquidGapLimit: (walletId: String, newGapLimit: Int) -> Unit = { _, _ -> },
     isWalletLockAvailable: Boolean = false,
     onSetWalletLocked: (walletId: String, Boolean) -> Unit = { _, _ -> },
 ) {
@@ -188,7 +193,7 @@ fun ManageWalletsScreen(
     if (walletToDelete != null) {
         val isWatchOnly = walletToDelete?.isWatchOnly == true
         var confirmChecked by remember { mutableStateOf(false) }
-        AlertDialog(
+        ScrollableAlertDialog(
             onDismissRequest = {
                 walletToDelete = null
                 confirmChecked = false
@@ -290,16 +295,28 @@ fun ManageWalletsScreen(
         val gapLimitInt = editGapLimit.toIntOrNull()
         val gapLimitValid = gapLimitInt != null && gapLimitInt in 1..10000
 
+        val showLiquidGapLimit = layer2Enabled && isLiquidEnabledForWallet(walletToEdit!!.id)
+        var editLiquidGapLimit by remember(walletToEdit) {
+            mutableStateOf(walletToEdit!!.liquidGapLimit.toString())
+        }
+        val liquidGapLimitInt = editLiquidGapLimit.toIntOrNull()
+        val liquidGapLimitValid = !showLiquidGapLimit ||
+            editLiquidGapLimit.isEmpty() ||
+            (liquidGapLimitInt != null && liquidGapLimitInt in 1..10000)
+
         val nameChanged = editName.trim().isNotBlank() && editName.trim() != walletToEdit?.name
         val gapLimitChanged = gapLimitValid && gapLimitInt != walletToEdit?.gapLimit
+        val liquidGapLimitChanged = showLiquidGapLimit &&
+            liquidGapLimitValid && liquidGapLimitInt != null &&
+            liquidGapLimitInt != walletToEdit?.liquidGapLimit
         val fingerprintChanged =
             showFingerprint &&
                 editFingerprint.trim().lowercase() != (walletToEdit?.masterFingerprint ?: "").lowercase()
         val canSave =
-            editName.trim().isNotBlank() && gapLimitValid && fingerprintValid &&
-                (nameChanged || gapLimitChanged || fingerprintChanged)
+            editName.trim().isNotBlank() && gapLimitValid && fingerprintValid && liquidGapLimitValid &&
+                (nameChanged || gapLimitChanged || liquidGapLimitChanged || fingerprintChanged)
 
-        AlertDialog(
+        ScrollableAlertDialog(
             onDismissRequest = { walletToEdit = null },
             title = {
                 Text(
@@ -333,15 +350,9 @@ fun ManageWalletsScreen(
                                 editGapLimit = value
                             }
                         },
-                        label = { Text("Gap Limit") },
+                        label = { Text(if (showLiquidGapLimit) "Bitcoin Gap Limit" else "Gap Limit") },
                         singleLine = true,
                         isError = editGapLimit.isNotEmpty() && !gapLimitValid,
-                        supportingText = {
-                            Text(
-                                "Scan limit for empty addresses",
-                                color = TextSecondary.copy(alpha = 0.5f),
-                            )
-                        },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                         shape = RoundedCornerShape(8.dp),
                         colors =
@@ -388,7 +399,29 @@ fun ManageWalletsScreen(
                         )
                     }
 
-                    // (Liquid toggle moved to wallet card)
+                    if (showLiquidGapLimit) {
+                        Spacer(modifier = Modifier.height(12.dp))
+                        OutlinedTextField(
+                            value = editLiquidGapLimit,
+                            onValueChange = { value ->
+                                if (value.isEmpty() || value.all { it.isDigit() }) {
+                                    editLiquidGapLimit = value
+                                }
+                            },
+                            label = { Text("Liquid Gap Limit") },
+                            singleLine = true,
+                            isError = editLiquidGapLimit.isNotEmpty() && !liquidGapLimitValid,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            shape = RoundedCornerShape(8.dp),
+                            colors =
+                                OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = BitcoinOrange,
+                                    unfocusedBorderColor = BorderColor,
+                                    cursorColor = BitcoinOrange,
+                                ),
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
                 }
             },
             confirmButton = {
@@ -399,6 +432,12 @@ fun ManageWalletsScreen(
                         val trimmedFp = if (showFingerprint) editFingerprint.trim().lowercase() else null
                         if (trimmedName.isNotBlank() && gapLimitValid) {
                             walletToEdit?.let { onEditWallet(it.id, trimmedName, newGap, trimmedFp) }
+                        }
+                        if (liquidGapLimitChanged) {
+                            walletToEdit?.let { onEditLiquidGapLimit(it.id, liquidGapLimitInt) }
+                        }
+                        if (gapLimitChanged || liquidGapLimitChanged) {
+                            walletToEdit?.let { onFullSync(it) }
                         }
                         walletToEdit = null
                     },
@@ -421,7 +460,7 @@ fun ManageWalletsScreen(
 
     // Warning dialog before showing seed phrase
     if (showWarningDialog && walletToView != null) {
-        AlertDialog(
+        ScrollableAlertDialog(
             onDismissRequest = {
                 showWarningDialog = false
                 walletToView = null
@@ -481,7 +520,7 @@ fun ManageWalletsScreen(
                             containerColor = BitcoinOrange,
                         ),
                 ) {
-                    Text("I Understand, Show Me")
+                    Text("I Understand")
                 }
             },
             dismissButton = {
@@ -500,7 +539,7 @@ fun ManageWalletsScreen(
 
     // Full Sync confirmation dialog
     if (walletToSync != null) {
-        AlertDialog(
+        ScrollableAlertDialog(
             onDismissRequest = { walletToSync = null },
             title = {
                 Text(
@@ -935,6 +974,7 @@ private enum class KeyViewType {
     EXTENDED_PUBLIC_KEY,
     PRIVATE_KEY,
     WATCH_ADDRESS,
+    LIQUID_DESCRIPTOR,
 }
 
 @Composable
@@ -1953,6 +1993,7 @@ private fun KeyMaterialDialog(
     val hasXpub = keyMaterialInfo.extendedPublicKey != null
     val hasPrivateKey = keyMaterialInfo.privateKey != null
     val hasWatchAddress = keyMaterialInfo.watchAddress != null
+    val hasLiquidDescriptor = keyMaterialInfo.liquidDescriptor != null
 
     // Current key material based on selection
     val currentKeyMaterial =
@@ -1961,6 +2002,8 @@ private fun KeyMaterialDialog(
             KeyViewType.EXTENDED_PUBLIC_KEY -> keyMaterialInfo.extendedPublicKey
             KeyViewType.PRIVATE_KEY -> keyMaterialInfo.privateKey
             KeyViewType.WATCH_ADDRESS -> keyMaterialInfo.watchAddress
+            KeyViewType.LIQUID_DESCRIPTOR ->
+                keyMaterialInfo.liquidDescriptor?.let(BitcoinUtils::formatLiquidDescriptorForDisplay)
             null -> null
         }
 
@@ -1970,6 +2013,7 @@ private fun KeyMaterialDialog(
             KeyViewType.EXTENDED_PUBLIC_KEY -> "Extended Public Key"
             KeyViewType.PRIVATE_KEY -> "Private Key"
             KeyViewType.WATCH_ADDRESS -> "Watched Address"
+            KeyViewType.LIQUID_DESCRIPTOR -> "Liquid Descriptor"
             null -> "View Key Material"
         }
 
@@ -2002,7 +2046,7 @@ private fun KeyMaterialDialog(
         showQrCode = false
     }
 
-    AlertDialog(
+    ScrollableAlertDialog(
         onDismissRequest = onDismiss,
         title = {
             Text(
@@ -2077,6 +2121,21 @@ private fun KeyMaterialDialog(
                                 )
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Text("Extended Public Key")
+                            }
+
+                            if (hasLiquidDescriptor) {
+                                IbisButton(
+                                    onClick = { selectedViewType = KeyViewType.LIQUID_DESCRIPTOR },
+                                    modifier = Modifier.fillMaxWidth(),
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Visibility,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(18.dp),
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text("Liquid Descriptor")
+                                }
                             }
 
                             // Private Key button (WIF wallets)
@@ -2195,6 +2254,7 @@ private fun KeyMaterialDialog(
                         val qrSubtitle = when (selectedViewType) {
                             KeyViewType.SEED_PHRASE -> "seed phrase"
                             KeyViewType.EXTENDED_PUBLIC_KEY -> "extended public key"
+                            KeyViewType.LIQUID_DESCRIPTOR -> "Liquid descriptor"
                             KeyViewType.PRIVATE_KEY -> "private key"
                             else -> "address"
                         }
@@ -2206,10 +2266,11 @@ private fun KeyMaterialDialog(
                             modifier = Modifier.fillMaxWidth(),
                         )
                     } else if ((selectedViewType == KeyViewType.EXTENDED_PUBLIC_KEY ||
+                            selectedViewType == KeyViewType.LIQUID_DESCRIPTOR ||
                             selectedViewType == KeyViewType.PRIVATE_KEY ||
                             selectedViewType == KeyViewType.WATCH_ADDRESS) && currentKeyMaterial != null
                     ) {
-                        // Extended public key, WIF private key, or watch address - show as text
+                        // Extended public key, Liquid descriptor, WIF private key, or watch address - show as text
                         Card(
                             modifier = Modifier.fillMaxWidth(),
                             shape = RoundedCornerShape(12.dp),
@@ -2413,9 +2474,10 @@ private fun WalletCard(
         }
 
     val isBip39Wallet = !wallet.isWatchOnly && !wallet.isWatchAddress && !wallet.isPrivateKey
-    val showLiquidToggle = layer2Enabled && isBip39Wallet
+    val showLiquidToggle = wallet.isLiquidWatchOnly || (layer2Enabled && isBip39Wallet)
     val managementActionsEnabled = !wallet.isLocked
-    val liquidToggleEnabled = !wallet.isLocked
+    val liquidToggleEnabled = !wallet.isLocked && !wallet.isLiquidWatchOnly
+    val liquidChecked = wallet.isLiquidWatchOnly || isLiquidEnabled
     val lockedPrimaryTextColor = ErrorRed.copy(alpha = 0.85f)
     val lockedSecondaryTextColor = ErrorRed.copy(alpha = 0.6f)
     val actionTint =
@@ -2559,7 +2621,7 @@ private fun WalletCard(
                                     text = "Liquid",
                                     style = MaterialTheme.typography.bodySmall.copy(fontSize = 14.sp, lineHeight = 18.sp),
                                     color =
-                                        if (liquidToggleEnabled && isLiquidEnabled) {
+                                        if (liquidChecked) {
                                             LiquidTeal
                                         } else if (wallet.isLocked) {
                                             lockedSecondaryTextColor
@@ -2569,10 +2631,15 @@ private fun WalletCard(
                                 )
                                 Spacer(modifier = Modifier.width(8.dp))
                                 SquareToggle(
-                                    checked = isLiquidEnabled,
-                                    onCheckedChange = onSetLiquidEnabled,
+                                    checked = liquidChecked,
+                                    onCheckedChange = { enabled ->
+                                        if (!wallet.isLiquidWatchOnly) {
+                                            onSetLiquidEnabled(enabled)
+                                        }
+                                    },
                                     enabled = liquidToggleEnabled,
                                     checkedColor = LiquidTeal,
+                                    disabledCheckedColor = LiquidTeal,
                                     trackWidth = 36.dp,
                                     trackHeight = 20.dp,
                                     thumbSize = 14.dp,

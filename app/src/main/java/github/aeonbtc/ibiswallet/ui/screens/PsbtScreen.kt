@@ -7,6 +7,7 @@ import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -23,6 +24,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.FileOpen
@@ -33,7 +35,11 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuAnchorType
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -42,6 +48,8 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -55,12 +63,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import github.aeonbtc.ibiswallet.data.local.SecureStorage
 import github.aeonbtc.ibiswallet.ui.components.AnimatedQrCode
 import github.aeonbtc.ibiswallet.ui.components.AnimatedQrScannerDialog
 import github.aeonbtc.ibiswallet.ui.theme.BitcoinOrange
@@ -88,6 +99,12 @@ import github.aeonbtc.ibiswallet.viewmodel.WalletUiState
 fun PsbtScreen(
     psbtState: PsbtState,
     uiState: WalletUiState,
+    qrDensity: SecureStorage.QrDensity,
+    onQrDensityChange: (SecureStorage.QrDensity) -> Unit,
+    qrPlaybackSpeed: SecureStorage.QrPlaybackSpeed,
+    onQrPlaybackSpeedChange: (SecureStorage.QrPlaybackSpeed) -> Unit,
+    qrBrightness: Float,
+    onQrBrightnessChange: (Float) -> Unit,
     onSignedDataReceived: (String) -> Unit,
     onConfirmBroadcast: () -> Unit,
     onCancelBroadcast: () -> Unit,
@@ -273,10 +290,40 @@ fun PsbtScreen(
 
                             Spacer(modifier = Modifier.height(16.dp))
 
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                verticalAlignment = Alignment.Top,
+                            ) {
+                                QrDensityDropdown(
+                                    currentDensity = qrDensity,
+                                    onDensitySelected = onQrDensityChange,
+                                    modifier = Modifier.width(156.dp),
+                                )
+
+                                QrPlaybackSpeedDropdown(
+                                    currentSpeed = qrPlaybackSpeed,
+                                    onSpeedSelected = onQrPlaybackSpeedChange,
+                                    modifier = Modifier.width(156.dp),
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.height(12.dp))
+
+                            QrBrightnessSlider(
+                                brightness = qrBrightness,
+                                onBrightnessChange = onQrBrightnessChange,
+                            )
+
+                            Spacer(modifier = Modifier.height(16.dp))
+
                             // Animated QR code
                             AnimatedQrCode(
-                                psbtBase64 = psbtState.unsignedPsbtBase64,
+                                dataBase64 = psbtState.unsignedPsbtBase64,
                                 qrSize = 280.dp,
+                                density = qrDensity,
+                                brightness = qrBrightness,
+                                playbackSpeed = qrPlaybackSpeed,
                             )
 
                             Spacer(modifier = Modifier.height(12.dp))
@@ -871,6 +918,244 @@ private fun PsbtDetailRow(
     }
 }
 
+@Composable
+private fun QrDensityDropdown(
+    currentDensity: SecureStorage.QrDensity,
+    onDensitySelected: (SecureStorage.QrDensity) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val options =
+        listOf(
+            QrDropdownOption(
+                title = "Low",
+                onClick = { onDensitySelected(SecureStorage.QrDensity.LOW) },
+                selected = currentDensity == SecureStorage.QrDensity.LOW,
+            ),
+            QrDropdownOption(
+                title = "Medium",
+                onClick = { onDensitySelected(SecureStorage.QrDensity.MEDIUM) },
+                selected = currentDensity == SecureStorage.QrDensity.MEDIUM,
+            ),
+            QrDropdownOption(
+                title = "High",
+                onClick = { onDensitySelected(SecureStorage.QrDensity.HIGH) },
+                selected = currentDensity == SecureStorage.QrDensity.HIGH,
+            ),
+        )
+
+    QrDropdown(
+        currentValue = currentDensity.displayName(),
+        label = "QR Density",
+        options = options,
+        modifier = modifier,
+    )
+}
+
+@Composable
+private fun QrPlaybackSpeedDropdown(
+    currentSpeed: SecureStorage.QrPlaybackSpeed,
+    onSpeedSelected: (SecureStorage.QrPlaybackSpeed) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val options =
+        listOf(
+            QrDropdownOption(
+                title = "Slow",
+                onClick = { onSpeedSelected(SecureStorage.QrPlaybackSpeed.SLOW) },
+                selected = currentSpeed == SecureStorage.QrPlaybackSpeed.SLOW,
+            ),
+            QrDropdownOption(
+                title = "Medium",
+                onClick = { onSpeedSelected(SecureStorage.QrPlaybackSpeed.MEDIUM) },
+                selected = currentSpeed == SecureStorage.QrPlaybackSpeed.MEDIUM,
+            ),
+            QrDropdownOption(
+                title = "Fast",
+                onClick = { onSpeedSelected(SecureStorage.QrPlaybackSpeed.FAST) },
+                selected = currentSpeed == SecureStorage.QrPlaybackSpeed.FAST,
+            ),
+        )
+
+    QrDropdown(
+        currentValue = currentSpeed.displayName(),
+        label = "QR Speed",
+        options = options,
+        modifier = modifier,
+    )
+}
+
+private fun SecureStorage.QrDensity.displayName(): String =
+    when (this) {
+        SecureStorage.QrDensity.LOW -> "Low"
+        SecureStorage.QrDensity.MEDIUM -> "Medium"
+        SecureStorage.QrDensity.HIGH -> "High"
+    }
+
+private fun SecureStorage.QrPlaybackSpeed.displayName(): String =
+    when (this) {
+        SecureStorage.QrPlaybackSpeed.SLOW -> "Slow"
+        SecureStorage.QrPlaybackSpeed.MEDIUM -> "Medium"
+        SecureStorage.QrPlaybackSpeed.FAST -> "Fast"
+    }
+
+private data class QrDropdownOption(
+    val title: String,
+    val onClick: () -> Unit,
+    val selected: Boolean,
+)
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun QrDropdown(
+    currentValue: String,
+    label: String,
+    options: List<QrDropdownOption>,
+    modifier: Modifier = Modifier,
+) {
+    var expanded by remember { mutableStateOf(false) }
+
+    ExposedDropdownMenuBox(
+        expanded = expanded,
+        onExpandedChange = { expanded = it },
+    ) {
+        QrDropdownField(
+            value = currentValue,
+            label = label,
+            expanded = expanded,
+            modifier = modifier.menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable),
+        )
+
+        ExposedDropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            modifier =
+                Modifier
+                    .exposedDropdownSize(true)
+                    .background(DarkSurface),
+        ) {
+            options.forEach { option ->
+                DropdownMenuItem(
+                    text = {
+                        QrDropdownOptionText(
+                            title = option.title,
+                            selected = option.selected,
+                        )
+                    },
+                    onClick = {
+                        option.onClick()
+                        expanded = false
+                    },
+                    leadingIcon = {
+                        if (option.selected) {
+                            Icon(
+                                imageVector = Icons.Default.Check,
+                                contentDescription = "Selected",
+                                tint = BitcoinOrange,
+                            )
+                        }
+                    },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+@OptIn(ExperimentalMaterial3Api::class)
+private fun QrDropdownField(
+    value: String,
+    label: String,
+    expanded: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = {},
+        readOnly = true,
+        singleLine = true,
+        textStyle = TextStyle(fontSize = 15.sp),
+        label = {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelMedium,
+            )
+        },
+        trailingIcon = {
+            ExposedDropdownMenuDefaults.TrailingIcon(
+                expanded = expanded,
+            )
+        },
+        shape = RoundedCornerShape(8.dp),
+        colors =
+            OutlinedTextFieldDefaults.colors(
+                focusedBorderColor = BitcoinOrange,
+                unfocusedBorderColor = BorderColor,
+                focusedLabelColor = BitcoinOrange,
+                unfocusedLabelColor = TextSecondary,
+                focusedTextColor = MaterialTheme.colorScheme.onBackground,
+                unfocusedTextColor = MaterialTheme.colorScheme.onBackground,
+                cursorColor = BitcoinOrange,
+            ),
+        modifier =
+            modifier
+                .fillMaxWidth()
+                .height(56.dp),
+    )
+}
+
+@Composable
+private fun QrDropdownOptionText(
+    title: String,
+    selected: Boolean,
+) {
+    Text(
+        text = title,
+        style = TextStyle(fontSize = 14.5.sp),
+        color = if (selected) BitcoinOrange else MaterialTheme.colorScheme.onBackground,
+    )
+}
+
+@Composable
+private fun QrBrightnessSlider(
+    brightness: Float,
+    onBrightnessChange: (Float) -> Unit,
+) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "QR Brightness",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.onBackground,
+            )
+            Text(
+                text = "${(brightness * 100).toInt()}%",
+                style = MaterialTheme.typography.bodySmall,
+                color = TextSecondary,
+            )
+        }
+
+        Spacer(modifier = Modifier.height(4.dp))
+
+        Slider(
+            value = brightness,
+            onValueChange = onBrightnessChange,
+            valueRange = SecureStorage.MIN_PSBT_QR_BRIGHTNESS..1f,
+            colors =
+                SliderDefaults.colors(
+                    thumbColor = BitcoinOrange,
+                    activeTrackColor = BitcoinOrange,
+                ),
+        )
+    }
+}
+
 /** Format sats for display: shows BTC for large amounts, sats for small */
 private fun formatPsbtAmount(sats: ULong): String {
     return if (sats >= 100_000UL) {
@@ -880,3 +1165,4 @@ private fun formatPsbtAmount(sats: ULong): String {
         "%,d sats".format(sats.toLong())
     }
 }
+

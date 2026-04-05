@@ -10,11 +10,16 @@ import android.os.IBinder
 import android.util.Log
 import androidx.core.content.ContextCompat
 import github.aeonbtc.ibiswallet.BuildConfig
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.torproject.jni.TorService
@@ -33,6 +38,7 @@ class TorManager private constructor(context: Context) {
         private const val SOCKS_PROBE_RETRIES = 4
         private const val SOCKS_PROBE_TIMEOUT_MS = 500
         private const val SOCKS_PROBE_INTERVAL_MS = 250L
+        private const val TOR_STOP_SETTLE_MS = 2_000L
 
         @Volatile
         private var instance: TorManager? = null
@@ -45,12 +51,15 @@ class TorManager private constructor(context: Context) {
     }
 
     private val appContextRef = WeakReference(context.applicationContext)
+    private val managerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val _torState = MutableStateFlow(TorState())
     val torState: StateFlow<TorState> = _torState.asStateFlow()
 
     private var torService: TorService? = null
     private var isBound = false
     private var isReceiverRegistered = false
+    private var stopTransitionJob: Job? = null
+    private var restartAfterStopRequested = false
 
     private val serviceConnection =
         object : ServiceConnection {
@@ -71,6 +80,9 @@ class TorManager private constructor(context: Context) {
             override fun onServiceDisconnected(name: ComponentName?) {
                 if (BuildConfig.DEBUG) Log.d(TAG, "Tor service disconnected")
                 torService = null
+                if (_torState.value.status == TorStatus.STOPPING) {
+                    return
+                }
                 _torState.value =
                     _torState.value.copy(
                         status = TorStatus.DISCONNECTED,
@@ -94,7 +106,7 @@ class TorManager private constructor(context: Context) {
                         status.equals("ON", ignoreCase = true) -> TorStatus.CONNECTED
                         status.contains("NOTICE Bootstrapped 100%", ignoreCase = true) -> TorStatus.CONNECTED
                         status.equals("STARTING", ignoreCase = true) -> TorStatus.STARTING
-                        status.equals("STOPPING", ignoreCase = true) -> TorStatus.DISCONNECTED
+                        status.equals("STOPPING", ignoreCase = true) -> TorStatus.STOPPING
                         status.equals("OFF", ignoreCase = true) -> TorStatus.DISCONNECTED
                         status.contains("Bootstrapped", ignoreCase = true) -> TorStatus.CONNECTING
                         status.contains("WARN", ignoreCase = true) -> TorStatus.CONNECTING
@@ -134,6 +146,15 @@ class TorManager private constructor(context: Context) {
             if (BuildConfig.DEBUG) Log.d(TAG, "Tor is already running or starting")
             return
         }
+        if (_torState.value.status == TorStatus.STOPPING) {
+            if (BuildConfig.DEBUG) Log.d(TAG, "Tor is stopping; queueing restart")
+            restartAfterStopRequested = true
+            return
+        }
+
+        stopTransitionJob?.cancel()
+        stopTransitionJob = null
+        restartAfterStopRequested = false
 
         if (BuildConfig.DEBUG) Log.d(TAG, "Starting Tor service")
         _torState.value =
@@ -164,7 +185,17 @@ class TorManager private constructor(context: Context) {
     @Synchronized
     fun stop() {
         val appContext = appContextRef.get()
+        if (_torState.value.status == TorStatus.STOPPING) {
+            if (BuildConfig.DEBUG) Log.d(TAG, "Tor is already stopping")
+            return
+        }
         if (BuildConfig.DEBUG) Log.d(TAG, "Stopping Tor service")
+
+        _torState.value =
+            _torState.value.copy(
+                status = TorStatus.STOPPING,
+                statusMessage = "Stopping...",
+            )
 
         if (isBound && appContext != null) {
             try {
@@ -185,11 +216,27 @@ class TorManager private constructor(context: Context) {
         }
 
         torService = null
-        _torState.value =
-            TorState(
-                status = TorStatus.DISCONNECTED,
-                statusMessage = "Stopped",
-            )
+        stopTransitionJob?.cancel()
+        stopTransitionJob =
+            managerScope.launch {
+                delay(TOR_STOP_SETTLE_MS)
+                var shouldRestart = false
+                synchronized(this@TorManager) {
+                    if (_torState.value.status == TorStatus.STOPPING) {
+                        _torState.value =
+                            TorState(
+                                status = TorStatus.DISCONNECTED,
+                                statusMessage = "Stopped",
+                            )
+                    }
+                    shouldRestart = restartAfterStopRequested
+                    restartAfterStopRequested = false
+                    stopTransitionJob = null
+                }
+                if (shouldRestart) {
+                    start()
+                }
+            }
     }
 
     /**
@@ -293,6 +340,7 @@ data class TorState(
  */
 enum class TorStatus {
     DISCONNECTED,
+    STOPPING,
     STARTING,
     CONNECTING,
     CONNECTED,

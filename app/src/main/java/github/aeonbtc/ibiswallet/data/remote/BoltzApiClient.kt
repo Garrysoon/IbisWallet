@@ -48,16 +48,6 @@ data class BoltzFetchedBolt12Invoice(
     val invoice: String,
 )
 
-data class BoltzRefundDetails(
-    val pubNonce: String,
-    val transactionHash: String,
-)
-
-data class BoltzRefundResponse(
-    val pubNonce: String,
-    val partialSignature: String,
-)
-
 /**
  * Client for the Boltz API v2 endpoints still used by the app.
  *
@@ -105,6 +95,22 @@ class BoltzApiClient(
         } else {
             baseHttpClient
         }
+    }
+
+    /**
+     * OkHttpClient tuned for long-lived WebSocket connections.
+     * pingInterval keeps the connection alive through mobile NATs/carriers
+     * that drop idle TCP sockets. readTimeout is extended because swap
+     * status updates can be minutes apart.
+     */
+    private fun wsClient(): OkHttpClient {
+        val builder = baseHttpClient.newBuilder()
+            .pingInterval(30, TimeUnit.SECONDS)
+            .readTimeout(0, TimeUnit.SECONDS)
+        if (useTor()) {
+            builder.proxy(Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", torSocksPort)))
+        }
+        return builder.build()
     }
 
     // ── Helper: synchronous HTTP ──
@@ -412,44 +418,6 @@ class BoltzApiClient(
         }
     }
 
-    // ── Submarine Swap: Cooperative Refund ──
-
-    /**
-     * GET /v2/swap/submarine/{id}/refund
-     * Fetch Boltz's partial signature details for a cooperative key path refund.
-     * Only available when the swap is in a failed/refundable state.
-     */
-    suspend fun getSubmarineRefundDetails(swapId: String): BoltzRefundDetails {
-        val j = get("/v2/swap/submarine/$swapId/refund")
-        return BoltzRefundDetails(
-            pubNonce = j.getString("pubNonce"),
-            transactionHash = j.getString("transactionHash"),
-        )
-    }
-
-    /**
-     * POST /v2/swap/submarine/{id}/refund
-     * Submit client's partial signature for a cooperative key path refund.
-     * Returns Boltz's partial signature to complete the aggregated Schnorr signature.
-     */
-    suspend fun postSubmarineCooperativeRefund(
-        swapId: String,
-        pubNonce: String,
-        transaction: String,
-        index: Int = 0,
-    ): BoltzRefundResponse {
-        val body = JSONObject().apply {
-            put("pubNonce", pubNonce)
-            put("transaction", transaction)
-            put("index", index)
-        }
-        val j = post("/v2/swap/submarine/$swapId/refund", body)
-        return BoltzRefundResponse(
-            pubNonce = j.getString("pubNonce"),
-            partialSignature = j.getString("partialSignature"),
-        )
-    }
-
     // ── Swap Status ──
 
     /** Get current swap status via REST */
@@ -567,7 +535,7 @@ class BoltzApiClient(
             "url" to summarizeValue(expectedUrl),
         )
         val request = Request.Builder().url(expectedUrl).build()
-        val socket = httpClient().newWebSocket(request, object : WebSocketListener() {
+        val socket = wsClient().newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 logBoltzTrace(
                     "open",

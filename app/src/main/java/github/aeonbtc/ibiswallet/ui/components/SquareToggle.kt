@@ -26,7 +26,6 @@ import androidx.compose.ui.unit.dp
 import github.aeonbtc.ibiswallet.ui.theme.BitcoinOrange
 import github.aeonbtc.ibiswallet.ui.theme.BorderColor
 import github.aeonbtc.ibiswallet.ui.theme.DarkSurfaceVariant
-import github.aeonbtc.ibiswallet.ui.theme.SuccessGreen
 import github.aeonbtc.ibiswallet.ui.theme.TextSecondary
 
 /**
@@ -40,6 +39,7 @@ fun SquareToggle(
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
     checkedColor: Color = BitcoinOrange,
+    disabledCheckedColor: Color? = null,
     uncheckedColor: Color = DarkSurfaceVariant,
     uncheckedBorderColor: Color = BorderColor,
     uncheckedThumbColor: Color = TextSecondary,
@@ -59,6 +59,7 @@ fun SquareToggle(
     val trackColor by animateColorAsState(
         targetValue =
             when {
+                !enabled && checked && disabledCheckedColor != null -> disabledCheckedColor.copy(alpha = 0.18f)
                 !enabled -> uncheckedColor.copy(alpha = 0.5f)
                 checked -> checkedColor.copy(alpha = 0.3f)
                 else -> uncheckedColor
@@ -71,6 +72,7 @@ fun SquareToggle(
     val borderColor by animateColorAsState(
         targetValue =
             when {
+                !enabled && checked && disabledCheckedColor != null -> disabledCheckedColor.copy(alpha = 0.8f)
                 !enabled -> uncheckedBorderColor.copy(alpha = 0.3f)
                 checked -> checkedColor
                 else -> uncheckedBorderColor
@@ -83,6 +85,7 @@ fun SquareToggle(
     val thumbColor by animateColorAsState(
         targetValue =
             when {
+                !enabled && checked && disabledCheckedColor != null -> disabledCheckedColor
                 !enabled -> uncheckedThumbColor.copy(alpha = 0.5f)
                 checked -> checkedColor
                 else -> uncheckedThumbColor
@@ -119,30 +122,3 @@ fun SquareToggle(
     }
 }
 
-/**
- * Rectangle toggle specifically for Tor/success states
- * Uses green when checked
- */
-@Composable
-fun SquareToggleGreen(
-    checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit,
-    modifier: Modifier = Modifier,
-    enabled: Boolean = true,
-    trackWidth: Dp = 44.dp,
-    trackHeight: Dp = 24.dp,
-    thumbSize: Dp = 18.dp,
-    thumbPadding: Dp = 3.dp,
-) {
-    SquareToggle(
-        checked = checked,
-        onCheckedChange = onCheckedChange,
-        modifier = modifier,
-        enabled = enabled,
-        checkedColor = SuccessGreen,
-        trackWidth = trackWidth,
-        trackHeight = trackHeight,
-        thumbSize = thumbSize,
-        thumbPadding = thumbPadding,
-    )
-}

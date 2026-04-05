@@ -53,18 +53,15 @@ internal object Blech32Util {
         return IntArray(12) { p -> ((mod ushr (5 * (11 - p))) and 31L).toInt() }
     }
 
-    private fun convertBits(
-        data: ByteArray,
-        fromBits: Int,
-        toBits: Int,
-        pad: Boolean,
-    ): IntArray {
+    private fun convertBits(data: ByteArray): IntArray {
         val result = mutableListOf<Int>()
         var nextByte = 0
         var filledBits = 0
+        val fromBits = 8
+        val toBits = 5
 
         for (byte in data) {
-            var b = (byte.toInt() and 0xFF) shl (8 - fromBits)
+            var b = byte.toInt() and 0xFF
             var remFrom = fromBits
             while (remFrom > 0) {
                 val remTo = toBits - filledBits
@@ -81,7 +78,7 @@ internal object Blech32Util {
             }
         }
 
-        if (pad && filledBits > 0) {
+        if (filledBits > 0) {
             result.add(nextByte shl (toBits - filledBits))
         }
 
@@ -107,7 +104,7 @@ internal object Blech32Util {
 
         val hrp = if (isMainnet) "lq" else "tlq"
         val payload = blindingPubKey + witnessProgram
-        val data5bit = convertBits(payload, 8, 5, pad = true)
+        val data5bit = convertBits(payload)
         val fullData = intArrayOf(witnessVersion) + data5bit
         val checksum = createChecksum(hrp, fullData)
         val combined = fullData + checksum

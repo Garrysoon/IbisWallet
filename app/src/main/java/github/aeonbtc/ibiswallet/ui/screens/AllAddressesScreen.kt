@@ -33,7 +33,6 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.QrCode
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -58,6 +57,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import github.aeonbtc.ibiswallet.ui.components.ScrollableAlertDialog
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
@@ -69,6 +69,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import github.aeonbtc.ibiswallet.data.local.SecureStorage
 import github.aeonbtc.ibiswallet.data.model.KeychainType
+import github.aeonbtc.ibiswallet.data.model.LiquidAsset
+import github.aeonbtc.ibiswallet.data.model.UtxoInfo
 import github.aeonbtc.ibiswallet.data.model.WalletAddress
 import github.aeonbtc.ibiswallet.ui.theme.AccentTeal
 import github.aeonbtc.ibiswallet.ui.theme.BitcoinOrange
@@ -82,6 +84,8 @@ import github.aeonbtc.ibiswallet.ui.theme.SuccessGreen
 import github.aeonbtc.ibiswallet.ui.theme.TextSecondary
 import github.aeonbtc.ibiswallet.util.SecureClipboard
 import github.aeonbtc.ibiswallet.util.generateQrBitmap
+import java.util.Locale
+import kotlin.math.pow
 
 private const val ADDRESS_DISPLAY_LIMIT = 20
 
@@ -101,6 +105,7 @@ fun AllAddressesScreen(
     useMultilineTruncatedAddress: Boolean = false,
     changeTabHelperText: String? = null,
     emptyChangeMessage: String? = null,
+    assetUtxos: List<UtxoInfo> = emptyList(),
     onSaveLabel: (address: String, label: String) -> Unit = { _, _ -> },
     onDeleteLabel: (address: String) -> Unit = { },
 ) {
@@ -111,6 +116,17 @@ fun AllAddressesScreen(
     var changeDisplayCount by remember { mutableIntStateOf(ADDRESS_DISPLAY_LIMIT) }
     val tabs = listOf("Receive", "Change", "Used")
     val useSats = denomination == SecureStorage.DENOMINATION_SATS
+
+    val assetBalancesByAddress = remember(assetUtxos) {
+        val result = mutableMapOf<String, MutableMap<String, Long>>()
+        assetUtxos.forEach { utxo ->
+            val aid = utxo.assetId ?: return@forEach
+            if (LiquidAsset.isPolicyAsset(aid)) return@forEach
+            val addrMap = result.getOrPut(utxo.address) { mutableMapOf() }
+            addrMap[aid] = (addrMap[aid] ?: 0L) + utxo.amountSats.toLong()
+        }
+        result
+    }
 
     val receiveListState = rememberLazyListState()
     var scrollToAddress by remember { mutableStateOf<String?>(null) }
@@ -126,7 +142,7 @@ fun AllAddressesScreen(
 
     // QR Code Dialog
     if (showQrForAddress != null && qrBitmap != null) {
-        AlertDialog(
+        ScrollableAlertDialog(
             onDismissRequest = {
                 showQrForAddress = null
                 qrBitmap = null
@@ -217,12 +233,13 @@ fun AllAddressesScreen(
             }
         }
 
-    // Used: sort funded addresses to top, then empty; filter by search query
+    // Used: sort funded addresses to top (L-BTC or any asset), then empty
     val sortedUsedAddresses =
-        remember(usedAddresses) {
+        remember(usedAddresses, assetBalancesByAddress) {
             usedAddresses.sortedWith(
-                compareByDescending<WalletAddress> { it.balanceSats > 0UL }
-                    .thenByDescending { it.balanceSats },
+                compareByDescending<WalletAddress> {
+                    it.balanceSats > 0UL || assetBalancesByAddress.containsKey(it.address)
+                }.thenByDescending { it.balanceSats },
             )
         }
     val filteredUsedAddresses =
@@ -390,6 +407,7 @@ fun AllAddressesScreen(
                         addressMaxLines = addressMaxLines,
                         useMultilineTruncatedAddress = useMultilineTruncatedAddress,
                         isUsedTab = selectedTab == 2,
+                        addressAssetBalances = assetBalancesByAddress[address.address],
                         onShowQr = { showQrForAddress = address.address },
                         onCopy = { /* Handled inside AddressCard */ },
                         onSaveLabel = { label -> onSaveLabel(address.address, label) },
@@ -460,6 +478,7 @@ private fun AddressCard(
     addressMaxLines: Int = 3,
     useMultilineTruncatedAddress: Boolean = false,
     isUsedTab: Boolean = false,
+    addressAssetBalances: Map<String, Long>? = null,
     onShowQr: () -> Unit,
     onCopy: () -> Unit,
     onSaveLabel: (String) -> Unit = {},
@@ -486,7 +505,7 @@ private fun AddressCard(
     }
 
     val typeName = if (address.keychain == KeychainType.EXTERNAL) "Receive" else "Change"
-    val hasBalance = address.balanceSats > 0UL
+    val hasAnyBalance = address.balanceSats > 0UL || !addressAssetBalances.isNullOrEmpty()
     val displayAddress = remember(address.address, addressEdgeCharacters, useMultilineTruncatedAddress) {
         formatDisplayedAddress(
             address = address.address,
@@ -498,7 +517,7 @@ private fun AddressCard(
     // Determine card background color
     val cardColor =
         if (isUsedTab) {
-            if (hasBalance) SuccessGreen.copy(alpha = 0.15f) else ErrorRed.copy(alpha = 0.15f)
+            if (hasAnyBalance) SuccessGreen.copy(alpha = 0.15f) else ErrorRed.copy(alpha = 0.15f)
         } else {
             DarkCard
         }
@@ -506,7 +525,7 @@ private fun AddressCard(
     // Determine border color for used tab
     val borderColor =
         if (isUsedTab) {
-            if (hasBalance) SuccessGreen.copy(alpha = 0.5f) else ErrorRed.copy(alpha = 0.5f)
+            if (hasAnyBalance) SuccessGreen.copy(alpha = 0.5f) else ErrorRed.copy(alpha = 0.5f)
         } else {
             null
         }
@@ -523,17 +542,40 @@ private fun AddressCard(
                     .fillMaxWidth()
                     .padding(16.dp),
         ) {
-            // Header row: index left, label right
+            // Header row: index + asset badges left, label right
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(
-                    text = "$typeName #${address.index + 1u}",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = accentColor,
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Text(
+                        text = "$typeName #${address.index + 1u}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = accentColor,
+                    )
+                    if (!addressAssetBalances.isNullOrEmpty()) {
+                        addressAssetBalances.keys.forEach { assetId ->
+                            val asset = LiquidAsset.resolve(assetId)
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(AccentTeal.copy(alpha = 0.16f))
+                                    .padding(horizontal = 5.dp, vertical = 1.dp),
+                            ) {
+                                Text(
+                                    text = asset.ticker,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+                                    color = AccentTeal,
+                                )
+                            }
+                        }
+                    }
+                }
 
                 if (isEditingLabel) {
                     // Inline editor in the header
@@ -734,6 +776,17 @@ private fun AddressCard(
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onBackground,
                     )
+                    if (!addressAssetBalances.isNullOrEmpty() && !privacyMode) {
+                        addressAssetBalances.forEach { (assetId, rawAmount) ->
+                            val asset = LiquidAsset.resolve(assetId)
+                            val formatted = formatLiquidAssetAmount(asset, rawAmount)
+                            Text(
+                                text = "$formatted ${asset.ticker}",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onBackground,
+                            )
+                        }
+                    }
                 }
 
                 Column(horizontalAlignment = Alignment.End) {
@@ -769,4 +822,15 @@ private fun formatDisplayedAddress(
 }
 
 private const val HIDDEN_AMOUNT = "****"
+
+private fun formatLiquidAssetAmount(asset: LiquidAsset, rawAmount: Long): String {
+    val divisor = 10.0.pow(asset.precision.toDouble())
+    val full = String.format(Locale.US, "%.${asset.precision}f", rawAmount.toDouble() / divisor)
+    val trimmed = full.trimEnd('0').let { if (it.endsWith('.')) "${it}00" else it }
+    return if (trimmed.contains('.') && trimmed.substringAfter('.').length < 2) {
+        trimmed + "0".repeat(2 - trimmed.substringAfter('.').length)
+    } else {
+        trimmed
+    }
+}
 

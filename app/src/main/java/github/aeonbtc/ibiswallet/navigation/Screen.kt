@@ -44,6 +44,9 @@ sealed class Screen(val route: String) {
     // PSBT signing flow (watch-only wallets)
     data object PsbtExport : Screen("psbt_export")
 
+    // PSET signing flow (Liquid watch-only wallets)
+    data object LiquidPsetExport : Screen("liquid_pset_export")
+
     // Sweep private key
     data object SweepPrivateKey : Screen("sweep_private_key")
 

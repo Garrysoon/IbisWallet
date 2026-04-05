@@ -177,13 +177,24 @@ class BoltzSwapStatusService(
         }
         subscriptionCounts.remove(swapId)
         idleCleanupJobs.remove(swapId)?.cancel()
-        logBoltzTrace(
-            "monitor_stop",
-            BoltzTraceContext(operation = "releaseSwap", swapId = swapId),
-        )
-        monitorJobs.remove(swapId)?.cancel()
-        updateFlows.remove(swapId)
-        lastFingerprints.remove(swapId)
+        idleCleanupJobs[swapId] =
+            scope.launch {
+                delay(IDLE_MONITOR_GRACE_MS)
+                mutex.withLock {
+                    if ((subscriptionCounts[swapId] ?: 0) > 0) {
+                        idleCleanupJobs.remove(swapId)
+                        return@withLock
+                    }
+                    logBoltzTrace(
+                        "monitor_stop",
+                        BoltzTraceContext(operation = "releaseSwap", swapId = swapId),
+                    )
+                    idleCleanupJobs.remove(swapId)
+                    monitorJobs.remove(swapId)?.cancel()
+                    updateFlows.remove(swapId)
+                    lastFingerprints.remove(swapId)
+                }
+            }
     }
 
     private suspend fun emitIfChanged(update: BoltzSwapUpdate) {
@@ -215,6 +226,7 @@ class BoltzSwapStatusService(
 
     private companion object {
         private const val RETRY_DELAY_MS = 1_500L
+        private const val IDLE_MONITOR_GRACE_MS = 20_000L
     }
 }
 

@@ -75,6 +75,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -85,6 +86,8 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.core.net.toUri
 import github.aeonbtc.ibiswallet.MainActivity
 import github.aeonbtc.ibiswallet.data.local.SecureStorage
+import github.aeonbtc.ibiswallet.data.model.LiquidAsset
+import github.aeonbtc.ibiswallet.data.model.LiquidAssetBalance
 import github.aeonbtc.ibiswallet.data.model.LiquidSwapDetails
 import github.aeonbtc.ibiswallet.data.model.LiquidSwapTxRole
 import github.aeonbtc.ibiswallet.data.model.LiquidTransaction
@@ -96,6 +99,7 @@ import github.aeonbtc.ibiswallet.data.model.SwapService
 import github.aeonbtc.ibiswallet.ui.components.IbisButton
 import github.aeonbtc.ibiswallet.ui.components.LiquidTransactionItem
 import github.aeonbtc.ibiswallet.ui.components.QrScannerDialog
+import github.aeonbtc.ibiswallet.ui.components.formatFeeRate
 import github.aeonbtc.ibiswallet.ui.theme.AccentBlue
 import github.aeonbtc.ibiswallet.ui.theme.AccentGreen
 import github.aeonbtc.ibiswallet.ui.theme.AccentRed
@@ -112,12 +116,14 @@ import github.aeonbtc.ibiswallet.util.SecureClipboard
 import github.aeonbtc.ibiswallet.util.generateQrBitmap
 import github.aeonbtc.ibiswallet.util.getNfcAvailability
 import github.aeonbtc.ibiswallet.util.matchesTimestampSearch
+import kotlin.math.pow
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LiquidBalanceScreen(
     denomination: String = SecureStorage.DENOMINATION_BTC,
     btcPrice: Double? = null,
+    fiatCurrency: String = SecureStorage.DEFAULT_PRICE_CURRENCY,
     privacyMode: Boolean = false,
     liquidExplorer: String = SecureStorage.LIQUID_EXPLORER_DISABLED,
     liquidExplorerUrl: String = "",
@@ -137,11 +143,22 @@ fun LiquidBalanceScreen(
     var showSwapTransactions by remember { mutableStateOf(false) }
     var showLightningTransactions by remember { mutableStateOf(false) }
     var showLiquidTransactions by remember { mutableStateOf(false) }
+    var showUsdtTransactions by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
     var displayLimit by remember { mutableIntStateOf(25) }
 
     val useSats = denomination == SecureStorage.DENOMINATION_SATS
     val context = LocalContext.current
+    val hasUsdtTransactions =
+        liquidState.transactions.any { tx ->
+            tx.deltaForAsset(LiquidAsset.USDT_ASSET_ID) != 0L
+        }
+
+    LaunchedEffect(hasUsdtTransactions) {
+        if (!hasUsdtTransactions) {
+            showUsdtTransactions = false
+        }
+    }
     val nfcAvailable = context.getNfcAvailability().canRead
     DisposableEffect(nfcAvailable) {
         if (nfcAvailable) {
@@ -157,6 +174,7 @@ fun LiquidBalanceScreen(
             transaction = tx,
             useSats = useSats,
             btcPrice = btcPrice,
+            fiatCurrency = fiatCurrency,
             privacyMode = privacyMode,
             liquidExplorer = liquidExplorer,
             liquidExplorerUrl = liquidExplorerUrl,
@@ -297,7 +315,7 @@ fun LiquidBalanceScreen(
                             if (btcPrice != null && btcPrice > 0) {
                                 val usdValue = (lbtcSats.toDouble() / 100_000_000.0) * btcPrice
                                 Text(
-                                    text = if (privacyMode) HIDDEN_AMOUNT else formatUsd(usdValue),
+                                    text = if (privacyMode) HIDDEN_AMOUNT else formatFiat(usdValue, fiatCurrency),
                                     style = MaterialTheme.typography.titleMedium,
                                     color = TextSecondary,
                                 )
@@ -348,6 +366,16 @@ fun LiquidBalanceScreen(
                 }
             }
 
+            if (liquidState.hasNonLbtcAssets) {
+                item {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    LiquidAssetBalancesCard(
+                        assetBalances = liquidState.assetBalances.filter { !it.asset.isPolicyAsset },
+                        privacyMode = privacyMode,
+                    )
+                }
+            }
+
             item {
                 Spacer(modifier = Modifier.height(10.dp))
                 Row(
@@ -385,6 +413,14 @@ fun LiquidBalanceScreen(
                             isSelected = showLiquidTransactions,
                             onClick = { showLiquidTransactions = !showLiquidTransactions },
                         )
+                        if (hasUsdtTransactions) {
+                            LiquidTransactionTextFilterButton(
+                                text = "$",
+                                tint = LiquidTeal,
+                                isSelected = showUsdtTransactions,
+                                onClick = { showUsdtTransactions = !showUsdtTransactions },
+                            )
+                        }
                         Box(
                             contentAlignment = Alignment.Center,
                             modifier =
@@ -435,19 +471,23 @@ fun LiquidBalanceScreen(
                 Spacer(modifier = Modifier.height(4.dp))
             }
 
-            val hasSourceFilters = showSwapTransactions || showLightningTransactions || showLiquidTransactions
+            val hasSourceFilters =
+                showSwapTransactions || showLightningTransactions || showLiquidTransactions || showUsdtTransactions
             val sourceFilteredTransactions =
                 if (!hasSourceFilters) {
                     liquidState.transactions
                 } else {
                     liquidState.transactions.filter { tx ->
-                        when (tx.source) {
-                            LiquidTxSource.CHAIN_SWAP -> showSwapTransactions
-                            LiquidTxSource.LIGHTNING_RECEIVE_SWAP,
-                            LiquidTxSource.LIGHTNING_SEND_SWAP,
-                            -> showLightningTransactions
-                            LiquidTxSource.NATIVE -> showLiquidTransactions
-                        }
+                        (showSwapTransactions && tx.source == LiquidTxSource.CHAIN_SWAP) ||
+                            (
+                                showLightningTransactions &&
+                                    (
+                                        tx.source == LiquidTxSource.LIGHTNING_RECEIVE_SWAP ||
+                                            tx.source == LiquidTxSource.LIGHTNING_SEND_SWAP
+                                    )
+                            ) ||
+                            (showLiquidTransactions && tx.source == LiquidTxSource.NATIVE) ||
+                            (showUsdtTransactions && tx.deltaForAsset(LiquidAsset.USDT_ASSET_ID) != 0L)
                     }
                 }
             val filteredTransactions = if (searchQuery.isBlank()) {
@@ -493,7 +533,7 @@ fun LiquidBalanceScreen(
                         ) {
                             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                 Text(
-                                    text = if (searchQuery.isNotBlank()) "No matching Liquid transactions" else "No Liquid transactions yet",
+                                    text = if (searchQuery.isNotBlank()) "No matching transactions" else "No transactions yet",
                                     style = MaterialTheme.typography.bodyLarge,
                                     color = TextSecondary,
                                 )
@@ -676,6 +716,7 @@ private fun LiquidTransactionDetailDialog(
     transaction: LiquidTransaction,
     useSats: Boolean,
     btcPrice: Double?,
+    fiatCurrency: String,
     privacyMode: Boolean,
     liquidExplorer: String = SecureStorage.LIQUID_EXPLORER_DISABLED,
     liquidExplorerUrl: String = "",
@@ -686,48 +727,138 @@ private fun LiquidTransactionDetailDialog(
 ) {
     val context = LocalContext.current
     val effectiveLabel = label?.takeIf { it.isNotBlank() } ?: transaction.memo.takeIf { it.isNotBlank() }
-    val swapDetails = transaction.swapDetails?.takeIf { transaction.source == LiquidTxSource.CHAIN_SWAP }
-    val swapRole = swapDetails?.role
+    val chainSwapDetails = transaction.swapDetails?.takeIf { transaction.source == LiquidTxSource.CHAIN_SWAP }
+    val lightningPaymentDetails =
+        pendingLightningPayment?.takeIf {
+            transaction.source == LiquidTxSource.LIGHTNING_SEND_SWAP
+        }
+    val lightningSwapDetails =
+        when (transaction.source) {
+            LiquidTxSource.LIGHTNING_SEND_SWAP -> transaction.swapDetails ?: lightningPaymentDetails?.let(::pendingLightningSessionToSwapDetails)
+            LiquidTxSource.LIGHTNING_RECEIVE_SWAP -> transaction.swapDetails
+            else -> null
+        }
+    val swapRole = chainSwapDetails?.role
     val isReceive =
         when (swapRole) {
             LiquidSwapTxRole.FUNDING -> false
             LiquidSwapTxRole.SETTLEMENT -> true
             null -> transaction.balanceSatoshi >= 0
         }
+    val lightningFundingAmountSats =
+        if (!isReceive) {
+            lightningSwapDetails?.sendAmountSats?.takeIf { it > 0L }
+        } else {
+            null
+        }
+    val lightningPaymentAmountSats =
+        if (!isReceive) {
+            lightningSwapDetails?.expectedReceiveAmountSats?.takeIf { it > 0L }
+        } else {
+            null
+        }
+    val lightningSwapFeeSats =
+        if (!isReceive && lightningFundingAmountSats != null && lightningPaymentAmountSats != null) {
+            (lightningFundingAmountSats - lightningPaymentAmountSats).takeIf { it > 0L }
+        } else {
+            null
+        }
     val amountAbs =
-        when (swapRole) {
-            LiquidSwapTxRole.FUNDING ->
-                (swapDetails.sendAmountSats.takeIf { it > 0L } ?: kotlin.math.abs(transaction.balanceSatoshi)).toULong()
-            LiquidSwapTxRole.SETTLEMENT ->
-                (swapDetails.expectedReceiveAmountSats.takeIf { it > 0L } ?: kotlin.math.abs(transaction.balanceSatoshi))
+        when {
+            !isReceive && lightningFundingAmountSats != null ->
+                (lightningFundingAmountSats + transaction.fee).coerceAtLeast(0L).toULong()
+            swapRole == LiquidSwapTxRole.FUNDING ->
+                (chainSwapDetails.sendAmountSats.takeIf { it > 0L } ?: kotlin.math.abs(transaction.balanceSatoshi)).toULong()
+            swapRole == LiquidSwapTxRole.SETTLEMENT ->
+                (chainSwapDetails.expectedReceiveAmountSats.takeIf { it > 0L } ?: kotlin.math.abs(transaction.balanceSatoshi))
                     .toULong()
-            null -> kotlin.math.abs(transaction.balanceSatoshi).toULong()
+            else -> kotlin.math.abs(transaction.balanceSatoshi).toULong()
         }
     val accentColor = if (isReceive) AccentGreen else AccentRed
+    val lightningPrimaryValue =
+        if (isReceive) {
+            lightningSwapDetails?.invoice ?: lightningSwapDetails?.paymentInput
+        } else {
+            lightningSwapDetails?.paymentInput ?: lightningSwapDetails?.resolvedPaymentInput ?: lightningSwapDetails?.invoice
+        }
+    val lightningPrimaryLabel = if (isReceive) "Received via" else "Recipient"
+    val lightningPrimaryAmountSats =
+        lightningPaymentAmountSats ?: lightningSwapDetails?.expectedReceiveAmountSats?.takeIf { it > 0L } ?: amountAbs.toLong()
+    val hasLightningAdvancedDetails =
+        lightningSwapDetails != null &&
+            (
+                !lightningSwapDetails.depositAddress.isBlank() ||
+                    !lightningSwapDetails.refundAddress.isNullOrBlank() ||
+                    !lightningSwapDetails.invoice.isNullOrBlank() ||
+                    !lightningSwapDetails.resolvedPaymentInput.isNullOrBlank() ||
+                    lightningSwapDetails.timeoutBlockHeight != null ||
+                    !lightningSwapDetails.refundPublicKey.isNullOrBlank() ||
+                    !lightningSwapDetails.claimPublicKey.isNullOrBlank() ||
+                    !lightningSwapDetails.swapTree.isNullOrBlank() ||
+                    !lightningSwapDetails.blindingKey.isNullOrBlank()
+            )
     val showSourceSection =
         transaction.source != LiquidTxSource.NATIVE &&
-            transaction.swapDetails == null &&
+            chainSwapDetails == null &&
+            lightningSwapDetails == null &&
             (transaction.walletAddress == null || !isReceive) &&
             transaction.changeAddress == null
-    val lightningPaymentDetails =
-        pendingLightningPayment?.takeIf {
-            transaction.source == LiquidTxSource.LIGHTNING_SEND_SWAP
-        }
     val scrollState = rememberScrollState()
-    val explorerUrl =
-        liquidExplorerUrl.takeIf { it.isNotBlank() }?.let { "$it/tx/${transaction.txid}" }.orEmpty()
+    val usePlainExplorerUrl =
+        liquidExplorer == SecureStorage.LIQUID_EXPLORER_LIQUID_NETWORK ||
+            liquidExplorer == SecureStorage.LIQUID_EXPLORER_LIQUID_NETWORK_ONION
+    val useBlockstreamExplorer = liquidExplorer == SecureStorage.LIQUID_EXPLORER_BLOCKSTREAM
+    val unblindedFragment =
+        transaction.unblindedUrl
+            ?.substringAfter('#', "")
+            ?.takeIf { it.isNotBlank() }
+    val explorerUrl: String =
+        (
+            if (usePlainExplorerUrl) {
+                liquidExplorerUrl.takeIf { it.isNotBlank() }?.let { baseUrl ->
+                    buildString {
+                        append(baseUrl)
+                        append("/tx/")
+                        append(transaction.txid)
+                        unblindedFragment?.let {
+                            append('#')
+                            append(it)
+                        }
+                    }
+                }
+            } else if (useBlockstreamExplorer) {
+                liquidExplorerUrl.takeIf { it.isNotBlank() }?.let { baseUrl ->
+                    buildString {
+                        append(baseUrl)
+                        append("/tx/")
+                        append(transaction.txid)
+                        unblindedFragment?.let {
+                            append('#')
+                            append(it)
+                        }
+                    }
+                }
+            } else {
+                transaction.unblindedUrl?.takeIf { it.isNotBlank() }
+                    ?: liquidExplorerUrl.takeIf { it.isNotBlank() }?.let { "$it/tx/${transaction.txid}" }
+            }
+        ).orEmpty()
     val isOnionExplorer =
         try {
-            java.net.URI(liquidExplorerUrl).host?.endsWith(".onion") == true
+            java.net.URI(explorerUrl).host?.endsWith(".onion") == true
         } catch (_: Exception) {
-            liquidExplorerUrl.endsWith(".onion")
+            explorerUrl.contains(".onion")
         }
 
     var showCopiedTxid by remember { mutableStateOf(false) }
     var showCopiedAddress by remember { mutableStateOf(false) }
+    var showCopiedRecipient by remember { mutableStateOf(false) }
+    var showCopiedLightningReference by remember { mutableStateOf(false) }
+    var showCopiedLightningSwapId by remember { mutableStateOf(false) }
     var showCopiedChangeAddress by remember { mutableStateOf(false) }
     var copiedSwapField by remember { mutableStateOf<String?>(null) }
     var swapDetailsExpanded by remember { mutableStateOf(false) }
+    var lightningAdvancedExpanded by remember { mutableStateOf(false) }
     var isEditingLabel by remember { mutableStateOf(false) }
     var labelText by remember(effectiveLabel) { mutableStateOf(effectiveLabel.orEmpty()) }
     var showTorBrowserError by remember { mutableStateOf(false) }
@@ -748,6 +879,24 @@ private fun LiquidTransactionDetailDialog(
         if (showCopiedAddress) {
             kotlinx.coroutines.delay(3000)
             showCopiedAddress = false
+        }
+    }
+    LaunchedEffect(showCopiedRecipient) {
+        if (showCopiedRecipient) {
+            kotlinx.coroutines.delay(3000)
+            showCopiedRecipient = false
+        }
+    }
+    LaunchedEffect(showCopiedLightningReference) {
+        if (showCopiedLightningReference) {
+            kotlinx.coroutines.delay(3000)
+            showCopiedLightningReference = false
+        }
+    }
+    LaunchedEffect(showCopiedLightningSwapId) {
+        if (showCopiedLightningSwapId) {
+            kotlinx.coroutines.delay(3000)
+            showCopiedLightningSwapId = false
         }
     }
     LaunchedEffect(showCopiedChangeAddress) {
@@ -841,23 +990,51 @@ private fun LiquidTransactionDetailDialog(
                             color = accentColor,
                         )
                         Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = if (privacyMode) {
-                                HIDDEN_AMOUNT
-                            } else {
-                                "${if (isReceive) "+" else "-"}${formatAmount(amountAbs, useSats)} ${liquidBalanceUnitLabel(useSats)}"
-                            },
-                            style = MaterialTheme.typography.headlineSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = accentColor,
-                        )
-                        if (btcPrice != null && btcPrice > 0 && !privacyMode) {
-                            Spacer(modifier = Modifier.height(2.dp))
+                        val nonLbtcDelta = transaction.assetDeltas.entries.firstOrNull {
+                            !LiquidAsset.isPolicyAsset(it.key) && it.value != 0L
+                        }
+                        if (nonLbtcDelta != null) {
+                            val asset = LiquidAsset.resolve(nonLbtcDelta.key)
+                            val assetAbs = kotlin.math.abs(nonLbtcDelta.value)
+                            val divisor = 10.0.pow(asset.precision.toDouble())
+                            val assetPrefix = if (nonLbtcDelta.value >= 0) "+" else "-"
                             Text(
-                                text = formatUsd(amountAbs.toDouble() / 100_000_000.0 * btcPrice),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = TextSecondary,
+                                text = if (privacyMode) {
+                                    HIDDEN_AMOUNT
+                                } else {
+                                    "$assetPrefix${String.format(java.util.Locale.US, "%.2f", assetAbs.toDouble() / divisor)} ${asset.ticker}"
+                                },
+                                style = MaterialTheme.typography.headlineSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = accentColor,
                             )
+                            if (!isReceive && !privacyMode && transaction.fee > 0L) {
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = "Fee: ${formatAmount(transaction.fee.toULong(), true)} sats",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = TextSecondary,
+                                )
+                            }
+                        } else {
+                            Text(
+                                text = if (privacyMode) {
+                                    HIDDEN_AMOUNT
+                                } else {
+                                    "${if (isReceive) "+" else "-"}${formatAmount(amountAbs, useSats)} ${liquidBalanceUnitLabel(useSats)}"
+                                },
+                                style = MaterialTheme.typography.headlineSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = accentColor,
+                            )
+                            if (btcPrice != null && btcPrice > 0 && !privacyMode) {
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = formatFiat(amountAbs.toDouble() / 100_000_000.0 * btcPrice, fiatCurrency),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = TextSecondary,
+                                )
+                            }
                         }
                     }
                 }
@@ -917,7 +1094,7 @@ private fun LiquidTransactionDetailDialog(
                     ) {
                         Column {
                             Text("Status", style = MaterialTheme.typography.bodyMedium, color = TextSecondary)
-                            Spacer(modifier = Modifier.height(6.dp))
+                            Spacer(modifier = Modifier.height(4.dp))
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -932,14 +1109,14 @@ private fun LiquidTransactionDetailDialog(
                                                 Icons.Default.Schedule
                                             },
                                         contentDescription = null,
-                                        tint = if (transaction.height != null) AccentGreen else LiquidTeal,
+                                        tint = if (transaction.height != null) AccentGreen else BitcoinOrange,
                                         modifier = Modifier.size(18.dp),
                                     )
                                     Spacer(modifier = Modifier.width(6.dp))
                                     Text(
                                         text = if (transaction.height != null) "Confirmed" else "Pending",
                                         style = MaterialTheme.typography.bodyLarge,
-                                        color = if (transaction.height != null) AccentGreen else LiquidTeal,
+                                        color = if (transaction.height != null) AccentGreen else BitcoinOrange,
                                     )
                                 }
                                 transaction.timestamp?.let {
@@ -953,15 +1130,15 @@ private fun LiquidTransactionDetailDialog(
                         }
 
                         HorizontalDivider(
-                            modifier = Modifier.padding(vertical = 8.dp),
+                            modifier = Modifier.padding(vertical = 6.dp),
                             color = TextSecondary.copy(alpha = 0.1f),
                         )
 
                         Text("Transaction ID", style = MaterialTheme.typography.bodyMedium, color = TextSecondary)
-                        Spacer(modifier = Modifier.height(6.dp))
+                        Spacer(modifier = Modifier.height(4.dp))
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
+                            verticalAlignment = Alignment.Top,
                         ) {
                             Text(
                                 text = transaction.txid.take(20) + "..." + transaction.txid.takeLast(8),
@@ -974,6 +1151,13 @@ private fun LiquidTransactionDetailDialog(
                                 contentAlignment = Alignment.Center,
                                 modifier =
                                     Modifier
+                                        .layout { measurable, constraints ->
+                                            val placeable = measurable.measure(constraints)
+                                            val liftPx = 4.dp.roundToPx()
+                                            layout(placeable.width, (placeable.height - liftPx).coerceAtLeast(0)) {
+                                                placeable.placeRelative(0, -liftPx)
+                                            }
+                                        }
                                         .size(32.dp)
                                         .clip(RoundedCornerShape(6.dp))
                                         .background(DarkSurfaceVariant)
@@ -1002,17 +1186,89 @@ private fun LiquidTransactionDetailDialog(
                             )
                         }
 
+                        if (isReceive && lightningPrimaryValue != null) {
+                            HorizontalDivider(
+                                modifier = Modifier.padding(vertical = 6.dp),
+                                color = TextSecondary.copy(alpha = 0.1f),
+                            )
+                            Column {
+                                Text(lightningPrimaryLabel, style = MaterialTheme.typography.bodyMedium, color = TextSecondary)
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.Top,
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = truncateSwapDetailValue(lightningPrimaryValue),
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontFamily = FontFamily.Monospace,
+                                            color = MaterialTheme.colorScheme.onBackground,
+                                        )
+                                        Spacer(modifier = Modifier.height(3.dp))
+                                        Text(
+                                            text =
+                                                if (privacyMode) {
+                                                    HIDDEN_AMOUNT
+                                                } else {
+                                                    "+${formatAmount(lightningPrimaryAmountSats.toULong(), useSats)} ${liquidBalanceUnitLabel(useSats)}"
+                                                },
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = AccentGreen,
+                                        )
+                                    }
+                                    Box(
+                                        contentAlignment = Alignment.Center,
+                                        modifier =
+                                            Modifier
+                                                .layout { measurable, constraints ->
+                                                    val placeable = measurable.measure(constraints)
+                                                    val liftPx = 4.dp.roundToPx()
+                                                    layout(placeable.width, (placeable.height - liftPx).coerceAtLeast(0)) {
+                                                        placeable.placeRelative(0, -liftPx)
+                                                    }
+                                                }
+                                                .size(32.dp)
+                                                .clip(RoundedCornerShape(6.dp))
+                                                .background(DarkSurfaceVariant)
+                                                .clickable {
+                                                    SecureClipboard.copyAndScheduleClear(
+                                                        context,
+                                                        "Lightning reference",
+                                                        lightningPrimaryValue,
+                                                    )
+                                                    showCopiedLightningReference = true
+                                                },
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.ContentCopy,
+                                            contentDescription = "Copy Lightning Reference",
+                                            tint = if (showCopiedLightningReference) LiquidTeal else TextSecondary,
+                                            modifier = Modifier.size(18.dp),
+                                        )
+                                    }
+                                }
+                                if (showCopiedLightningReference) {
+                                    Text(
+                                        text = "Copied to clipboard!",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = LiquidTeal,
+                                    )
+                                }
+                            }
+                        }
+
                         if (isReceive && transaction.walletAddress != null) {
                             HorizontalDivider(
-                                modifier = Modifier.padding(vertical = 8.dp),
+                                modifier = Modifier.padding(vertical = 6.dp),
                                 color = TextSecondary.copy(alpha = 0.1f),
                             )
                             Column {
                                 Text("Received at", style = MaterialTheme.typography.bodyMedium, color = TextSecondary)
-                                Spacer(modifier = Modifier.height(6.dp))
+                                Spacer(modifier = Modifier.height(4.dp))
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
-                                    verticalAlignment = Alignment.CenterVertically,
+                                    verticalAlignment = Alignment.Top,
                                 ) {
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text(
@@ -1023,12 +1279,20 @@ private fun LiquidTransactionDetailDialog(
                                         )
                                         transaction.walletAddressAmountSats?.let { amount ->
                                             Spacer(modifier = Modifier.height(3.dp))
+                                            val addrNonLbtc = transaction.assetDeltas.entries.firstOrNull {
+                                                !LiquidAsset.isPolicyAsset(it.key) && it.value != 0L
+                                            }
+                                            val amountText = if (privacyMode) {
+                                                HIDDEN_AMOUNT
+                                            } else if (addrNonLbtc != null) {
+                                                val asset = LiquidAsset.resolve(addrNonLbtc.key)
+                                                val divisor = 10.0.pow(asset.precision.toDouble())
+                                                "+${String.format(java.util.Locale.US, "%.2f", kotlin.math.abs(addrNonLbtc.value).toDouble() / divisor)} ${asset.ticker}"
+                                            } else {
+                                                "+${formatAmount(amount.toULong(), useSats)} ${liquidBalanceUnitLabel(useSats)}"
+                                            }
                                             Text(
-                                                text = if (privacyMode) {
-                                                    HIDDEN_AMOUNT
-                                                } else {
-                                                    "+${formatAmount(amount.toULong(), useSats)} ${liquidBalanceUnitLabel(useSats)}"
-                                                },
+                                                text = amountText,
                                                 style = MaterialTheme.typography.bodyMedium,
                                                 color = AccentGreen,
                                             )
@@ -1038,6 +1302,13 @@ private fun LiquidTransactionDetailDialog(
                                         contentAlignment = Alignment.Center,
                                         modifier =
                                             Modifier
+                                                .layout { measurable, constraints ->
+                                                    val placeable = measurable.measure(constraints)
+                                                    val liftPx = 4.dp.roundToPx()
+                                                    layout(placeable.width, (placeable.height - liftPx).coerceAtLeast(0)) {
+                                                        placeable.placeRelative(0, -liftPx)
+                                                    }
+                                                }
                                                 .size(32.dp)
                                                 .clip(RoundedCornerShape(6.dp))
                                                 .background(DarkSurfaceVariant)
@@ -1068,17 +1339,186 @@ private fun LiquidTransactionDetailDialog(
                             }
                         }
 
+                        val recipientValue =
+                            when {
+                                !isReceive && !lightningPrimaryValue.isNullOrBlank() -> lightningPrimaryValue
+                                transaction.recipientAddress != null -> transaction.recipientAddress
+                                else -> lightningPrimaryValue.orEmpty()
+                            }
+                        if (!isReceive && recipientValue.isNotBlank()) {
+                            HorizontalDivider(
+                                modifier = Modifier.padding(vertical = 6.dp),
+                                color = TextSecondary.copy(alpha = 0.1f),
+                            )
+                            Column {
+                                Text("Recipient", style = MaterialTheme.typography.bodyMedium, color = TextSecondary)
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.Top,
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = truncateSwapDetailValue(recipientValue),
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontFamily = FontFamily.Monospace,
+                                            color = MaterialTheme.colorScheme.onBackground,
+                                        )
+                                        Spacer(modifier = Modifier.height(3.dp))
+                                        val sentNonLbtc = transaction.assetDeltas.entries.firstOrNull {
+                                            !LiquidAsset.isPolicyAsset(it.key) && it.value != 0L
+                                        }
+                                        val sentAmountText = if (privacyMode) {
+                                            HIDDEN_AMOUNT
+                                        } else if (lightningSwapDetails != null) {
+                                            "-${formatAmount(lightningPrimaryAmountSats.toULong(), useSats)} ${liquidBalanceUnitLabel(useSats)}"
+                                        } else if (sentNonLbtc != null) {
+                                            val asset = LiquidAsset.resolve(sentNonLbtc.key)
+                                            val divisor = 10.0.pow(asset.precision.toDouble())
+                                            "-${String.format(java.util.Locale.US, "%.2f", kotlin.math.abs(sentNonLbtc.value).toDouble() / divisor)} ${asset.ticker}"
+                                        } else {
+                                            val recipientAmountSats = (amountAbs.toLong() - transaction.fee).coerceAtLeast(0L)
+                                            "-${formatAmount(recipientAmountSats.toULong(), useSats)} ${liquidBalanceUnitLabel(useSats)}"
+                                        }
+                                        Text(
+                                            text = sentAmountText,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = AccentRed,
+                                        )
+                                    }
+                                    Box(
+                                        contentAlignment = Alignment.Center,
+                                        modifier =
+                                            Modifier
+                                                .layout { measurable, constraints ->
+                                                    val placeable = measurable.measure(constraints)
+                                                    val liftPx = 4.dp.roundToPx()
+                                                    layout(placeable.width, (placeable.height - liftPx).coerceAtLeast(0)) {
+                                                        placeable.placeRelative(0, -liftPx)
+                                                    }
+                                                }
+                                                .size(32.dp)
+                                                .clip(RoundedCornerShape(6.dp))
+                                                .background(DarkSurfaceVariant)
+                                                .clickable {
+                                                    SecureClipboard.copyAndScheduleClear(
+                                                        context,
+                                                        if (!isReceive && !lightningPrimaryValue.isNullOrBlank()) "Lightning Recipient" else "Recipient Address",
+                                                        recipientValue,
+                                                    )
+                                                    showCopiedRecipient = true
+                                                },
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.ContentCopy,
+                                            contentDescription =
+                                                if (!isReceive && !lightningPrimaryValue.isNullOrBlank()) {
+                                                    "Copy Lightning Recipient"
+                                                } else {
+                                                    "Copy Recipient Address"
+                                                },
+                                            tint = if (showCopiedRecipient) LiquidTeal else TextSecondary,
+                                            modifier = Modifier.size(18.dp),
+                                        )
+                                    }
+                                }
+                                if (showCopiedRecipient) {
+                                    Text(
+                                        text = "Copied to clipboard!",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = LiquidTeal,
+                                    )
+                                }
+                            }
+                        }
+
+                        if (!isReceive && lightningSwapFeeSats != null) {
+                            HorizontalDivider(
+                                modifier = Modifier.padding(vertical = 6.dp),
+                                color = TextSecondary.copy(alpha = 0.1f),
+                            )
+                            Text("Boltz Swap Fee", style = MaterialTheme.typography.bodyMedium, color = TextSecondary)
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = if (privacyMode) {
+                                    HIDDEN_AMOUNT
+                                } else {
+                                    "-${formatAmount(lightningSwapFeeSats.toULong(), useSats)} ${liquidBalanceUnitLabel(useSats)}"
+                                },
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = LiquidTeal,
+                            )
+                        }
+
+                        lightningSwapDetails?.swapId
+                            ?.takeIf { it.isNotBlank() }
+                            ?.let { lightningSwapId ->
+                                HorizontalDivider(
+                                    modifier = Modifier.padding(vertical = 6.dp),
+                                    color = TextSecondary.copy(alpha = 0.1f),
+                                )
+                                Column {
+                                    Text("Swap ID", style = MaterialTheme.typography.bodyMedium, color = TextSecondary)
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.Top,
+                                    ) {
+                                        Text(
+                                            text = truncateSwapDetailValue(lightningSwapId),
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontFamily = FontFamily.Monospace,
+                                            color = MaterialTheme.colorScheme.onBackground,
+                                            modifier = Modifier.weight(1f),
+                                        )
+                                        Box(
+                                            contentAlignment = Alignment.Center,
+                                            modifier =
+                                                Modifier
+                                                    .layout { measurable, constraints ->
+                                                        val placeable = measurable.measure(constraints)
+                                                        val liftPx = 4.dp.roundToPx()
+                                                        layout(placeable.width, (placeable.height - liftPx).coerceAtLeast(0)) {
+                                                            placeable.placeRelative(0, -liftPx)
+                                                        }
+                                                    }
+                                                    .size(32.dp)
+                                                    .clip(RoundedCornerShape(6.dp))
+                                                    .background(DarkSurfaceVariant)
+                                                    .clickable {
+                                                        SecureClipboard.copyAndScheduleClear(context, "Swap ID", lightningSwapId)
+                                                        showCopiedLightningSwapId = true
+                                                    },
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.ContentCopy,
+                                                contentDescription = "Copy Swap ID",
+                                                tint = if (showCopiedLightningSwapId) LiquidTeal else TextSecondary,
+                                                modifier = Modifier.size(18.dp),
+                                            )
+                                        }
+                                    }
+                                    if (showCopiedLightningSwapId) {
+                                        Text(
+                                            text = "Copied to clipboard!",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = LiquidTeal,
+                                        )
+                                    }
+                                }
+                            }
+
                         if (!isReceive && transaction.changeAddress != null) {
                             HorizontalDivider(
-                                modifier = Modifier.padding(vertical = 8.dp),
+                                modifier = Modifier.padding(vertical = 6.dp),
                                 color = TextSecondary.copy(alpha = 0.1f),
                             )
                             Column {
                                 Text("Change returned to", style = MaterialTheme.typography.bodyMedium, color = TextSecondary)
-                                Spacer(modifier = Modifier.height(6.dp))
+                                Spacer(modifier = Modifier.height(4.dp))
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
-                                    verticalAlignment = Alignment.CenterVertically,
+                                    verticalAlignment = Alignment.Top,
                                 ) {
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text(
@@ -1104,6 +1544,13 @@ private fun LiquidTransactionDetailDialog(
                                         contentAlignment = Alignment.Center,
                                         modifier =
                                             Modifier
+                                                .layout { measurable, constraints ->
+                                                    val placeable = measurable.measure(constraints)
+                                                    val liftPx = 4.dp.roundToPx()
+                                                    layout(placeable.width, (placeable.height - liftPx).coerceAtLeast(0)) {
+                                                        placeable.placeRelative(0, -liftPx)
+                                                    }
+                                                }
                                                 .size(32.dp)
                                                 .clip(RoundedCornerShape(6.dp))
                                                 .background(DarkSurfaceVariant)
@@ -1136,11 +1583,20 @@ private fun LiquidTransactionDetailDialog(
 
                         if (!isReceive && transaction.fee > 0) {
                             HorizontalDivider(
-                                modifier = Modifier.padding(vertical = 8.dp),
+                                modifier = Modifier.padding(vertical = 6.dp),
                                 color = TextSecondary.copy(alpha = 0.1f),
                             )
                             Text("Network Fee", style = MaterialTheme.typography.bodyMedium, color = TextSecondary)
-                            Spacer(modifier = Modifier.height(6.dp))
+                            Spacer(modifier = Modifier.height(4.dp))
+                            if (transaction.feeRate != null && transaction.vsize != null) {
+                                Text(
+                                    text = "${formatFeeRate(transaction.feeRate)} sat/vB • ${formatVBytes(transaction.vsize)} vB",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = MaterialTheme.colorScheme.onBackground,
+                                )
+                                Spacer(modifier = Modifier.height(3.dp))
+                            }
                             Text(
                                 text = if (privacyMode) {
                                     HIDDEN_AMOUNT
@@ -1152,49 +1608,199 @@ private fun LiquidTransactionDetailDialog(
                             )
                         }
 
+                        lightningSwapDetails?.takeIf { hasLightningAdvancedDetails }?.let { details ->
+                            HorizontalDivider(
+                                modifier = Modifier.padding(vertical = 6.dp),
+                                color = TextSecondary.copy(alpha = 0.1f),
+                            )
+
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { lightningAdvancedExpanded = !lightningAdvancedExpanded },
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    text = "Advanced",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = TextSecondary,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                Icon(
+                                    imageVector =
+                                        if (lightningAdvancedExpanded) {
+                                            Icons.Default.KeyboardArrowUp
+                                        } else {
+                                            Icons.Default.KeyboardArrowDown
+                                        },
+                                    contentDescription =
+                                        if (lightningAdvancedExpanded) {
+                                            "Collapse advanced Lightning details"
+                                        } else {
+                                            "Expand advanced Lightning details"
+                                        },
+                                    tint = LiquidTeal,
+                                )
+                            }
+
+                            if (lightningAdvancedExpanded) {
+                                Spacer(modifier = Modifier.height(8.dp))
+                                if (details.depositAddress.isNotBlank()) {
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    SwapDetailCopyRow(
+                                        label = if (isReceive) "Claim Address" else "Lockup Address",
+                                        value = details.depositAddress,
+                                        copyLabel = if (isReceive) "Claim Address" else "Lockup Address",
+                                        copied = copiedSwapField == "lightning_deposit_address",
+                                        onCopy = {
+                                            SecureClipboard.copyAndScheduleClear(
+                                                context,
+                                                if (isReceive) "Claim Address" else "Lockup Address",
+                                                details.depositAddress,
+                                            )
+                                            copiedSwapField = "lightning_deposit_address"
+                                        },
+                                    )
+                                }
+                                details.refundAddress?.let { refundAddress ->
+                                    Spacer(modifier = Modifier.height(10.dp))
+                                    SwapDetailCopyRow(
+                                        label = "Refund Address",
+                                        value = refundAddress,
+                                        copyLabel = "Refund Address",
+                                        copied = copiedSwapField == "lightning_refund_address",
+                                        onCopy = {
+                                            SecureClipboard.copyAndScheduleClear(context, "Refund Address", refundAddress)
+                                            copiedSwapField = "lightning_refund_address"
+                                        },
+                                    )
+                                }
+                                details.invoice
+                                    ?.takeIf { it.isNotBlank() && it != lightningPrimaryValue }
+                                    ?.let { invoice ->
+                                        Spacer(modifier = Modifier.height(10.dp))
+                                        SwapDetailCopyRow(
+                                            label = "Invoice",
+                                            value = invoice,
+                                            copyLabel = "Invoice",
+                                            copied = copiedSwapField == "lightning_invoice",
+                                            onCopy = {
+                                                SecureClipboard.copyAndScheduleClear(context, "Invoice", invoice)
+                                                copiedSwapField = "lightning_invoice"
+                                            },
+                                        )
+                                    }
+                                details.resolvedPaymentInput
+                                    ?.takeIf {
+                                        it.isNotBlank() &&
+                                            it != lightningPrimaryValue &&
+                                            it != details.invoice
+                                    }?.let { resolvedInput ->
+                                        Spacer(modifier = Modifier.height(10.dp))
+                                        SwapDetailCopyRow(
+                                            label = "Resolved Payment Input",
+                                            value = resolvedInput,
+                                            copyLabel = "Resolved Payment Input",
+                                            copied = copiedSwapField == "lightning_resolved_input",
+                                            onCopy = {
+                                                SecureClipboard.copyAndScheduleClear(
+                                                    context,
+                                                    "Resolved Payment Input",
+                                                    resolvedInput,
+                                                )
+                                                copiedSwapField = "lightning_resolved_input"
+                                            },
+                                        )
+                                    }
+                                details.timeoutBlockHeight?.let { timeout ->
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    SwapDetailTextRow(timeout.toString())
+                                }
+                                details.refundPublicKey?.let { refundPublicKey ->
+                                    Spacer(modifier = Modifier.height(10.dp))
+                                    SwapDetailCopyRow(
+                                        label = "Refund Public Key",
+                                        value = refundPublicKey,
+                                        copyLabel = "Refund Public Key",
+                                        copied = copiedSwapField == "lightning_refund_pubkey",
+                                        onCopy = {
+                                            SecureClipboard.copyAndScheduleClear(
+                                                context,
+                                                "Refund Public Key",
+                                                refundPublicKey,
+                                            )
+                                            copiedSwapField = "lightning_refund_pubkey"
+                                        },
+                                    )
+                                }
+                                details.claimPublicKey?.let { claimPublicKey ->
+                                    Spacer(modifier = Modifier.height(10.dp))
+                                    SwapDetailCopyRow(
+                                        label = "Claim Public Key",
+                                        value = claimPublicKey,
+                                        copyLabel = "Claim Public Key",
+                                        copied = copiedSwapField == "lightning_claim_pubkey",
+                                        onCopy = {
+                                            SecureClipboard.copyAndScheduleClear(
+                                                context,
+                                                "Claim Public Key",
+                                                claimPublicKey,
+                                            )
+                                            copiedSwapField = "lightning_claim_pubkey"
+                                        },
+                                    )
+                                }
+                                details.swapTree?.let { swapTree ->
+                                    Spacer(modifier = Modifier.height(10.dp))
+                                    SwapDetailCopyRow(
+                                        label = "Swap Tree",
+                                        value = swapTree,
+                                        copyLabel = "Swap Tree",
+                                        copied = copiedSwapField == "lightning_swap_tree",
+                                        onCopy = {
+                                            SecureClipboard.copyAndScheduleClear(context, "Swap Tree", swapTree)
+                                            copiedSwapField = "lightning_swap_tree"
+                                        },
+                                    )
+                                }
+                                details.blindingKey?.let { blindingKey ->
+                                    Spacer(modifier = Modifier.height(10.dp))
+                                    SwapDetailCopyRow(
+                                        label = "Blinding Key",
+                                        value = blindingKey,
+                                        copyLabel = "Blinding Key",
+                                        copied = copiedSwapField == "lightning_blinding_key",
+                                        onCopy = {
+                                            SecureClipboard.copyAndScheduleClear(context, "Blinding Key", blindingKey)
+                                            copiedSwapField = "lightning_blinding_key"
+                                        },
+                                    )
+                                }
+                            }
+                        }
+
                         if (showSourceSection) {
                             HorizontalDivider(
-                                modifier = Modifier.padding(vertical = 8.dp),
+                                modifier = Modifier.padding(vertical = 6.dp),
                                 color = TextSecondary.copy(alpha = 0.1f),
                             )
 
                             Text("Source", style = MaterialTheme.typography.bodyMedium, color = TextSecondary)
-                            Spacer(modifier = Modifier.height(6.dp))
+                            Spacer(modifier = Modifier.height(4.dp))
                             Text(
                                 text = transactionSourceDetail(transaction),
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onBackground,
                             )
-
-                            lightningPaymentDetails?.let { session ->
-                                Spacer(modifier = Modifier.height(10.dp))
-                                Text("Swap ID", style = MaterialTheme.typography.bodyMedium, color = TextSecondary)
-                                Spacer(modifier = Modifier.height(4.dp))
-                                Text(
-                                    text = truncateMiddle(session.swapId, 28),
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    fontFamily = FontFamily.Monospace,
-                                    color = MaterialTheme.colorScheme.onBackground,
-                                )
-                                Spacer(modifier = Modifier.height(10.dp))
-                                Text("Original payment input", style = MaterialTheme.typography.bodyMedium, color = TextSecondary)
-                                Spacer(modifier = Modifier.height(4.dp))
-                                Text(
-                                    text = truncateMiddle(session.paymentInput, 40),
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    fontFamily = FontFamily.Monospace,
-                                    color = MaterialTheme.colorScheme.onBackground,
-                                )
-                            }
                         }
 
                         HorizontalDivider(
-                            modifier = Modifier.padding(vertical = 8.dp),
+                            modifier = Modifier.padding(vertical = 6.dp),
                             color = TextSecondary.copy(alpha = 0.1f),
                         )
 
                         Text("Label", style = MaterialTheme.typography.bodyMedium, color = TextSecondary)
-                        Spacer(modifier = Modifier.height(6.dp))
+                        Spacer(modifier = Modifier.height(4.dp))
                         if (isEditingLabel) {
                             OutlinedTextField(
                                 value = labelText,
@@ -1264,9 +1870,9 @@ private fun LiquidTransactionDetailDialog(
                             }
                         }
 
-                        transaction.swapDetails?.let { swapDetails ->
+                        chainSwapDetails?.let { swapDetails ->
                             HorizontalDivider(
-                                modifier = Modifier.padding(vertical = 8.dp),
+                                modifier = Modifier.padding(vertical = 6.dp),
                                 color = TextSecondary.copy(alpha = 0.1f),
                             )
 
@@ -1449,6 +2055,49 @@ private fun LiquidTorBrowserErrorDialog(onDismiss: () -> Unit) {
             }
         }
     }
+}
+
+@Composable
+private fun SwapDetailTextRow(
+    value: String,
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text(
+            text = "Timeout Block Height",
+            style = MaterialTheme.typography.bodyMedium,
+            color = TextSecondary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Spacer(modifier = Modifier.height(6.dp))
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onBackground,
+        )
+    }
+}
+
+private fun pendingLightningSessionToSwapDetails(session: PendingLightningPaymentSession): LiquidSwapDetails {
+    return LiquidSwapDetails(
+        service = SwapService.BOLTZ,
+        direction = SwapDirection.LBTC_TO_BTC,
+        swapId = session.swapId,
+        role = LiquidSwapTxRole.FUNDING,
+        depositAddress = session.lockupAddress,
+        refundAddress = session.refundAddress,
+        sendAmountSats = session.lockupAmountSats,
+        expectedReceiveAmountSats = session.paymentAmountSats,
+        paymentInput = session.paymentInput,
+        resolvedPaymentInput = session.resolvedPaymentInput,
+        invoice = session.fetchedInvoice,
+        status = session.status,
+        timeoutBlockHeight = session.timeoutBlockHeight,
+        refundPublicKey = session.refundPublicKey,
+        claimPublicKey = session.boltzClaimPublicKey,
+        swapTree = session.swapTree,
+        blindingKey = session.blindingKey,
+    )
 }
 
 @Composable
@@ -1696,6 +2345,31 @@ private fun LiquidTransactionFilterButton(
     }
 }
 
+@Composable
+private fun LiquidTransactionTextFilterButton(
+    text: String,
+    tint: Color,
+    isSelected: Boolean,
+    onClick: () -> Unit,
+) {
+    Box(
+        contentAlignment = Alignment.Center,
+        modifier =
+            Modifier
+                .size(28.dp)
+                .clip(RoundedCornerShape(6.dp))
+                .background(if (isSelected) tint.copy(alpha = 0.16f) else DarkSurfaceVariant)
+                .clickable(onClick = onClick),
+    ) {
+        Text(
+            text = text,
+            style = MaterialTheme.typography.titleMedium,
+            color = if (isSelected) tint else TextSecondary,
+            fontWeight = FontWeight.Bold,
+        )
+    }
+}
+
 private fun transactionSourceDetail(transaction: LiquidTransaction): String =
     when (transaction.source) {
         LiquidTxSource.CHAIN_SWAP -> "BTC/L-BTC chain swap"
@@ -1708,10 +2382,56 @@ private fun transactionSourceDetail(transaction: LiquidTransaction): String =
         }
     }
 
-private fun truncateMiddle(value: String, maxLength: Int): String {
-    if (value.length <= maxLength || maxLength < 8) return value
-    val keep = (maxLength - 3) / 2
-    val tailKeep = maxLength - 3 - keep
-    return value.take(keep) + "..." + value.takeLast(tailKeep)
+@Composable
+private fun LiquidAssetBalancesCard(
+    assetBalances: List<LiquidAssetBalance>,
+    privacyMode: Boolean,
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(8.dp),
+        colors = CardDefaults.cardColors(containerColor = DarkCard),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            assetBalances.forEach { assetBalance ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = assetBalance.asset.ticker,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium,
+                        color = TextSecondary,
+                    )
+                    Text(
+                        text = if (privacyMode) {
+                            HIDDEN_AMOUNT
+                        } else {
+                            formatLiquidAssetAmount(assetBalance.asset, assetBalance.amount)
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onBackground,
+                    )
+                }
+            }
+        }
+    }
+}
+
+private fun formatLiquidAssetAmount(asset: LiquidAsset, baseUnits: Long): String {
+    if (asset.isPolicyAsset) {
+        return "${formatAmount(baseUnits.toULong(), true)} sats"
+    }
+    val divisor = 10.0.pow(asset.precision.toDouble())
+    val value = baseUnits.toDouble() / divisor
+    return String.format(java.util.Locale.US, "%.2f %s", value, asset.ticker)
 }
 

@@ -29,6 +29,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import github.aeonbtc.ibiswallet.data.model.LiquidAsset
 import github.aeonbtc.ibiswallet.data.model.LiquidTransaction
 import github.aeonbtc.ibiswallet.data.model.LiquidSwapTxRole
 import github.aeonbtc.ibiswallet.data.model.LiquidTxSource
@@ -45,6 +46,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlin.math.abs
+import kotlin.math.pow
 
 /**
  * Transaction list item for Liquid L-BTC transactions.
@@ -82,6 +84,12 @@ fun LiquidTransactionItem(
     val iconBackground = if (isReceive) AccentGreen.copy(alpha = 0.1f) else AccentRed.copy(alpha = 0.1f)
     val amountColor = if (isReceive) AccentGreen else AccentRed
     val networkBadge = networkBadge(tx.source)
+    val nonLbtcDelta = tx.assetDeltas.entries.firstOrNull { !LiquidAsset.isPolicyAsset(it.key) && it.value != 0L }
+    val nonLbtcAsset = nonLbtcDelta?.let { LiquidAsset.resolve(it.key) }
+    val hideNativeLiquidBadgeForUsdt =
+        tx.source == LiquidTxSource.NATIVE && nonLbtcAsset?.assetId == LiquidAsset.USDT_ASSET_ID
+    val showNetworkBadge = !hideNativeLiquidBadgeForUsdt
+    val showAssetBadge = nonLbtcAsset != null
 
     Card(
         modifier = modifier
@@ -126,21 +134,40 @@ fun LiquidTransactionItem(
                         overflow = TextOverflow.Ellipsis,
                     )
                     Spacer(modifier = Modifier.width(6.dp))
-                    Box(
-                        modifier =
-                            Modifier
-                                .clip(RoundedCornerShape(4.dp))
-                                .background(networkBadge.color.copy(alpha = 0.16f))
-                                .padding(horizontal = 5.dp, vertical = 2.dp),
-                    )
-                    {
-                        Text(
-                            text = networkBadge.label,
-                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 12.sp, lineHeight = 17.sp),
-                            color = networkBadge.color,
-                            fontWeight = FontWeight.SemiBold,
-                            maxLines = 1,
-                        )
+                    if (showNetworkBadge) {
+                        Box(
+                            modifier =
+                                Modifier
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(networkBadge.color.copy(alpha = 0.16f))
+                                    .padding(horizontal = 5.dp, vertical = 2.dp),
+                        ) {
+                            Text(
+                                text = networkBadge.label,
+                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 12.sp, lineHeight = 17.sp),
+                                color = networkBadge.color,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                            )
+                        }
+                    }
+                    if (showAssetBadge) {
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Box(
+                            modifier =
+                                Modifier
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(AccentTeal.copy(alpha = 0.16f))
+                                    .padding(horizontal = 5.dp, vertical = 2.dp),
+                        ) {
+                            Text(
+                                text = nonLbtcAsset.ticker,
+                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 12.sp, lineHeight = 17.sp),
+                                color = AccentTeal,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                            )
+                        }
                     }
                 }
                 if (!displayLabel.isNullOrBlank()) {
@@ -160,39 +187,58 @@ fun LiquidTransactionItem(
             }
 
             Column(horizontalAlignment = Alignment.End) {
-                val amountText = if (privacyMode) {
-                    "****"
+                if (nonLbtcDelta != null) {
+                    val asset = LiquidAsset.resolve(nonLbtcDelta.key)
+                    val assetAmount = abs(nonLbtcDelta.value)
+                    val divisor = 10.0.pow(asset.precision.toDouble())
+                    val displayValue = assetAmount.toDouble() / divisor
+                    val assetPrefix = if (nonLbtcDelta.value >= 0) "+" else "-"
+                    Text(
+                        text = if (privacyMode) "****" else "$assetPrefix${String.format(Locale.US, "%.2f", displayValue)} ${asset.ticker}",
+                        style = MaterialTheme.typography.titleMedium.copy(fontSize = 17.sp, lineHeight = 25.sp),
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (nonLbtcDelta.value >= 0) AccentGreen else AccentRed,
+                        textAlign = TextAlign.End,
+                    )
                 } else {
-                    val prefix = if (isReceive) "+" else "-"
-                    if (denomination == "SATS") {
-                        "$prefix${"%,d".format(displayAmountSats)} sats"
+                    val amountText = if (privacyMode) {
+                        "****"
                     } else {
-                        "$prefix${"%.8f".format(displayAmountSats / 100_000_000.0)}"
+                        val prefix = if (isReceive) "+" else "-"
+                        if (denomination == "SATS") {
+                            "$prefix${"%,d".format(displayAmountSats)} sats"
+                        } else {
+                            "$prefix${"%.8f".format(displayAmountSats / 100_000_000.0)}"
+                        }
                     }
+
+                    Text(
+                        text = amountText,
+                        style = MaterialTheme.typography.titleMedium.copy(fontSize = 17.sp, lineHeight = 25.sp),
+                        fontWeight = FontWeight.SemiBold,
+                        color = amountColor,
+                        textAlign = TextAlign.End,
+                    )
                 }
 
-                Text(
-                    text = amountText,
-                    style = MaterialTheme.typography.titleMedium.copy(fontSize = 17.sp, lineHeight = 25.sp),
-                    fontWeight = FontWeight.SemiBold,
-                    color = amountColor,
-                    textAlign = TextAlign.End,
-                )
-
-                Text(
-                    text = if (!privacyMode && btcPrice != null) {
+                val fiatText =
+                    if (!privacyMode && btcPrice != null && nonLbtcDelta == null) {
                         "$%.2f".format(displayAmountSats / 100_000_000.0 * btcPrice)
                     } else {
-                        ""
-                    },
-                    color = TextSecondary,
-                    style = MaterialTheme.typography.bodySmall.copy(fontSize = 14.sp, lineHeight = 18.sp),
-                    textAlign = TextAlign.End,
-                )
+                        null
+                    }
+                fiatText?.let {
+                    Text(
+                        text = it,
+                        color = TextSecondary,
+                        style = MaterialTheme.typography.bodySmall.copy(fontSize = 14.sp, lineHeight = 18.sp),
+                        textAlign = TextAlign.End,
+                    )
+                }
                 if (tx.height == null) {
                     StatusBadge(
                         label = "Pending",
-                        color = LiquidTeal,
+                        color = BitcoinOrange,
                         modifier = Modifier.align(Alignment.End),
                     )
                 }

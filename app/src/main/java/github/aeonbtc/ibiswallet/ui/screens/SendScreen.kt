@@ -74,8 +74,10 @@ import github.aeonbtc.ibiswallet.data.model.FeeEstimationResult
 import github.aeonbtc.ibiswallet.data.model.Recipient
 import github.aeonbtc.ibiswallet.data.model.UtxoInfo
 import github.aeonbtc.ibiswallet.data.model.WalletState
+import github.aeonbtc.ibiswallet.ui.components.AmountLabel
 import github.aeonbtc.ibiswallet.ui.components.IbisButton
 import github.aeonbtc.ibiswallet.ui.components.QrScannerDialog
+import github.aeonbtc.ibiswallet.ui.components.ScrollableDialogSurface
 import github.aeonbtc.ibiswallet.ui.components.formatFeeRate
 import github.aeonbtc.ibiswallet.ui.theme.AccentRed
 import github.aeonbtc.ibiswallet.ui.theme.AccentTeal
@@ -105,6 +107,7 @@ fun SendScreen(
     preSelectedUtxo: UtxoInfo? = null,
     spendUnconfirmed: Boolean = true,
     btcPrice: Double? = null,
+    fiatCurrency: String = SecureStorage.DEFAULT_PRICE_CURRENCY,
     privacyMode: Boolean = false,
     isWatchOnly: Boolean = false,
     draft: SendScreenDraft = SendScreenDraft(),
@@ -160,6 +163,7 @@ fun SendScreen(
     onNavigateToBroadcast: () -> Unit = {},
     onHandleScannedInput: (String) -> Boolean = { false },
     onHandleRecipientInput: (String) -> Boolean = { false },
+    onToggleDenomination: () -> Unit = {},
 ) {
     // Initialize state from draft
     var recipientAddress by remember { mutableStateOf(draft.recipientAddress) }
@@ -469,6 +473,7 @@ fun SendScreen(
             selectedUtxos = selectedUtxos,
             useSats = useSats,
             btcPrice = btcPrice,
+            fiatCurrency = fiatCurrency,
             privacyMode = privacyMode,
             spendUnconfirmed = spendUnconfirmed,
             onUtxoToggle = { utxo ->
@@ -493,6 +498,7 @@ fun SendScreen(
             useSats = useSats,
             isUsdMode = isUsdMode,
             btcPrice = btcPrice,
+            fiatCurrency = fiatCurrency,
             privacyMode = privacyMode,
             availableSats = availableSats,
             estimatedFeeSats = estimatedFeeSats,
@@ -569,6 +575,7 @@ fun SendScreen(
                 feeRate = feeRate,
                 useSats = useSats,
                 btcPrice = btcPrice,
+                fiatCurrency = fiatCurrency,
                 selectedUtxos = utxoSelection,
                 privacyMode = privacyMode,
                 isWatchOnly = isWatchOnly,
@@ -598,6 +605,7 @@ fun SendScreen(
                 selectedUtxos = utxoSelection,
                 useSats = useSats,
                 btcPrice = btcPrice,
+                fiatCurrency = fiatCurrency,
                 privacyMode = privacyMode,
                 label = txLabel,
                 isSelfTransfer = isSelfTransfer,
@@ -702,7 +710,7 @@ fun SendScreen(
                                 },
                             style = MaterialTheme.typography.labelMedium,
                             color = if (isActive) BitcoinOrange else if (hasUtxos) TextSecondary else TextSecondary.copy(alpha = 0.5f),
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
                         )
                     }
                 }
@@ -753,7 +761,7 @@ fun SendScreen(
                             text = if (isMultiMode) "Multiple (${multiRecipientList.size})" else "Multiple",
                             style = MaterialTheme.typography.labelMedium,
                             color = if (isMultiMode) BitcoinOrange else TextSecondary,
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
                         )
                     }
                 }
@@ -880,7 +888,7 @@ fun SendScreen(
                             )
                             if (btcPrice != null && btcPrice > 0 && !privacyMode) {
                                 Text(
-                                    text = " · ${formatUsd((availableSats.toDouble() / 100_000_000.0) * btcPrice)}",
+                                    text = " · ${formatFiat((availableSats.toDouble() / 100_000_000.0) * btcPrice, fiatCurrency)}",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = TextSecondary.copy(alpha = 0.7f),
                                 )
@@ -1046,15 +1054,11 @@ fun SendScreen(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Text(
-                            text =
-                                when {
-                                    isUsdMode -> "Amount (USD)"
-                                    useSats -> "Amount (sats)"
-                                    else -> "Amount (BTC)"
-                                },
-                            style = MaterialTheme.typography.labelLarge,
-                            color = TextSecondary,
+                        AmountLabel(
+                            useSats = useSats,
+                            isUsdMode = isUsdMode,
+                            fiatCurrency = fiatCurrency,
+                            onToggleDenomination = onToggleDenomination,
                         )
                         // USD toggle button (only show if price is available)
                         if (btcPrice != null && btcPrice > 0) {
@@ -1114,10 +1118,10 @@ fun SendScreen(
                                 border = BorderStroke(1.dp, if (isUsdMode) BitcoinOrange else BorderColor),
                             ) {
                                 Text(
-                                    text = if (isUsdMode) "USD" else "USD",
+                                    text = fiatCurrency,
                                     style = MaterialTheme.typography.labelMedium,
                                     color = if (isUsdMode) BitcoinOrange else TextSecondary,
-                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
                                 )
                             }
                         }
@@ -1136,7 +1140,7 @@ fun SendScreen(
                                 )} ${if (useSats) "sats" else "BTC"}"
                             } else {
                                 val usdValue = (amountSats / 100_000_000.0) * btcPrice
-                                "≈ ${formatUsd(usdValue)}"
+                                "≈ ${formatFiat(usdValue, fiatCurrency)}"
                             }
                         } else {
                             null
@@ -1178,7 +1182,7 @@ fun SendScreen(
                         },
                         leadingIcon =
                             if (isUsdMode) {
-                                { Text("$", color = TextSecondary) }
+                                { Text(fiatCurrency, color = TextSecondary) }
                             } else {
                                 null
                             },
@@ -1249,7 +1253,7 @@ fun SendScreen(
                         if (btcPrice != null && btcPrice > 0 && !privacyMode) {
                             val usdValue = (remainingAfterSend.toDouble() / 100_000_000.0) * btcPrice
                             Text(
-                                text = " · ${formatUsd(usdValue)}",
+                                text = " · ${formatFiat(usdValue, fiatCurrency)}",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = TextSecondary.copy(alpha = 0.7f),
                             )
@@ -1308,7 +1312,7 @@ fun SendScreen(
                                     } else {
                                         TextSecondary.copy(alpha = 0.5f)
                                     },
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
                             )
                         }
                     }
@@ -1350,7 +1354,7 @@ fun SendScreen(
                             text = "Label",
                             style = MaterialTheme.typography.labelMedium,
                             color = if (showLabelField || labelText.isNotBlank()) BitcoinOrange else TextSecondary,
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
                         )
                     }
 
@@ -1539,6 +1543,7 @@ private fun CoinControlDialog(
     selectedUtxos: List<UtxoInfo>,
     useSats: Boolean,
     btcPrice: Double? = null,
+    fiatCurrency: String = SecureStorage.DEFAULT_PRICE_CURRENCY,
     privacyMode: Boolean = false,
     spendUnconfirmed: Boolean = true,
     onUtxoToggle: (UtxoInfo) -> Unit,
@@ -1590,7 +1595,7 @@ private fun CoinControlDialog(
                             )} ${if (useSats) "sats" else "BTC"}"
                             if (btcPrice != null && btcPrice > 0) {
                                 val usdValue = (totalSelected.toDouble() / 100_000_000.0) * btcPrice
-                                "$baseText · ${formatUsd(usdValue)}"
+                                "$baseText · ${formatFiat(usdValue, fiatCurrency)}"
                             } else {
                                 baseText
                             }
@@ -1713,7 +1718,7 @@ private fun CoinControlDialog(
                                         if (btcPrice != null && btcPrice > 0 && !privacyMode) {
                                             val usdValue = (utxo.amountSats.toDouble() / 100_000_000.0) * btcPrice
                                             Text(
-                                                text = " · ${formatUsd(usdValue)}",
+                                                text = " · ${formatFiat(usdValue, fiatCurrency)}",
                                                 style = MaterialTheme.typography.bodySmall,
                                                 color =
                                                     if (isDisabled) {
@@ -1811,6 +1816,7 @@ private fun SendConfirmationDialog(
     selectedUtxos: List<UtxoInfo>?,
     useSats: Boolean,
     btcPrice: Double? = null,
+    fiatCurrency: String = SecureStorage.DEFAULT_PRICE_CURRENCY,
     privacyMode: Boolean = false,
     label: String? = null,
     isSelfTransfer: Boolean = false,
@@ -1830,24 +1836,72 @@ private fun SendConfirmationDialog(
     val hasChange = dryRunResult?.hasChange ?: false
     val totalSats = amountSats.toLong() + estimatedFeeSats
 
-    Dialog(
+    ScrollableDialogSurface(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false),
-    ) {
-        Surface(
-            modifier =
-                Modifier
-                    .fillMaxWidth()
-                    .padding(16.dp),
-            shape = RoundedCornerShape(12.dp),
-            color = DarkSurface,
-        ) {
-            Column(
+        containerColor = DarkSurface,
+        actions = {
+            Button(
+                onClick = onConfirm,
                 modifier =
                     Modifier
                         .fillMaxWidth()
-                        .padding(16.dp),
+                        .height(48.dp),
+                shape = RoundedCornerShape(8.dp),
+                enabled = !isSending,
+                colors =
+                    ButtonDefaults.buttonColors(
+                        containerColor = BitcoinOrange,
+                        contentColor = DarkBackground,
+                        disabledContainerColor = BitcoinOrange.copy(alpha = 0.5f),
+                        disabledContentColor = DarkBackground.copy(alpha = 0.7f),
+                    ),
             ) {
+                if (isSending) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        color = DarkBackground,
+                        strokeWidth = 2.dp,
+                    )
+                } else {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.Send,
+                        contentDescription = null,
+                        modifier = Modifier.size(20.dp),
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = if (isWatchOnly) "Build PSBT" else "Send Bitcoin",
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                }
+            }
+
+            if (isSending && sendStatus != null) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = sendStatus,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = TextSecondary,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            IbisButton(
+                onClick = onDismiss,
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .height(48.dp),
+                enabled = !isSending,
+            ) {
+                Text("Cancel", style = MaterialTheme.typography.titleMedium)
+            }
+        },
+    ) {
                 Text(
                     text = if (isWatchOnly) "Review PSBT" else "Review Transaction",
                     style = MaterialTheme.typography.titleLarge,
@@ -1941,7 +1995,7 @@ private fun SendConfirmationDialog(
                                 )} ${if (useSats) "sats" else "BTC"}"
                             },
                         color = if (isSelfTransfer) SuccessGreen else AccentRed,
-                        subtext = reviewUsdSubtext(amountSats.toLong(), btcPrice, privacyMode),
+                        subtext = reviewUsdSubtext(amountSats.toLong(), btcPrice, fiatCurrency, privacyMode),
                     )
                 }
 
@@ -1978,7 +2032,7 @@ private fun SendConfirmationDialog(
                                     )} ${if (useSats) "sats" else "BTC"}"
                                 },
                             color = SuccessGreen,
-                            subtext = reviewUsdSubtext(actualChangeSats, btcPrice, privacyMode),
+                            subtext = reviewUsdSubtext(actualChangeSats, btcPrice, fiatCurrency, privacyMode),
                         )
                     }
                 }
@@ -2013,7 +2067,7 @@ private fun SendConfirmationDialog(
                                 )} ${if (useSats) "sats" else "BTC"}"
                             },
                         color = BitcoinOrange,
-                        subtext = reviewUsdSubtext(estimatedFeeSats, btcPrice, privacyMode),
+                        subtext = reviewUsdSubtext(estimatedFeeSats, btcPrice, fiatCurrency, privacyMode),
                     )
                 }
                 Spacer(modifier = Modifier.height(12.dp))
@@ -2056,6 +2110,7 @@ private fun SendConfirmationDialog(
                             reviewUsdSubtext(
                                 if (isSelfTransfer) estimatedFeeSats else totalSats,
                                 btcPrice,
+                                fiatCurrency,
                                 privacyMode,
                             ),
                         emphasize = true,
@@ -2071,72 +2126,6 @@ private fun SendConfirmationDialog(
                         color = TextSecondary,
                     )
                 }
-
-                Spacer(modifier = Modifier.height(24.dp))
-
-                // Confirm button
-                Button(
-                    onClick = onConfirm,
-                    modifier =
-                        Modifier
-                            .fillMaxWidth()
-                            .height(48.dp),
-                    shape = RoundedCornerShape(8.dp),
-                    enabled = !isSending,
-                    colors =
-                        ButtonDefaults.buttonColors(
-                            containerColor = BitcoinOrange,
-                            contentColor = DarkBackground,
-                            disabledContainerColor = BitcoinOrange.copy(alpha = 0.5f),
-                            disabledContentColor = DarkBackground.copy(alpha = 0.7f),
-                        ),
-                ) {
-                    if (isSending) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(20.dp),
-                            color = DarkBackground,
-                            strokeWidth = 2.dp,
-                        )
-                    } else {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.Send,
-                            contentDescription = null,
-                            modifier = Modifier.size(20.dp),
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = if (isWatchOnly) "Build PSBT" else "Send Bitcoin",
-                            style = MaterialTheme.typography.titleMedium,
-                        )
-                    }
-                }
-
-                // Send status text
-                if (isSending && sendStatus != null) {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = sendStatus,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = TextSecondary,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(12.dp))
-
-                // Cancel button
-                IbisButton(
-                    onClick = onDismiss,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(48.dp),
-                    enabled = !isSending,
-                ) {
-                    Text("Cancel", style = MaterialTheme.typography.titleMedium)
-                }
-            }
-        }
     }
 }
 
@@ -2170,12 +2159,13 @@ private fun SendReviewValueColumn(
 private fun reviewUsdSubtext(
     sats: Long,
     btcPrice: Double?,
+    fiatCurrency: String,
     privacyMode: Boolean,
 ): String? {
     if (privacyMode || btcPrice == null || btcPrice <= 0.0) {
         return null
     }
-    return formatUsd((sats.toDouble() / 100_000_000.0) * btcPrice)
+    return formatFiat((sats.toDouble() / 100_000_000.0) * btcPrice, fiatCurrency)
 }
 
 private fun abbreviateReviewAddress(
@@ -2414,6 +2404,7 @@ private fun MultiRecipientDialog(
     useSats: Boolean,
     isUsdMode: Boolean,
     btcPrice: Double? = null,
+    fiatCurrency: String = SecureStorage.DEFAULT_PRICE_CURRENCY,
     privacyMode: Boolean = false,
     availableSats: Long = 0L,
     estimatedFeeSats: Long? = null,
@@ -2582,7 +2573,7 @@ private fun MultiRecipientDialog(
                                     placeholder = {
                                         Text(
                                             when {
-                                                isUsdMode -> "Amount (USD)"
+                                                isUsdMode -> "Amount ($fiatCurrency)"
                                                 useSats -> "Amount (sats)"
                                                 else -> "Amount (BTC)"
                                             },
@@ -2591,7 +2582,7 @@ private fun MultiRecipientDialog(
                                     },
                                     leadingIcon =
                                         if (isUsdMode) {
-                                            { Text("$", color = TextSecondary) } 
+                                            { Text(fiatCurrency, color = TextSecondary) }
                                         } else {
                                             null
                                         },
@@ -2775,6 +2766,7 @@ private fun MultiRecipientConfirmationDialog(
     feeRate: Double,
     useSats: Boolean,
     btcPrice: Double? = null,
+    fiatCurrency: String = SecureStorage.DEFAULT_PRICE_CURRENCY,
     selectedUtxos: List<UtxoInfo>?,
     privacyMode: Boolean = false,
     isWatchOnly: Boolean = false,
@@ -2793,24 +2785,72 @@ private fun MultiRecipientConfirmationDialog(
     val totalRecipientSats = recipients.sumOf { it.amountSats.toLong() }
     val totalSats = totalRecipientSats + feeSats
 
-    Dialog(
+    ScrollableDialogSurface(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false),
-    ) {
-        Surface(
-            modifier =
-                Modifier
-                    .fillMaxWidth()
-                    .padding(16.dp),
-            shape = RoundedCornerShape(12.dp),
-            color = DarkSurface,
-        ) {
-            Column(
+        containerColor = DarkSurface,
+        actions = {
+            Button(
+                onClick = onConfirm,
                 modifier =
                     Modifier
                         .fillMaxWidth()
-                        .padding(16.dp),
+                        .height(48.dp),
+                shape = RoundedCornerShape(8.dp),
+                enabled = !isSending,
+                colors =
+                    ButtonDefaults.buttonColors(
+                        containerColor = BitcoinOrange,
+                        contentColor = DarkBackground,
+                        disabledContainerColor = BitcoinOrange.copy(alpha = 0.5f),
+                        disabledContentColor = DarkBackground.copy(alpha = 0.7f),
+                    ),
             ) {
+                if (isSending) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        color = DarkBackground,
+                        strokeWidth = 2.dp,
+                    )
+                } else {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.Send,
+                        contentDescription = null,
+                        modifier = Modifier.size(20.dp),
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = if (isWatchOnly) "Create PSBT" else "Send Bitcoin",
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                }
+            }
+
+            if (isSending && sendStatus != null) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = sendStatus,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextSecondary,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            IbisButton(
+                onClick = onDismiss,
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .height(48.dp),
+                enabled = !isSending,
+            ) {
+                Text("Cancel", style = MaterialTheme.typography.titleMedium)
+            }
+        },
+    ) {
                 Text(
                     text = if (isWatchOnly) "Confirm PSBT" else "Confirm Transaction",
                     style = MaterialTheme.typography.titleLarge,
@@ -2908,7 +2948,7 @@ private fun MultiRecipientConfirmationDialog(
                                     )} ${if (useSats) "sats" else "BTC"}"
                                 },
                             color = AccentRed,
-                            subtext = reviewUsdSubtext(r.amountSats.toLong(), btcPrice, privacyMode),
+                            subtext = reviewUsdSubtext(r.amountSats.toLong(), btcPrice, fiatCurrency, privacyMode),
                         )
                     }
                     Spacer(modifier = Modifier.height(12.dp))
@@ -2944,7 +2984,7 @@ private fun MultiRecipientConfirmationDialog(
                                     )} ${if (useSats) "sats" else "BTC"}"
                                 },
                             color = SuccessGreen,
-                            subtext = reviewUsdSubtext(changeSats, btcPrice, privacyMode),
+                            subtext = reviewUsdSubtext(changeSats, btcPrice, fiatCurrency, privacyMode),
                         )
                     }
                     Spacer(modifier = Modifier.height(12.dp))
@@ -2978,7 +3018,7 @@ private fun MultiRecipientConfirmationDialog(
                                 )} ${if (useSats) "sats" else "BTC"}"
                             },
                         color = BitcoinOrange,
-                        subtext = reviewUsdSubtext(feeSats, btcPrice, privacyMode),
+                        subtext = reviewUsdSubtext(feeSats, btcPrice, fiatCurrency, privacyMode),
                     )
                 }
 
@@ -3017,7 +3057,7 @@ private fun MultiRecipientConfirmationDialog(
                                 )} ${if (useSats) "sats" else "BTC"}"
                             },
                         color = AccentRed,
-                        subtext = reviewUsdSubtext(totalSats, btcPrice, privacyMode),
+                        subtext = reviewUsdSubtext(totalSats, btcPrice, fiatCurrency, privacyMode),
                         emphasize = true,
                     )
                 }
@@ -3031,71 +3071,5 @@ private fun MultiRecipientConfirmationDialog(
                         color = TextSecondary,
                     )
                 }
-
-                Spacer(modifier = Modifier.height(24.dp))
-
-                // Confirm button
-                Button(
-                    onClick = onConfirm,
-                    modifier =
-                        Modifier
-                            .fillMaxWidth()
-                            .height(48.dp),
-                    shape = RoundedCornerShape(8.dp),
-                    enabled = !isSending,
-                    colors =
-                        ButtonDefaults.buttonColors(
-                            containerColor = BitcoinOrange,
-                            contentColor = DarkBackground,
-                            disabledContainerColor = BitcoinOrange.copy(alpha = 0.5f),
-                            disabledContentColor = DarkBackground.copy(alpha = 0.7f),
-                        ),
-                ) {
-                    if (isSending) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(20.dp),
-                            color = DarkBackground,
-                            strokeWidth = 2.dp,
-                        )
-                    } else {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.Send,
-                            contentDescription = null,
-                            modifier = Modifier.size(20.dp),
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = if (isWatchOnly) "Create PSBT" else "Send Bitcoin",
-                            style = MaterialTheme.typography.titleMedium,
-                        )
-                    }
-                }
-
-                // Send status text
-                if (isSending && sendStatus != null) {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = sendStatus,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = TextSecondary,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(12.dp))
-
-                // Cancel button
-                IbisButton(
-                    onClick = onDismiss,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(48.dp),
-                    enabled = !isSending,
-                ) {
-                    Text("Cancel", style = MaterialTheme.typography.titleMedium)
-                }
-            }
-        }
     }
 }

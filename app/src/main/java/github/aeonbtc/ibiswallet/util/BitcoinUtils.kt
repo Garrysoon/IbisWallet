@@ -19,6 +19,7 @@ object BitcoinUtils {
 
     private const val BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
     private val supportedDescriptorPrefixes = listOf("pkh(", "wpkh(", "tr(")
+    private val liquidDescriptorBranchRegex = Regex("""/[01]/\*(\)+)$""")
 
     fun parseSupportedAddressType(
         rawAddressType: String?,
@@ -139,6 +140,19 @@ object BitcoinUtils {
             trimmed.startsWith("1") -> AddressType.LEGACY
             trimmed.startsWith("bc1q") -> AddressType.SEGWIT
             trimmed.startsWith("bc1p") -> AddressType.TAPROOT
+            else -> null
+        }
+    }
+
+    /**
+     * Detect the address type from a supported output descriptor string.
+     */
+    fun detectDescriptorAddressType(descriptor: String): AddressType? {
+        val trimmed = stripDescriptorChecksum(descriptor).trim().lowercase()
+        return when {
+            trimmed.startsWith("pkh(") -> AddressType.LEGACY
+            trimmed.startsWith("wpkh(") -> AddressType.SEGWIT
+            trimmed.startsWith("tr(") -> AddressType.TAPROOT
             else -> null
         }
     }
@@ -481,6 +495,88 @@ object BitcoinUtils {
     }
 
     /**
+     * Normalize Liquid watch-only descriptor input into a single descriptor string.
+     *
+     * Supports:
+     * - A single combined `ct(...)` descriptor, with or without checksum
+     * - A two-line external/internal pair such as Green exports
+     *
+     * Returns a checksum-free descriptor string, canonicalized to `<0;1>` for pairs.
+     */
+    fun normalizeLiquidDescriptorInput(input: String): String? {
+        val descriptors =
+            input.lineSequence()
+                .map(::stripDescriptorChecksum)
+                .map(String::trim)
+                .filter(String::isNotBlank)
+                .toList()
+
+        if (descriptors.isEmpty()) return null
+        if (descriptors.size == 1) {
+            val descriptor = descriptors.single()
+            return descriptor.takeIf(::isLiquidCtDescriptor)
+        }
+        if (descriptors.size != 2) return null
+
+        return combineLiquidDescriptorPair(descriptors[0], descriptors[1])
+    }
+
+    /**
+     * Combine a Green-style external/change Liquid descriptor pair into a single
+     * BIP389-style multipath descriptor.
+     */
+    fun combineLiquidDescriptorPair(firstDescriptor: String, secondDescriptor: String): String? {
+        val first = stripDescriptorChecksum(firstDescriptor)
+        val second = stripDescriptorChecksum(secondDescriptor)
+        if (!isLiquidCtDescriptor(first) || !isLiquidCtDescriptor(second)) return null
+
+        val firstMatch = liquidDescriptorBranchRegex.find(first) ?: return null
+        val secondMatch = liquidDescriptorBranchRegex.find(second) ?: return null
+        val firstBranch = firstMatch.groupValues[1]
+        val secondBranch = secondMatch.groupValues[1]
+        if (firstBranch == secondBranch) return null
+
+        val firstShape = first.replaceRange(firstMatch.range, "/<?>/*${firstMatch.groupValues[2]}")
+        val secondShape = second.replaceRange(secondMatch.range, "/<?>/*${secondMatch.groupValues[2]}")
+        if (firstShape != secondShape) return null
+
+        val externalDescriptor = if (firstBranch == "0") first else second
+        val externalMatch = if (firstBranch == "0") firstMatch else secondMatch
+        return externalDescriptor.replaceRange(externalMatch.range, "/<0;1>/*${externalMatch.groupValues[2]}")
+    }
+
+    /**
+     * Expand a stored Liquid CT descriptor into the dual external/internal descriptor format
+     * used by wallets like Blockstream Green for display/export purposes.
+     *
+     * If the descriptor is already a single-branch CT descriptor, it is returned unchanged.
+     * Multipath `<0;1>` and `<1;0>` descriptors are expanded into two lines.
+     */
+    fun formatLiquidDescriptorForDisplay(descriptor: String): String {
+        val trimmed = stripDescriptorChecksum(descriptor)
+        if (!isLiquidCtDescriptor(trimmed)) return descriptor.trim()
+
+        return when {
+            trimmed.contains("<0;1>") ->
+                listOf(
+                    trimmed.replace("<0;1>", "0"),
+                    trimmed.replace("<0;1>", "1"),
+                ).joinToString("\n")
+            trimmed.contains("<1;0>") ->
+                listOf(
+                    trimmed.replace("<1;0>", "0"),
+                    trimmed.replace("<1;0>", "1"),
+                ).joinToString("\n")
+            else -> trimmed
+        }
+    }
+
+    private fun isLiquidCtDescriptor(descriptor: String): Boolean {
+        val trimmed = descriptor.trim()
+        return trimmed.lowercase().startsWith("ct(") && trimmed.endsWith(")")
+    }
+
+    /**
      * Check if a descriptor string is a full output descriptor
      * (starts with pkh(, wpkh(, or tr().
      */
@@ -540,6 +636,15 @@ object BitcoinUtils {
         }
     }
 
+    private fun compactSizeLength(value: Int): Int {
+        require(value >= 0) { "CompactSize value must be non-negative" }
+        return when {
+            value <= 252 -> 1
+            value <= 0xFFFF -> 3
+            else -> 5
+        }
+    }
+
     /**
      * Estimate signed transaction vsize from known components when
      * actual signing is not possible (watch-only wallets).
@@ -547,19 +652,22 @@ object BitcoinUtils {
      * @param numInputs number of transaction inputs
      * @param inputWeightWU weight units per input (from inputWeightWU() or BDK maxWeightToSatisfy)
      * @param outputScriptLengths list of scriptPubKey byte lengths for each output
+     * @param hasWitness true when the transaction contains at least one segwit/taproot input
      * @return estimated vsize (ceil of weight/4)
      */
     fun estimateVsizeFromComponents(
         numInputs: Int,
         inputWeightWU: Long,
         outputScriptLengths: List<Int>,
+        hasWitness: Boolean,
     ): Double {
-        val isSegwit = inputWeightWU < 500L
-        val overheadWU = if (isSegwit) 42L else 40L
+        val overheadBytes =
+            4 + compactSizeLength(numInputs) + compactSizeLength(outputScriptLengths.size) + 4
+        val overheadWU = (overheadBytes * 4L) + if (hasWitness) 2L else 0L
 
         var totalOutputWU = 0L
         for (scriptLen in outputScriptLengths) {
-            totalOutputWU += (9L + scriptLen) * 4L
+            totalOutputWU += (8L + compactSizeLength(scriptLen) + scriptLen) * 4L
         }
 
         val totalWU = overheadWU + (numInputs.toLong() * inputWeightWU) + totalOutputWU

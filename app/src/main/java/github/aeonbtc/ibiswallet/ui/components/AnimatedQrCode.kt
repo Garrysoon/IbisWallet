@@ -37,20 +37,26 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.sparrowwallet.hummingbird.UREncoder
 import com.sparrowwallet.hummingbird.registry.CryptoPSBT
+import github.aeonbtc.ibiswallet.data.local.SecureStorage
 import github.aeonbtc.ibiswallet.ui.theme.TextSecondary
 import github.aeonbtc.ibiswallet.util.generateQrBitmap
 import kotlinx.coroutines.delay
 
 /**
  * Animated QR code component that displays BC-UR encoded data as cycling QR frames.
- * Used for exporting PSBTs to hardware wallets via animated QR codes.
+ * Used for exporting PSBTs/PSETs to hardware wallets via animated QR codes.
  *
- * For small PSBTs that fit in a single QR frame, displays a static QR code.
- * For larger PSBTs, creates fountain-coded UR parts and cycles through them.
+ * Uses `ur:crypto-psbt` framing which carries both Bitcoin PSBT and Liquid PSET bytes
+ * (Jade and other hardware wallets accept both through the same UR type).
  *
- * Optimized for hardware wallet cameras (SeedSigner, Coldcard, Keystone):
- * - 250ms frame delay (~4 FPS) for slow cameras
- * - 120-byte fragments for lower QR density
+ * For small payloads that fit in a single QR frame, displays a static QR code.
+ * For larger payloads, precomputes a stable UR cycle and loops through it.
+ *
+ * Optimized for hardware wallet cameras (SeedSigner, Coldcard, Keystone, Jade):
+ * - Slower cadence for Jade and other lower-FPS cameras
+ * - Moderate adaptive fragment sizing to balance frame count vs QR density
+ * - Stable ordered part loop instead of an aggressive changing stream
+ * - Optional pause/step controls for scanners that miss fast transitions
  * - Explicit error correction level L (fountain codes handle redundancy)
  * - Thick white border for contrast
  * - Screen brightness boost and keep-screen-on
@@ -58,45 +64,57 @@ import kotlinx.coroutines.delay
  */
 @Composable
 fun AnimatedQrCode(
-    psbtBase64: String,
+    dataBase64: String,
     modifier: Modifier = Modifier,
     qrSize: Dp = 280.dp,
-    frameDelayMs: Long = 250L, // ~4 FPS, optimized for hardware wallet cameras
+    density: SecureStorage.QrDensity = SecureStorage.QrDensity.MEDIUM,
+    brightness: Float? = null,
+    playbackSpeed: SecureStorage.QrPlaybackSpeed = SecureStorage.QrPlaybackSpeed.MEDIUM,
 ) {
     val context = LocalContext.current
     var showEnlarged by remember { mutableStateOf(false) }
 
-    val psbtBytes =
-        remember(psbtBase64) {
-            android.util.Base64.decode(psbtBase64, android.util.Base64.DEFAULT)
+    val dataBytes =
+        remember(dataBase64) {
+            android.util.Base64.decode(dataBase64, android.util.Base64.DEFAULT)
         }
 
-    // Create the UR encoder with fountain codes
-    // 120-byte max fragment keeps QR density low for slow cameras
-    val encoder =
-        remember(psbtBytes) {
-            val cryptoPsbt = CryptoPSBT(psbtBytes)
+    val fragmentSize =
+        remember(dataBytes, density) {
+            resolveUrFragmentSize(
+                payloadSize = dataBytes.size,
+                density = density,
+            )
+        }
+
+    // CryptoPSBT wraps arbitrary bytes as ur:crypto-psbt — works for both PSBT and PSET.
+    // Use denser fragments for large payloads to avoid impractical 100+ part animations.
+    val qrParts =
+        remember(dataBytes, fragmentSize) {
+            val cryptoPsbt = CryptoPSBT(dataBytes)
             val ur = cryptoPsbt.toUR()
-            UREncoder(ur, 120, 10, 0)
+            val encoder = UREncoder(ur, fragmentSize, 10, 0)
+            List(encoder.seqLen) { encoder.nextPart() }
         }
-
-    val totalParts =
-        remember(encoder) {
-            encoder.seqLen
+    val totalParts = qrParts.size
+    val effectiveFrameDelayMs =
+        remember(totalParts, playbackSpeed) {
+            resolveUrFrameDelay(
+                totalParts = totalParts,
+                playbackSpeed = playbackSpeed,
+            )
         }
-
-    var currentPart by remember { mutableStateOf(encoder.nextPart()) }
-    var partIndex by remember { mutableIntStateOf(1) }
+    var partIndex by remember(qrParts) { mutableIntStateOf(0) }
 
     // Only animate if there are multiple parts
     val isAnimated = totalParts > 1
+    val currentPart = qrParts[partIndex]
 
     if (isAnimated) {
-        LaunchedEffect(encoder) {
+        LaunchedEffect(qrParts, effectiveFrameDelayMs) {
             while (true) {
-                delay(frameDelayMs)
-                currentPart = encoder.nextPart()
-                partIndex = ((partIndex) % totalParts) + 1
+                delay(effectiveFrameDelayMs)
+                partIndex = (partIndex + 1) % totalParts
             }
         }
     }
@@ -106,15 +124,17 @@ fun AnimatedQrCode(
             generateQrBitmap(currentPart.uppercase())
         }
 
-    // Boost screen brightness and keep screen on while QR is displayed
-    DisposableEffect(Unit) {
+    // Keep the screen on while QR is displayed and apply the user-selected brightness if provided.
+    DisposableEffect(brightness) {
         val activity = context as? ComponentActivity
         val window = activity?.window
         val originalBrightness = window?.attributes?.screenBrightness ?: -1f
 
         window?.let {
             val params = it.attributes
-            params.screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_FULL
+            brightness?.let { selectedBrightness ->
+                params.screenBrightness = selectedBrightness.coerceIn(0f, 1f)
+            }
             it.attributes = params
             it.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         }
@@ -169,7 +189,7 @@ fun AnimatedQrCode(
                     if (isAnimated) {
                         Spacer(modifier = Modifier.height(12.dp))
                         Text(
-                            text = "Part $partIndex of $totalParts",
+                            text = "Part ${partIndex + 1} of $totalParts",
                             style = MaterialTheme.typography.bodyMedium,
                             color = TextSecondary,
                         )
@@ -215,7 +235,7 @@ fun AnimatedQrCode(
         if (isAnimated) {
             Spacer(modifier = Modifier.height(8.dp))
             Text(
-                text = "Part $partIndex of $totalParts",
+                text = "Part ${partIndex + 1} of $totalParts",
                 style = MaterialTheme.typography.bodySmall,
                 color = TextSecondary,
             )
@@ -228,6 +248,55 @@ fun AnimatedQrCode(
             color = TextSecondary,
         )
     }
+}
+
+private fun resolveUrFragmentSize(
+    payloadSize: Int,
+    density: SecureStorage.QrDensity,
+): Int {
+    return when (density) {
+        SecureStorage.QrDensity.LOW ->
+            when {
+                payloadSize >= 12_000 -> 180
+                payloadSize >= 6_000 -> 140
+                payloadSize >= 2_000 -> 120
+                else -> 100
+            }
+
+        SecureStorage.QrDensity.MEDIUM ->
+            when {
+                payloadSize >= 12_000 -> 240
+                payloadSize >= 6_000 -> 220
+                payloadSize >= 2_000 -> 180
+                else -> 140
+            }
+
+        SecureStorage.QrDensity.HIGH ->
+            when {
+                payloadSize >= 12_000 -> 300
+                payloadSize >= 6_000 -> 260
+                payloadSize >= 2_000 -> 220
+                else -> 180
+            }
+    }
+}
+
+private fun resolveUrFrameDelay(
+    totalParts: Int,
+    playbackSpeed: SecureStorage.QrPlaybackSpeed,
+): Long {
+    val baseDelay =
+        when {
+            totalParts >= 60 -> 1200L
+            totalParts >= 20 -> 900L
+            else -> 650L
+        }
+
+    return when (playbackSpeed) {
+        SecureStorage.QrPlaybackSpeed.SLOW -> (baseDelay * 1.25f).toLong()
+        SecureStorage.QrPlaybackSpeed.MEDIUM -> baseDelay
+        SecureStorage.QrPlaybackSpeed.FAST -> (baseDelay * 0.75f).toLong()
+    }.coerceAtLeast(350L)
 }
 
 /**
@@ -283,26 +352,15 @@ fun AnimatedQrCodeBytes(
             generateQrBitmap(currentPart)
         }
 
-    // Boost screen brightness while QR is displayed
+    // Keep the screen on while QR is displayed. Labels do not override brightness.
     DisposableEffect(Unit) {
         val activity = context as? ComponentActivity
         val window = activity?.window
-        val originalBrightness = window?.attributes?.screenBrightness ?: -1f
 
-        window?.let {
-            val params = it.attributes
-            params.screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_FULL
-            it.attributes = params
-            it.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        }
+        window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         onDispose {
-            window?.let {
-                val params = it.attributes
-                params.screenBrightness = originalBrightness
-                it.attributes = params
-                it.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-            }
+            window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         }
     }
 

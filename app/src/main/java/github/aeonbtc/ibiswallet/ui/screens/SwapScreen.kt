@@ -82,6 +82,7 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.core.net.toUri
 import github.aeonbtc.ibiswallet.data.local.SecureStorage
 import github.aeonbtc.ibiswallet.data.model.FeeEstimationResult
+import github.aeonbtc.ibiswallet.data.model.LiquidAsset
 import github.aeonbtc.ibiswallet.data.model.PendingSwapPhase
 import github.aeonbtc.ibiswallet.data.model.PendingSwapSession
 import github.aeonbtc.ibiswallet.data.model.SwapDirection
@@ -89,9 +90,11 @@ import github.aeonbtc.ibiswallet.data.model.SwapLimits
 import github.aeonbtc.ibiswallet.data.model.SwapService
 import github.aeonbtc.ibiswallet.data.model.SwapState
 import github.aeonbtc.ibiswallet.data.model.UtxoInfo
+import github.aeonbtc.ibiswallet.ui.components.AmountLabel
 import github.aeonbtc.ibiswallet.ui.components.FeeRateOption
 import github.aeonbtc.ibiswallet.ui.components.FeeRateSection
 import github.aeonbtc.ibiswallet.ui.components.IbisButton
+import github.aeonbtc.ibiswallet.ui.components.ScrollableDialogSurface
 import github.aeonbtc.ibiswallet.ui.components.formatFeeRate
 import github.aeonbtc.ibiswallet.ui.theme.AccentBlue
 import github.aeonbtc.ibiswallet.ui.theme.BitcoinOrange
@@ -138,6 +141,7 @@ fun SwapScreen(
     liquidUtxos: List<UtxoInfo> = emptyList(),
     spendUnconfirmed: Boolean = false,
     btcPrice: Double? = null,
+    fiatCurrency: String = SecureStorage.DEFAULT_PRICE_CURRENCY,
     privacyMode: Boolean = false,
     denomination: String = SecureStorage.DENOMINATION_BTC,
     feeEstimationState: FeeEstimationResult = FeeEstimationResult.Disabled,
@@ -146,11 +150,12 @@ fun SwapScreen(
     onFetchLimits: (SwapDirection, SwapService) -> Unit = { _, _ -> },
     onPreferredServiceChange: (SwapService) -> Unit = {},
     onRefreshBitcoinFees: () -> Unit = {},
-    onPrepareSwapReview: (SwapDirection, Long, SwapService, List<UtxoInfo>?, String?, Boolean, Double?) -> Unit = { _, _, _, _, _, _, _ -> },
+    onPrepareSwapReview: (SwapDirection, Long, SwapService, List<UtxoInfo>?, String?, String?, Boolean, Double?) -> Unit = { _, _, _, _, _, _, _, _ -> },
     onExecuteSwap: (PendingSwapSession, List<UtxoInfo>?) -> Unit = { _, _ -> },
     onCancelPreparedReview: () -> Unit = {},
     onResetSwap: () -> Unit = {},
     onDismissFailedSwap: () -> Unit = {},
+    onToggleDenomination: () -> Unit = {},
 ) {
     val useSats = denomination == SecureStorage.DENOMINATION_SATS
     val unit = if (useSats) "sats" else "BTC"
@@ -168,6 +173,8 @@ fun SwapScreen(
     var amountInput by rememberSaveable { mutableStateOf("") }
     var isUsdMode by remember { mutableStateOf(false) }
     var isMaxMode by rememberSaveable { mutableStateOf(false) }
+    var showLabelField by rememberSaveable { mutableStateOf(false) }
+    var labelText by rememberSaveable { mutableStateOf("") }
     var showAdvancedOptions by rememberSaveable { mutableStateOf(false) }
     val customBitcoinDestinationState = rememberSaveable { mutableStateOf("") }
     val customLiquidDestinationState = rememberSaveable { mutableStateOf("") }
@@ -199,6 +206,8 @@ fun SwapScreen(
         amountInput = ""
         isUsdMode = false
         isMaxMode = false
+        showLabelField = false
+        labelText = ""
         showAdvancedOptions = false
         customBitcoinDestinationState.value = ""
         customLiquidDestinationState.value = ""
@@ -220,6 +229,7 @@ fun SwapScreen(
         is SwapState.ReviewReady -> swapState.swap
         else -> null
     }
+    val txLabel = labelText.trim().takeIf { showLabelField && it.isNotBlank() }
     val isSwapLocked =
         swapState is SwapState.FetchingQuote ||
             swapState is SwapState.PreparingReview ||
@@ -267,7 +277,12 @@ fun SwapScreen(
     val fromLayerLabel = if (isPegIn) "Layer 1" else "Layer 2"
     val toLayerLabel = if (isPegIn) "Layer 2" else "Layer 1"
     val spendableBitcoinUtxos = remember(btcUtxos) { btcUtxos.filter { !it.isFrozen } }
-    val spendableLiquidUtxos = remember(liquidUtxos) { liquidUtxos.filter { !it.isFrozen } }
+    val spendableLiquidUtxos =
+        remember(liquidUtxos) {
+            liquidUtxos.filter { utxo ->
+                !utxo.isFrozen && (utxo.assetId == null || LiquidAsset.isPolicyAsset(utxo.assetId))
+            }
+        }
     val selectedFundingUtxos = if (isPegIn) selectedBitcoinUtxos else selectedLiquidUtxos
     val selectableFundingUtxos = if (isPegIn) spendableBitcoinUtxos else spendableLiquidUtxos
     val availableBalance =
@@ -648,7 +663,7 @@ fun SwapScreen(
                                 } else {
                                     TextSecondary.copy(alpha = 0.5f)
                                 },
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
                         )
                     }
                 }
@@ -760,14 +775,11 @@ fun SwapScreen(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text(
-                        text = when {
-                            isUsdMode -> "Amount (USD)"
-                            useSats -> "Amount (sats)"
-                            else -> "Amount (BTC)"
-                        },
-                        style = MaterialTheme.typography.labelLarge,
-                        color = TextSecondary,
+                    AmountLabel(
+                        useSats = useSats,
+                        isUsdMode = isUsdMode,
+                        fiatCurrency = fiatCurrency,
+                        onToggleDenomination = onToggleDenomination,
                     )
                     if (btcPrice != null && btcPrice > 0) {
                         Card(
@@ -810,10 +822,10 @@ fun SwapScreen(
                             border = BorderStroke(1.dp, if (isUsdMode) LiquidTeal else BorderColor),
                         ) {
                             Text(
-                                text = "USD",
+                                text = fiatCurrency,
                                 style = MaterialTheme.typography.labelMedium,
                                 color = if (isUsdMode) LiquidTeal else TextSecondary,
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
                             )
                         }
                     }
@@ -829,7 +841,7 @@ fun SwapScreen(
                             "≈ ${formatAmt(amountSats, useSats)} $unit"
                         } else {
                             val usdValue = (amountSats / 100_000_000.0) * btcPrice
-                            "≈ $${String.format(Locale.US, "%,.2f", usdValue)}"
+                            "≈ ${formatFiat(usdValue, fiatCurrency)}"
                         }
                     } else {
                         null
@@ -871,7 +883,7 @@ fun SwapScreen(
                         )
                     },
                     leadingIcon = if (isUsdMode) {
-                        { Text("$", color = TextSecondary) }
+                        { Text(fiatCurrency, color = TextSecondary) }
                     } else {
                         null
                     },
@@ -923,7 +935,7 @@ fun SwapScreen(
                     if (btcPrice != null && btcPrice > 0 && !privacyMode) {
                         val availableUsd = sourceAvailableBalance * btcPrice / 100_000_000.0
                         Text(
-                            text = " · $${String.format(Locale.US, "%,.2f", availableUsd)}",
+                            text = " · ${formatFiat(availableUsd, fiatCurrency)}",
                             style = MaterialTheme.typography.bodySmall,
                             color = TextSecondary.copy(alpha = 0.7f),
                         )
@@ -966,7 +978,66 @@ fun SwapScreen(
                             } else {
                                 TextSecondary.copy(alpha = 0.5f)
                             },
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                        )
+                    }
+                }
+
+                Row(
+                    modifier =
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(top = 8.dp),
+                    horizontalArrangement = Arrangement.Start,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Card(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable(enabled = !isSwapLocked) { showLabelField = !showLabelField },
+                        shape = RoundedCornerShape(8.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = if (showLabelField || labelText.isNotBlank()) {
+                                LiquidTeal.copy(alpha = 0.15f)
+                            } else {
+                                DarkSurface
+                            },
+                        ),
+                        border = BorderStroke(1.dp, if (showLabelField || labelText.isNotBlank()) LiquidTeal else BorderColor),
+                    ) {
+                        Text(
+                            text = "Label",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (showLabelField || labelText.isNotBlank()) LiquidTeal else TextSecondary,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                        )
+                    }
+
+                    if (showLabelField) {
+                        OutlinedTextField(
+                            value = labelText,
+                            onValueChange = { labelText = it },
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(start = 8.dp),
+                            placeholder = {
+                                Text(
+                                    "e.g. Wallet rebalance",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = TextSecondary.copy(alpha = 0.5f),
+                                )
+                            },
+                            singleLine = true,
+                            shape = RoundedCornerShape(8.dp),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = LiquidTeal,
+                                unfocusedBorderColor = BorderColor,
+                                focusedTextColor = TextPrimary,
+                                unfocusedTextColor = TextPrimary,
+                                cursorColor = LiquidTeal,
+                            ),
+                            enabled = !isSwapLocked,
+                            textStyle = MaterialTheme.typography.bodyMedium,
                         )
                     }
                 }
@@ -1257,6 +1328,7 @@ fun SwapScreen(
                                 selectedService,
                                 selectedFundingUtxos.toList().takeIf { it.isNotEmpty() },
                                 effectiveCustomDestination.trim().takeIf { it.isNotBlank() },
+                                txLabel,
                                 isMaxMode,
                                 fundingFeeRateOverride,
                             )
@@ -1538,6 +1610,7 @@ fun SwapScreen(
             SwapReviewDialog(
                 pendingSwap = activeReviewSwap,
                 btcPrice = btcPrice,
+                fiatCurrency = fiatCurrency,
                 privacyMode = privacyMode,
                 useSats = useSats,
                 unit = unit,
@@ -1825,6 +1898,9 @@ private fun PendingSwapRow(
                     } else {
                         PendingSwapDetailRow(idLabel, pendingSwap.swapId)
                     }
+                    pendingSwap.label?.takeIf { it.isNotBlank() }?.let {
+                        PendingSwapDetailRow("Label", it)
+                    }
                     PendingSwapDetailRow("Deposit Address", pendingSwap.depositAddress)
                     pendingSwap.receiveAddress?.let { PendingSwapDetailRow("Receive Address", it) }
                     pendingSwap.refundAddress?.let { PendingSwapDetailRow("Refund Address", it) }
@@ -2011,7 +2087,7 @@ private fun PendingSwapDetailRowWithAction(
                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
             ) {
                 Text(
-                    text = "Show Key",
+                    text = "Rescue Key",
                     style = MaterialTheme.typography.labelMedium,
                     color = TextPrimary,
                 )
@@ -2373,7 +2449,9 @@ private fun resolveSwapFundingSelection(
         if (pendingSwap.direction == SwapDirection.BTC_TO_LBTC) {
             btcUtxos
         } else {
-            liquidUtxos
+            liquidUtxos.filter { utxo ->
+                utxo.assetId == null || LiquidAsset.isPolicyAsset(utxo.assetId)
+            }
         }
     if (currentSelection.isNotEmpty()) {
         return selectCoinControlUtxos(
@@ -2807,6 +2885,7 @@ private fun AddressRow(
 private fun SwapReviewDialog(
     pendingSwap: PendingSwapSession,
     btcPrice: Double?,
+    fiatCurrency: String,
     privacyMode: Boolean,
     useSats: Boolean = true,
     unit: String = "sats",
@@ -2876,12 +2955,13 @@ private fun SwapReviewDialog(
             estimated.totalFee
         }
     val collapsedFeeText = if (privacyMode) hidden else fmt(totalFeeSats)
-    val collapsedFeeUsdText = swapReviewUsdText(totalFeeSats, btcPrice, privacyMode)
+    val collapsedFeeUsdText = swapReviewUsdText(totalFeeSats, btcPrice, fiatCurrency, privacyMode)
     val totalFeeText = if (privacyMode) hidden else fmt(totalFeeSats)
-    val totalFeeUsdText = swapReviewUsdText(totalFeeSats, btcPrice, privacyMode)
+    val totalFeeUsdText = swapReviewUsdText(totalFeeSats, btcPrice, fiatCurrency, privacyMode)
     var showSwapIdCopied by remember { mutableStateOf(false) }
     var addressesExpanded by rememberSaveable(orderId) { mutableStateOf(false) }
     var feesExpanded by rememberSaveable(orderId) { mutableStateOf(false) }
+    val label = pendingSwap.label?.takeIf { it.isNotBlank() }
 
     LaunchedEffect(showSwapIdCopied, orderId) {
         if (!showSwapIdCopied) return@LaunchedEffect
@@ -2889,23 +2969,60 @@ private fun SwapReviewDialog(
         showSwapIdCopied = false
     }
 
-    Dialog(
+    ScrollableDialogSurface(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false),
-    ) {
-        Card(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            shape = RoundedCornerShape(20.dp),
-            colors = CardDefaults.cardColors(containerColor = DarkCard),
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .verticalScroll(rememberScrollState())
-                    .padding(20.dp),
+        containerColor = DarkCard,
+        contentPadding = PaddingValues(20.dp),
+        actions = {
+            Button(
+                onClick = {
+                    onConfirm()
+                },
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .height(50.dp),
+                enabled = !isExecuting,
+                shape = RoundedCornerShape(10.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = LiquidTeal),
             ) {
+                if (isExecuting) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp,
+                        color = TextPrimary,
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                }
+                Text(if (isExecuting) "Sending Swap..." else "Confirm Swap", color = TextPrimary)
+            }
+
+            if (isExecuting && !executionStatus.isNullOrBlank()) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = executionStatus,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextSecondary,
+                    modifier = Modifier.fillMaxWidth(),
+                    textAlign = TextAlign.Center,
+                )
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            IbisButton(
+                onClick = onDismiss,
+                enabled = !isExecuting,
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .height(48.dp),
+            ) {
+                Text("Cancel", style = MaterialTheme.typography.titleMedium)
+            }
+        },
+    ) {
                 Text(
                     text = "Swap Overview",
                     style = MaterialTheme.typography.titleLarge,
@@ -2956,7 +3073,7 @@ private fun SwapReviewDialog(
                             modifier = Modifier.fillMaxWidth(),
                             textAlign = TextAlign.Center,
                         )
-                        swapReviewUsdText(pendingSwap.sendAmount, btcPrice, privacyMode)?.let { usdText ->
+                        swapReviewUsdText(pendingSwap.sendAmount, btcPrice, fiatCurrency, privacyMode)?.let { usdText ->
                             Spacer(modifier = Modifier.height(2.dp))
                             Text(
                                 text = usdText,
@@ -3009,7 +3126,7 @@ private fun SwapReviewDialog(
                             modifier = Modifier.fillMaxWidth(),
                             textAlign = TextAlign.Center,
                         )
-                        swapReviewUsdText(estimated.receiveAmount, btcPrice, privacyMode)?.let { usdText ->
+                        swapReviewUsdText(estimated.receiveAmount, btcPrice, fiatCurrency, privacyMode)?.let { usdText ->
                             Spacer(modifier = Modifier.height(2.dp))
                             Text(
                                 text = usdText,
@@ -3066,6 +3183,23 @@ private fun SwapReviewDialog(
                                 color = LiquidTeal,
                             )
                         }
+
+                        label?.let {
+                            Spacer(modifier = Modifier.height(14.dp))
+                            HorizontalDivider(color = BorderColor.copy(alpha = 0.3f))
+                            Spacer(modifier = Modifier.height(14.dp))
+                            Text(
+                                text = "Label",
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = TextSecondary,
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                text = it,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = TextPrimary,
+                            )
+                        }
                     }
                 }
 
@@ -3107,14 +3241,14 @@ private fun SwapReviewDialog(
                                     .padding(top = 12.dp),
                             ) {
                                 AddressRow(
-                                    label = "Swap deposit address",
+                                    label = "Swap address",
                                     value = pendingSwap.depositAddress,
                                     context = context,
                                 )
                                 pendingSwap.receiveAddress?.takeIf { it.isNotBlank() }?.let { receiveAddress ->
                                     Spacer(modifier = Modifier.height(10.dp))
                                     AddressRow(
-                                        label = "Your receive address",
+                                        label = "Receive address",
                                         value = receiveAddress,
                                         context = context,
                                     )
@@ -3122,7 +3256,7 @@ private fun SwapReviewDialog(
                                 pendingSwap.refundAddress?.takeIf { it.isNotBlank() }?.let { refundAddress ->
                                     Spacer(modifier = Modifier.height(10.dp))
                                     AddressRow(
-                                        label = "Your refund address",
+                                        label = "Refund address",
                                         value = refundAddress,
                                         context = context,
                                     )
@@ -3197,7 +3331,7 @@ private fun SwapReviewDialog(
                                         line.label,
                                         if (privacyMode) hidden else fmt(line.value),
                                         subtext = if (privacyMode) null else line.subtext,
-                                        valueSubtext = swapReviewUsdText(line.value, btcPrice, privacyMode),
+                                        valueSubtext = swapReviewUsdText(line.value, btcPrice, fiatCurrency, privacyMode),
                                     )
                                 }
                                 HorizontalDivider(
@@ -3239,53 +3373,6 @@ private fun SwapReviewDialog(
                 }
 
                 Spacer(modifier = Modifier.height(12.dp))
-
-                Button(
-                    onClick = {
-                        onConfirm()
-                    },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(50.dp),
-                    enabled = !isExecuting,
-                    shape = RoundedCornerShape(10.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = LiquidTeal),
-                ) {
-                    if (isExecuting) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(18.dp),
-                            strokeWidth = 2.dp,
-                            color = TextPrimary,
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                    }
-                    Text(if (isExecuting) "Sending Swap..." else "Confirm Swap", color = TextPrimary)
-                }
-
-                if (isExecuting && !executionStatus.isNullOrBlank()) {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = executionStatus,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = TextSecondary,
-                        modifier = Modifier.fillMaxWidth(),
-                        textAlign = TextAlign.Center,
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                IbisButton(
-                    onClick = onDismiss,
-                    enabled = !isExecuting,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(48.dp),
-                ) {
-                    Text("Cancel", style = MaterialTheme.typography.titleMedium)
-                }
-            }
-        }
     }
 }
 
@@ -3397,12 +3484,13 @@ private fun formatAmt(sats: Long, useSats: Boolean): String {
 private fun swapReviewUsdText(
     sats: Long,
     btcPrice: Double?,
+    fiatCurrency: String,
     privacyMode: Boolean,
 ): String? {
     if (privacyMode || btcPrice == null || btcPrice <= 0.0) {
         return null
     }
-    return NumberFormat.getCurrencyInstance(Locale.US).format(sats.toDouble() * btcPrice / 100_000_000.0)
+    return formatFiat(sats.toDouble() * btcPrice / 100_000_000.0, fiatCurrency)
 }
 
 private fun formatBtcInput(sats: Long): String {

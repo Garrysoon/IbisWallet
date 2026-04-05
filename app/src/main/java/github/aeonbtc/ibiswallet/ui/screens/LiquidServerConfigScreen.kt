@@ -7,10 +7,12 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -29,10 +31,10 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Dns
+import androidx.compose.material.icons.filled.DragIndicator
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Storage
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -52,23 +54,32 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.toMutableStateList
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
+import kotlin.math.roundToInt
 import github.aeonbtc.ibiswallet.R
 import github.aeonbtc.ibiswallet.data.model.LiquidElectrumConfig
 import github.aeonbtc.ibiswallet.tor.TorState
+import github.aeonbtc.ibiswallet.ui.components.ScrollableAlertDialog
 import github.aeonbtc.ibiswallet.tor.TorStatus
 import github.aeonbtc.ibiswallet.ui.components.QrScannerDialog
 import github.aeonbtc.ibiswallet.ui.components.SquareToggle
-import github.aeonbtc.ibiswallet.ui.components.SquareToggleGreen
 import github.aeonbtc.ibiswallet.ui.theme.BitcoinOrange
 import github.aeonbtc.ibiswallet.ui.theme.BorderColor
 import github.aeonbtc.ibiswallet.ui.theme.DarkBackground
@@ -103,10 +114,9 @@ fun LiquidServerConfigScreen(
     onSaveServer: (LiquidElectrumConfig) -> LiquidElectrumConfig = { it },
     onDeleteServer: (String) -> Unit = {},
     onConnectToServer: (String) -> Unit = {},
-    // Tor support
+    // Tor status
     torState: TorState = TorState(),
     isTorEnabled: Boolean = false,
-    onTorEnabledChange: (Boolean) -> Unit = {},
     isActiveServerOnion: Boolean = false,
     // Disconnect support
     onDisconnect: () -> Unit = {},
@@ -114,6 +124,8 @@ fun LiquidServerConfigScreen(
     // Auto-switch server on disconnect
     autoSwitchServer: Boolean = false,
     onAutoSwitchServerChange: (Boolean) -> Unit = {},
+    // Reorder servers
+    onReorderServers: (List<String>) -> Unit = {},
 ) {
     var serverUrl by remember { mutableStateOf("") }
     var serverPort by remember { mutableStateOf("995") }
@@ -156,7 +168,7 @@ fun LiquidServerConfigScreen(
 
     // Delete confirmation dialog
     serverToDelete?.let { server ->
-        AlertDialog(
+        ScrollableAlertDialog(
             onDismissRequest = {
                 @Suppress("AssignedValueIsNeverRead")
                 serverToDelete = null
@@ -260,7 +272,6 @@ fun LiquidServerConfigScreen(
             LiquidTorStatusCard(
                 torState = torState,
                 isTorEnabled = isTorEnabled,
-                onTorEnabledChange = onTorEnabledChange,
                 isActiveServerOnion = isActiveServerOnion,
             )
 
@@ -268,6 +279,38 @@ fun LiquidServerConfigScreen(
 
             // 4. Saved Servers Section
             if (savedServers.isNotEmpty()) {
+                val reorderableServers = remember(savedServers) { savedServers.toMutableStateList() }
+                val showDragHandles = reorderableServers.size > 1
+                val density = LocalDensity.current
+                val itemHeightPx = with(density) { 56.dp.toPx() }
+                val spacingPx = with(density) { 12.dp.toPx() }
+                var draggedIndex by remember { mutableStateOf<Int?>(null) }
+                var dragOffsetY by remember { mutableFloatStateOf(0f) }
+                val measuredHeights = remember { mutableMapOf<Int, Float>() }
+
+                fun calcTargetIndex(fromIndex: Int, offsetY: Float): Int {
+                    val count = reorderableServers.size
+                    if (count <= 1) return fromIndex
+                    var accumulated = 0f
+                    var target = fromIndex
+                    if (offsetY > 0) {
+                        for (i in fromIndex until count - 1) {
+                            val nextSlot = (measuredHeights[i + 1] ?: itemHeightPx) / 2f +
+                                (measuredHeights[i] ?: itemHeightPx) / 2f + spacingPx
+                            accumulated += nextSlot
+                            if (offsetY > accumulated - nextSlot / 2f) target = i + 1 else break
+                        }
+                    } else {
+                        for (i in fromIndex downTo 1) {
+                            val prevSlot = (measuredHeights[i - 1] ?: itemHeightPx) / 2f +
+                                (measuredHeights[i] ?: itemHeightPx) / 2f + spacingPx
+                            accumulated -= prevSlot
+                            if (offsetY < accumulated + prevSlot / 2f) target = i - 1 else break
+                        }
+                    }
+                    return target.coerceIn(0, count - 1)
+                }
+
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(12.dp),
@@ -276,7 +319,6 @@ fun LiquidServerConfigScreen(
                     Column(
                         modifier = Modifier.fillMaxWidth(),
                     ) {
-                        // Header
                         Row(
                             modifier =
                                 Modifier
@@ -298,7 +340,6 @@ fun LiquidServerConfigScreen(
                             )
                         }
 
-                        // Server list
                         Column(
                             modifier =
                                 Modifier
@@ -309,27 +350,133 @@ fun LiquidServerConfigScreen(
                             HorizontalDivider(color = BorderColor)
                             Spacer(modifier = Modifier.height(12.dp))
 
-                            savedServers.forEach { server ->
-                                val isActive = server.id == activeServerId
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .then(
+                                        if (showDragHandles) {
+                                            Modifier.pointerInput(reorderableServers.size) {
+                                                detectDragGesturesAfterLongPress(
+                                                    onDragStart = { offset ->
+                                                        var accumulated = 0f
+                                                        for (i in reorderableServers.indices) {
+                                                            val h = measuredHeights[i] ?: itemHeightPx
+                                                            if (offset.y < accumulated + h + spacingPx) {
+                                                                draggedIndex = i
+                                                                dragOffsetY = 0f
+                                                                break
+                                                            }
+                                                            accumulated += h + spacingPx
+                                                        }
+                                                    },
+                                                    onDrag = { change, dragAmount ->
+                                                        change.consume()
+                                                        val idx = draggedIndex
+                                                            ?: return@detectDragGesturesAfterLongPress
+                                                        val maxUp = -(0 until idx).sumOf {
+                                                            ((measuredHeights[it] ?: itemHeightPx) + spacingPx).toDouble()
+                                                        }.toFloat()
+                                                        val maxDown = (idx + 1 until reorderableServers.size).sumOf {
+                                                            ((measuredHeights[it] ?: itemHeightPx) + spacingPx).toDouble()
+                                                        }.toFloat()
+                                                        dragOffsetY = (dragOffsetY + dragAmount.y)
+                                                            .coerceIn(maxUp, maxDown)
+                                                    },
+                                                    onDragEnd = {
+                                                        val idx = draggedIndex
+                                                        if (idx != null) {
+                                                            val target = calcTargetIndex(idx, dragOffsetY)
+                                                            if (target != idx) {
+                                                                reorderableServers.apply {
+                                                                    add(target, removeAt(idx))
+                                                                }
+                                                                onReorderServers(
+                                                                    reorderableServers.map { it.id },
+                                                                )
+                                                            }
+                                                        }
+                                                        draggedIndex = null
+                                                        dragOffsetY = 0f
+                                                    },
+                                                    onDragCancel = {
+                                                        draggedIndex = null
+                                                        dragOffsetY = 0f
+                                                    },
+                                                )
+                                            }
+                                        } else {
+                                            Modifier
+                                        },
+                                    ),
+                            ) {
+                                Column(modifier = Modifier.fillMaxWidth()) {
+                                    reorderableServers.forEachIndexed { index, server ->
+                                        val isDragging = draggedIndex == index
+                                        val targetIndex = draggedIndex?.let {
+                                            calcTargetIndex(it, dragOffsetY)
+                                        }
+                                        val displacementPx = if (!isDragging && draggedIndex != null && targetIndex != null) {
+                                            val dragIdx = draggedIndex!!
+                                            val draggedH = measuredHeights[dragIdx] ?: itemHeightPx
+                                            when (index) {
+                                                in (dragIdx + 1)..targetIndex ->
+                                                    -(draggedH + spacingPx)
+                                                in targetIndex until dragIdx ->
+                                                    draggedH + spacingPx
+                                                else -> 0f
+                                            }
+                                        } else {
+                                            0f
+                                        }
+                                        val isActive = server.id == activeServerId
 
-                                LiquidSavedServerItem(
-                                    server = server,
-                                    isActive = isActive,
-                                    isConnected = isConnected && isActive,
-                                    onConnect = { onConnectToServer(server.id) },
-                                    onEdit = {
-                                        serverToEdit = server
-                                        serverUrl = server.url
-                                        serverPort = server.port.toString()
-                                        serverName = server.name
-                                        useSsl = server.useSsl
-                                        showAddServerForm = true
-                                    },
-                                    onDelete = { serverToDelete = server },
-                                )
+                                        Box(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .zIndex(if (isDragging) 1f else 0f)
+                                                .offset {
+                                                    IntOffset(
+                                                        x = 0,
+                                                        y = if (isDragging) {
+                                                            dragOffsetY.roundToInt()
+                                                        } else {
+                                                            displacementPx.roundToInt()
+                                                        },
+                                                    )
+                                                }
+                                                .graphicsLayer {
+                                                    if (isDragging) {
+                                                        shadowElevation = 8f
+                                                        alpha = 0.95f
+                                                    }
+                                                }
+                                                .onGloballyPositioned { coords ->
+                                                    measuredHeights[index] = coords.size.height.toFloat()
+                                                },
+                                        ) {
+                                            LiquidSavedServerItem(
+                                                server = server,
+                                                isActive = isActive,
+                                                isConnected = isConnected && isActive,
+                                                onConnect = { onConnectToServer(server.id) },
+                                                onEdit = {
+                                                    serverToEdit = server
+                                                    serverUrl = server.url
+                                                    serverPort = server.port.toString()
+                                                    serverName = server.name
+                                                    useSsl = server.useSsl
+                                                    showAddServerForm = true
+                                                },
+                                                onDelete = { serverToDelete = server },
+                                                showDragHandle = showDragHandles,
+                                                isDragging = isDragging,
+                                            )
+                                        }
 
-                                if (server != savedServers.last()) {
-                                    Spacer(modifier = Modifier.height(12.dp))
+                                        if (index < reorderableServers.size - 1) {
+                                            Spacer(modifier = Modifier.height(12.dp))
+                                        }
+                                    }
                                 }
                             }
 
@@ -406,8 +553,7 @@ fun LiquidServerConfigScreen(
                                 name = serverName.trim(),
                                 useTor = serverUrl.trim().endsWith(".onion"),
                             )
-                        val savedConfig = onSaveServer(config)
-                        onConnectToServer(savedConfig.id)
+                        onSaveServer(config)
 
                         serverUrl = ""
                         serverPort = "995"
@@ -528,6 +674,7 @@ fun LiquidCurrentServerCard(
     onDisconnect: () -> Unit = {},
     onCancelConnection: () -> Unit = {},
     onEdit: (() -> Unit)? = null,
+    onServerDetailsClick: (() -> Unit)? = null,
     onAddServer: (() -> Unit)? = null,
 ) {
     val isTorBootstrapping =
@@ -701,6 +848,13 @@ fun LiquidCurrentServerCard(
                                 color = serverBorderColor,
                                 shape = RoundedCornerShape(8.dp),
                             )
+                            .then(
+                                if (onServerDetailsClick != null) {
+                                    Modifier.clickable(onClick = onServerDetailsClick)
+                                } else {
+                                    Modifier
+                                },
+                            )
                             .padding(12.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
@@ -808,6 +962,8 @@ private fun LiquidSavedServerItem(
     onConnect: () -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
+    showDragHandle: Boolean = false,
+    isDragging: Boolean = false,
 ) {
     val cardColor =
         if (isActive) {
@@ -817,7 +973,9 @@ private fun LiquidSavedServerItem(
         }
 
     val borderColor =
-        if (isActive) {
+        if (isDragging) {
+            LiquidTeal.copy(alpha = 0.6f)
+        } else if (isActive) {
             LiquidTeal
         } else {
             BorderColor
@@ -839,12 +997,20 @@ private fun LiquidSavedServerItem(
                     .padding(horizontal = 12.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            // Server info
+            if (showDragHandle) {
+                Icon(
+                    imageVector = Icons.Default.DragIndicator,
+                    contentDescription = "Drag to reorder",
+                    tint = TextSecondary.copy(alpha = 0.5f),
+                    modifier = Modifier.size(18.dp),
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+            }
+
             Column(
                 modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(3.dp),
             ) {
-                // Name row with status badge
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
@@ -872,7 +1038,6 @@ private fun LiquidSavedServerItem(
                         }
                     }
                 }
-                // Address + port + badges
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
@@ -896,7 +1061,6 @@ private fun LiquidSavedServerItem(
 
             Spacer(modifier = Modifier.width(10.dp))
 
-            // Edit button
             Box(
                 contentAlignment = Alignment.Center,
                 modifier =
@@ -916,7 +1080,6 @@ private fun LiquidSavedServerItem(
 
             Spacer(modifier = Modifier.width(8.dp))
 
-            // Delete button
             Box(
                 contentAlignment = Alignment.Center,
                 modifier =
@@ -941,90 +1104,100 @@ private fun LiquidSavedServerItem(
 private fun LiquidTorStatusCard(
     torState: TorState,
     isTorEnabled: Boolean,
-    onTorEnabledChange: (Boolean) -> Unit,
     isActiveServerOnion: Boolean = false,
 ) {
-    val isLiquidViaTor = isTorEnabled || isActiveServerOnion
-
+    val isTorActive = isTorEnabled || isActiveServerOnion
     val statusColor =
-        if (isLiquidViaTor) {
+        if (isTorActive) {
             when (torState.status) {
-                TorStatus.CONNECTED -> SuccessGreen
-                TorStatus.CONNECTING, TorStatus.STARTING -> BitcoinOrange
+                TorStatus.CONNECTED -> TorPurple
+                TorStatus.CONNECTING, TorStatus.STARTING -> TorPurple
                 TorStatus.ERROR -> ErrorRed
-                TorStatus.DISCONNECTED -> TextSecondary
+                TorStatus.DISCONNECTED, TorStatus.STOPPING -> TextSecondary
             }
         } else {
             TextSecondary
         }
 
     val statusText =
-        if (isLiquidViaTor) {
+        if (isTorActive) {
             when (torState.status) {
-                TorStatus.CONNECTED -> "Connected"
-                TorStatus.CONNECTING -> "Connecting..."
-                TorStatus.STARTING -> "Starting..."
+                TorStatus.CONNECTED -> "Active"
+                TorStatus.CONNECTING -> "Bootstrapping"
+                TorStatus.STARTING -> "Bootstrapping"
                 TorStatus.ERROR -> "Error"
-                TorStatus.DISCONNECTED -> "Disabled"
+                TorStatus.DISCONNECTED, TorStatus.STOPPING -> "Standby"
             }
         } else {
-            "Disabled"
+            "Standby"
         }
+
+    val accentColor = if (isTorActive) TorPurple else TextSecondary.copy(alpha = 0.4f)
 
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(12.dp),
         colors = CardDefaults.cardColors(containerColor = DarkCard),
     ) {
-        Row(
-            modifier =
-                Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(8.dp))
-                    .padding(16.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
+        Row(modifier = Modifier.fillMaxWidth()) {
+            Box(
+                modifier = Modifier
+                    .width(4.dp)
+                    .align(Alignment.CenterVertically)
+                    .height(48.dp)
+                    .clip(RoundedCornerShape(topStart = 12.dp, bottomStart = 12.dp))
+                    .background(accentColor),
+            )
             Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 14.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Image(
                     painter = painterResource(id = R.drawable.tor_icon),
                     contentDescription = null,
-                    alpha = if (isLiquidViaTor) 1f else 0.5f,
-                    modifier = Modifier.size(24.dp),
+                    alpha = if (isTorActive) 1f else 0.4f,
+                    modifier = Modifier.size(28.dp),
                 )
                 Spacer(modifier = Modifier.width(12.dp))
-                Column {
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = "Tor",
                         style = MaterialTheme.typography.titleMedium,
                         color = MaterialTheme.colorScheme.onBackground,
                     )
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
+                    Text(
+                        text = "Auto-managed",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextSecondary,
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .border(
+                            width = 1.dp,
+                            color = statusColor.copy(alpha = 0.5f),
+                            shape = RoundedCornerShape(6.dp),
+                        )
+                        .padding(horizontal = 10.dp, vertical = 4.dp),
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
                         Box(
-                            modifier =
-                                Modifier
-                                    .size(8.dp)
-                                    .clip(CircleShape)
-                                    .background(statusColor),
+                            modifier = Modifier
+                                .size(6.dp)
+                                .clip(CircleShape)
+                                .background(statusColor),
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
                             text = statusText,
-                            style = MaterialTheme.typography.bodySmall,
+                            style = MaterialTheme.typography.labelSmall,
                             color = statusColor,
                         )
                     }
                 }
             }
-
-            SquareToggleGreen(
-                checked = isTorEnabled,
-                onCheckedChange = onTorEnabledChange,
-            )
         }
     }
 }
@@ -1048,7 +1221,7 @@ private fun LiquidServerConfigDialog(
     onSave: () -> Unit,
     onCancel: () -> Unit,
 ) {
-    AlertDialog(
+    ScrollableAlertDialog(
         onDismissRequest = onCancel,
         containerColor = DarkCard,
         title = {
@@ -1071,10 +1244,7 @@ private fun LiquidServerConfigDialog(
         },
         text = {
             Column(
-                modifier =
-                    Modifier
-                        .fillMaxWidth()
-                        .verticalScroll(rememberScrollState()),
+                modifier = Modifier.fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 Text(
@@ -1227,7 +1397,7 @@ private fun LiquidServerConfigDialog(
                     ),
             ) {
                 Text(
-                    text = if (isEditMode) "Update & Connect" else "Save & Connect",
+                    text = if (isEditMode) "Update" else "Save",
                     style = MaterialTheme.typography.titleMedium,
                 )
             }

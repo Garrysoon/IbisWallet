@@ -1,6 +1,5 @@
 package github.aeonbtc.ibiswallet.data.boltz
 
-import github.aeonbtc.ibiswallet.data.model.BoltzLimits
 import github.aeonbtc.ibiswallet.data.model.BoltzPairInfo
 import github.aeonbtc.ibiswallet.data.model.SwapDirection
 import kotlinx.coroutines.sync.Mutex
@@ -77,10 +76,6 @@ class BoltzRuntime(
                 "elapsedMs" to boltzElapsedMs(startedAt),
             )
         }
-    }
-
-    suspend fun getLightningInvoiceLimits(): BoltzLimits {
-        return getReversePairInfo().limits
     }
 
     suspend fun getReversePairInfo(): BoltzPairInfo {

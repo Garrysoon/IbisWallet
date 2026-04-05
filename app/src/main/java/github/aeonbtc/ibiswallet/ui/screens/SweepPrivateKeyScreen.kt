@@ -23,6 +23,7 @@ import androidx.compose.ui.unit.dp
 import github.aeonbtc.ibiswallet.data.model.FeeEstimationResult
 import github.aeonbtc.ibiswallet.ui.components.FeeRateSection
 import github.aeonbtc.ibiswallet.ui.components.ImportQrScannerDialog
+import github.aeonbtc.ibiswallet.ui.components.ScrollableAlertDialog
 import github.aeonbtc.ibiswallet.ui.components.formatFeeRate
 import github.aeonbtc.ibiswallet.ui.theme.*
 import github.aeonbtc.ibiswallet.viewmodel.SweepState
@@ -85,7 +86,7 @@ fun SweepPrivateKeyScreen(
 
     // Review / confirm sweep dialog
     if (showReviewDialog && sweepState.hasBalance) {
-        AlertDialog(
+        ScrollableAlertDialog(
             onDismissRequest = { if (!sweepState.isSweeping) showReviewDialog = false },
             containerColor = DarkCard,
             title = {
@@ -216,7 +217,7 @@ fun SweepPrivateKeyScreen(
 
     // Success dialog
     if (sweepState.isComplete) {
-        AlertDialog(
+        ScrollableAlertDialog(
             onDismissRequest = { },
             containerColor = DarkCard,
             title = {

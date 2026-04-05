@@ -63,6 +63,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import github.aeonbtc.ibiswallet.data.local.SecureStorage
+import github.aeonbtc.ibiswallet.data.model.LiquidAsset
 import github.aeonbtc.ibiswallet.data.model.UtxoInfo
 import github.aeonbtc.ibiswallet.ui.theme.AccentBlue
 import github.aeonbtc.ibiswallet.ui.theme.AccentGreen
@@ -79,12 +80,14 @@ import github.aeonbtc.ibiswallet.ui.theme.TextSecondary
 import github.aeonbtc.ibiswallet.util.SecureClipboard
 import java.text.NumberFormat
 import java.util.Locale
+import kotlin.math.pow
 
 @Composable
 fun AllUtxosScreen(
     utxos: List<UtxoInfo>,
     denomination: String = SecureStorage.DENOMINATION_BTC,
     btcPrice: Double? = null,
+    fiatCurrency: String = SecureStorage.DEFAULT_PRICE_CURRENCY,
     privacyMode: Boolean = false,
     spendUnconfirmed: Boolean = true,
     addressEdgeCharacters: Int? = null,
@@ -107,12 +110,12 @@ fun AllUtxosScreen(
 
     val totalBalance by remember {
         derivedStateOf {
-            localUtxos.filter { !it.isFrozen }.sumOf { it.amountSats.toLong() }.toULong()
+            localUtxos.filter { !it.isFrozen && it.isLbtcOrUnknownAsset() }.sumOf { it.amountSats.toLong() }.toULong()
         }
     }
     val frozenBalance by remember {
         derivedStateOf {
-            localUtxos.filter { it.isFrozen }.sumOf { it.amountSats.toLong() }.toULong()
+            localUtxos.filter { it.isFrozen && it.isLbtcOrUnknownAsset() }.sumOf { it.amountSats.toLong() }.toULong()
         }
     }
     val filteredUtxos by remember {
@@ -165,7 +168,7 @@ fun AllUtxosScreen(
                         )
                         if (btcPrice != null && btcPrice > 0 && !privacyMode) {
                             Text(
-                                text = formatUsd((totalBalance.toDouble() / 100_000_000.0) * btcPrice),
+                                text = formatFiat((totalBalance.toDouble() / 100_000_000.0) * btcPrice, fiatCurrency),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = TextSecondary,
                             )
@@ -186,7 +189,7 @@ fun AllUtxosScreen(
                         )
                         if (btcPrice != null && btcPrice > 0 && frozenBalance > 0UL && !privacyMode) {
                             Text(
-                                text = formatUsd((frozenBalance.toDouble() / 100_000_000.0) * btcPrice),
+                                text = formatFiat((frozenBalance.toDouble() / 100_000_000.0) * btcPrice, fiatCurrency),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = TextSecondary,
                             )
@@ -276,6 +279,7 @@ fun AllUtxosScreen(
                         utxo = utxo,
                         useSats = useSats,
                         btcPrice = btcPrice,
+                        fiatCurrency = fiatCurrency,
                         privacyMode = privacyMode,
                         spendUnconfirmed = spendUnconfirmed,
                         addressEdgeCharacters = addressEdgeCharacters,
@@ -327,6 +331,7 @@ private fun UtxoCard(
     utxo: UtxoInfo,
     useSats: Boolean,
     btcPrice: Double? = null,
+    fiatCurrency: String = SecureStorage.DEFAULT_PRICE_CURRENCY,
     privacyMode: Boolean = false,
     spendUnconfirmed: Boolean = true,
     addressEdgeCharacters: Int? = null,
@@ -390,6 +395,10 @@ private fun UtxoCard(
                     .fillMaxWidth()
                     .padding(horizontal = 12.dp, vertical = 10.dp),
         ) {
+            val assetId = utxo.assetId
+            val isNonLbtcAsset = assetId != null && !LiquidAsset.isPolicyAsset(assetId)
+            val resolvedAsset = utxo.assetId?.let { LiquidAsset.resolve(it) }
+
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -405,20 +414,49 @@ private fun UtxoCard(
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                     }
-                    Text(
-                        text = if (privacyMode) HIDDEN_AMOUNT else formatAmount(utxo.amountSats, useSats, includeUnit = true),
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = if (utxo.isFrozen) AccentBlue else AccentGreen,
-                    )
-                    if (btcPrice != null && btcPrice > 0 && !privacyMode) {
+                    if (isNonLbtcAsset && resolvedAsset != null) {
                         Text(
-                            text = " · ${formatUsd((utxo.amountSats.toDouble() / 100_000_000.0) * btcPrice)}",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = TextSecondary,
+                            text = if (privacyMode) HIDDEN_AMOUNT else formatAssetAmount(resolvedAsset, utxo.amountSats.toLong()),
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = if (utxo.isFrozen) AccentBlue else AccentGreen,
                         )
+                    } else {
+                        Text(
+                            text = if (privacyMode) HIDDEN_AMOUNT else formatAmount(utxo.amountSats, useSats, includeUnit = true),
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = if (utxo.isFrozen) AccentBlue else AccentGreen,
+                        )
+                        if (btcPrice != null && btcPrice > 0 && !privacyMode) {
+                            Text(
+                                text = " · ${formatFiat((utxo.amountSats.toDouble() / 100_000_000.0) * btcPrice, fiatCurrency)}",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = TextSecondary,
+                            )
+                        }
                     }
                 }
+
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (isNonLbtcAsset && resolvedAsset != null) {
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(AccentTeal.copy(alpha = 0.16f))
+                                .padding(horizontal = 6.dp, vertical = 2.dp),
+                        ) {
+                            Text(
+                                text = resolvedAsset.ticker,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = AccentTeal,
+                            )
+                        }
+                    }
 
                 // Confirmation status
                 Box(
@@ -439,6 +477,7 @@ private fun UtxoCard(
                         style = MaterialTheme.typography.labelSmall,
                         color = if (utxo.isConfirmed) AccentGreen else BitcoinOrange,
                     )
+                }
                 }
             }
 
@@ -706,15 +745,22 @@ private fun utxoMatchesSearch(
     val normalizedQuery = query.trim().lowercase()
     if (normalizedQuery.isBlank()) return true
     val normalizedAmountQuery = normalizeAmountSearchValue(query)
-    val amountTerms =
-        listOf(
-            utxo.amountSats.toString(),
-            NumberFormat.getNumberInstance(Locale.US).format(utxo.amountSats.toLong()),
-            "${utxo.amountSats} sats",
-            "${NumberFormat.getNumberInstance(Locale.US).format(utxo.amountSats.toLong())} sats",
-            String.format(Locale.US, "%.8f", utxo.amountSats.toDouble() / 100_000_000.0),
-            "${String.format(Locale.US, "%.8f", utxo.amountSats.toDouble() / 100_000_000.0)} btc",
-        )
+    val assetId = utxo.assetId
+    val isNonLbtc = assetId != null && !LiquidAsset.isPolicyAsset(assetId)
+    val amountTerms = buildList {
+        add(utxo.amountSats.toString())
+        add(NumberFormat.getNumberInstance(Locale.US).format(utxo.amountSats.toLong()))
+        if (isNonLbtc) {
+            val asset = LiquidAsset.resolve(assetId)
+            add(formatAssetAmount(asset, utxo.amountSats.toLong()))
+            add(asset.ticker)
+        } else {
+            add("${utxo.amountSats} sats")
+            add("${NumberFormat.getNumberInstance(Locale.US).format(utxo.amountSats.toLong())} sats")
+            add(String.format(Locale.US, "%.8f", utxo.amountSats.toDouble() / 100_000_000.0))
+            add("${String.format(Locale.US, "%.8f", utxo.amountSats.toDouble() / 100_000_000.0)} btc")
+        }
+    }
 
     return utxo.address.lowercase().contains(normalizedQuery) ||
         utxo.label?.lowercase()?.contains(normalizedQuery) == true ||
@@ -723,7 +769,8 @@ private fun utxoMatchesSearch(
         utxo.vout.toString().contains(normalizedQuery) ||
         amountTerms.any { normalizeAmountSearchValue(it).contains(normalizedAmountQuery) } ||
         (if (utxo.isConfirmed) "confirmed" else "pending").contains(normalizedQuery) ||
-        (if (utxo.isFrozen) "frozen" else "spendable").contains(normalizedQuery)
+        (if (utxo.isFrozen) "frozen" else "spendable").contains(normalizedQuery) ||
+        (if (isNonLbtc) "usdt" else "").contains(normalizedQuery)
 }
 
 private fun normalizeAmountSearchValue(value: String): String =
@@ -732,4 +779,19 @@ private fun normalizeAmountSearchValue(value: String): String =
         .lowercase()
         .replace(",", "")
         .replace(" ", "")
+
+private fun UtxoInfo.isLbtcOrUnknownAsset(): Boolean =
+    assetId?.let(LiquidAsset::isPolicyAsset) != false
+
+private fun formatAssetAmount(asset: LiquidAsset, rawAmount: Long): String {
+    val divisor = 10.0.pow(asset.precision.toDouble())
+    val full = String.format(Locale.US, "%.${asset.precision}f", rawAmount.toDouble() / divisor)
+    val trimmed = full.trimEnd('0').let { if (it.endsWith('.')) "${it}00" else it }
+    val minDecimals = if (trimmed.contains('.') && trimmed.substringAfter('.').length < 2) {
+        trimmed + "0".repeat(2 - trimmed.substringAfter('.').length)
+    } else {
+        trimmed
+    }
+    return "$minDecimals ${asset.ticker}"
+}
 

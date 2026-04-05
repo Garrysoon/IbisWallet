@@ -356,14 +356,18 @@ object QrFormatParser {
     fun expandAbbreviatedMnemonic(
         context: Context,
         input: String,
+    ): String = expandAbbreviatedMnemonic(getWordlist(context), input)
+
+    fun expandAbbreviatedMnemonic(
+        wordlist: List<String>,
+        input: String,
     ): String {
         val trimmed = input.trim()
         val tokens = trimmed.split("\\s+".toRegex()).filter { it.isNotBlank() }
+        val hasTrailingSpace = input.isNotEmpty() && input.last().isWhitespace()
 
         // Only attempt expansion on plausible mnemonic word counts
-        if (tokens.size !in listOf(12, 15, 18, 21, 24)) return trimmed
-
-        val wordlist = getWordlist(context)
+        if (tokens.size !in listOf(12, 15, 18, 21, 24)) return input
 
         // Build prefix → full word map (BIP39 guarantees uniqueness for 4-char prefixes)
         val prefixMap = wordlist.associateBy { it.take(4) }
@@ -372,19 +376,47 @@ object QrFormatParser {
         val needsExpansion = tokens.any { token ->
             token !in wordlist && token.length >= 4 && prefixMap.containsKey(token.take(4))
         }
-        if (!needsExpansion) return trimmed
+        if (!needsExpansion) return input
 
         val expanded = tokens.map { token ->
             if (token in wordlist) {
-                // Already a full valid word
                 token
             } else {
-                // Try to expand via 4-char prefix lookup
                 prefixMap[token.take(4)] ?: token
             }
         }
 
-        return expanded.joinToString(" ")
+        val result = expanded.joinToString(" ")
+        return if (hasTrailingSpace) "$result " else result
+    }
+
+    /**
+     * Return BIP39 words matching the given prefix, up to [limit] results.
+     * Used for inline seed-word suggestions while the user types.
+     */
+    fun suggestBip39Words(
+        wordlist: List<String>,
+        prefix: String,
+        limit: Int = 4,
+    ): List<String> {
+        if (prefix.isBlank()) return emptyList()
+        val lower = prefix.lowercase()
+        return wordlist
+            .filter { it.startsWith(lower) }
+            .take(limit)
+    }
+
+    /**
+     * Replace the last (partial) word in [currentInput] with [fullWord] and append a
+     * trailing space so the user can immediately start typing the next word.
+     */
+    fun completeSeedWord(
+        currentInput: String,
+        fullWord: String,
+    ): String {
+        val lastSpace = currentInput.lastIndexOf(' ')
+        val prefix = if (lastSpace >= 0) currentInput.take(lastSpace + 1) else ""
+        return "$prefix$fullWord "
     }
 
     data class ServerConfig(

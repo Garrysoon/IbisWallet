@@ -42,8 +42,11 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
@@ -87,9 +90,11 @@ class WalletRepository(context: Context) {
         private const val BDK_DB_DIR = "bdk"
         private const val LWK_DB_DIR = "lwk"
         private const val SWEEP_TEMP_DB_DIR = "bdk_sweep_tmp"
+        private const val FULL_SCAN_SO_TIMEOUT_MS = 120_000
         private const val QUICK_SYNC_TIMEOUT_MS = 60_000L
         private const val SYNC_BATCH_SIZE = 500UL
-        private const val FULL_SCAN_BATCH_SIZE = 25UL
+        private const val FULL_SCAN_BATCH_SIZE_TOR = 50UL
+        private const val FULL_SCAN_BATCH_SIZE_CLEARNET = 500UL
         private const val MIN_BATCH_SIZE = 25UL
         private const val SCRIPT_HASH_SAMPLE_SIZE = 5
         private const val NOTIFICATION_DEBOUNCE_MS = 1000L
@@ -184,6 +189,8 @@ class WalletRepository(context: Context) {
     }
 
     private fun clearLoadedWallet() {
+        transactionRefreshJob?.cancel()
+        transactionRefreshJob = null
         wallet = null
         walletPersister = null
         walletExternalDescriptor = null
@@ -216,8 +223,92 @@ class WalletRepository(context: Context) {
             walletTransactionCache.clear()
             true
         } catch (e: Exception) {
+            val activeWalletId = secureStorage.getActiveWalletId()
+            val activeWalletMetadata = activeWalletId?.let { secureStorage.getWalletMetadata(it) }
+            val fallback =
+                if (activeWalletId != null && activeWalletMetadata != null) {
+                    tryLoadWatchOnlyWalletWithCompatibleOrigin(
+                        walletId = activeWalletId,
+                        storedWallet = activeWalletMetadata,
+                        network = activeWalletMetadata.network.toBdkNetwork(),
+                        persister = persister,
+                        loadError = e,
+                    )
+                } else {
+                    null
+                }
+            if (fallback != null) {
+                val (reloadedWallet, fallbackExternal, fallbackInternal) = fallback
+                wallet = reloadedWallet
+                walletExternalDescriptor = fallbackExternal
+                walletInternalDescriptor = fallbackInternal
+                walletIsSingleKey = false
+                walletTransactionCache.clear()
+                if (BuildConfig.DEBUG) {
+                    Log.w(
+                        TAG,
+                        "Wallet reload fell back to key-only watch-only descriptors for DB compatibility",
+                    )
+                }
+                return true
+            }
             if (BuildConfig.DEBUG) Log.w(TAG, "Wallet reload from database failed: ${e.message}")
             false
+        }
+    }
+
+    private fun isDescriptorMismatch(error: Throwable): Boolean {
+        val details =
+            generateSequence(error) { it.cause }
+                .mapNotNull { throwable -> throwable.message?.trim()?.takeIf { it.isNotEmpty() } }
+                .joinToString(separator = " | ")
+        return details.contains("Descriptor mismatch", ignoreCase = true)
+    }
+
+    private fun canRetryWatchOnlyLoadWithoutMetadataOrigin(extendedKey: String): Boolean {
+        val input = extendedKey.trim()
+        val descriptorPrefixes = listOf("pkh(", "wpkh(", "tr(")
+        if (descriptorPrefixes.any { input.lowercase().startsWith(it) }) {
+            return false
+        }
+        return parseKeyOrigin(input).fingerprint == null
+    }
+
+    private fun tryLoadWatchOnlyWalletWithCompatibleOrigin(
+        walletId: String,
+        storedWallet: StoredWallet,
+        network: Network,
+        persister: Persister,
+        loadError: Throwable,
+    ): Triple<Wallet, Descriptor, Descriptor>? {
+        if (!storedWallet.isWatchOnly || !isDescriptorMismatch(loadError) || !secureStorage.hasExtendedKey(walletId)) {
+            return null
+        }
+
+        val extendedKey = secureStorage.getExtendedKey(walletId) ?: return null
+        if (!canRetryWatchOnlyLoadWithoutMetadataOrigin(extendedKey)) {
+            return null
+        }
+
+        val (fallbackExternal, fallbackInternal) =
+            createWatchOnlyDescriptors(
+                extendedKey = extendedKey,
+                addressType = storedWallet.addressType,
+                network = network,
+                masterFingerprint = null,
+            )
+
+        return try {
+            val loadedWallet = Wallet.load(fallbackExternal, fallbackInternal, persister)
+            Triple(loadedWallet, fallbackExternal, fallbackInternal)
+        } catch (fallbackError: Exception) {
+            if (BuildConfig.DEBUG) {
+                Log.w(
+                    TAG,
+                    "Watch-only descriptor fallback load failed: ${fallbackError.message}",
+                )
+            }
+            null
         }
     }
 
@@ -258,6 +349,7 @@ class WalletRepository(context: Context) {
     // Real-time notification collector — listens for server push notifications
     // (script hash changes, new blocks) and triggers targeted sync.
     private var notificationCollectorJob: Job? = null
+    private var transactionRefreshJob: Job? = null
     private val repositoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     // Tracks which script hashes are subscribed on the subscription socket.
@@ -267,22 +359,24 @@ class WalletRepository(context: Context) {
 
     /**
      * Subscribe to block headers on the connected Electrum server.
-     * Updates lastKnownBlockHeight so sync() can detect new blocks.
+     * Used during the initial connect as a real upstream health check:
+     * if this fails, the connection attempt should fail too.
      */
     private fun subscribeBlockHeaders(client: ElectrumClient) {
-        try {
-            val headerNotification = client.blockHeadersSubscribe()
-            lastKnownBlockHeight = headerNotification.height
-            // Propagate block height to wallet state immediately so the UI
-            // can display it right after connecting (before sync completes).
-            val height = headerNotification.height.toUInt()
-            val current = _walletState.value
-            if (current.blockHeight != height) {
-                _walletState.value = current.copy(blockHeight = height)
-            }
-            if (BuildConfig.DEBUG) Log.d(TAG, "Subscribed to block headers, tip at height ${headerNotification.height}")
-        } catch (e: Exception) {
-            if (BuildConfig.DEBUG) Log.w(TAG, "Could not subscribe to block headers: ${e.message}")
+        val headerNotification = client.blockHeadersSubscribe()
+        lastKnownBlockHeight = headerNotification.height
+        // Propagate block height to wallet state immediately so the UI
+        // can display it right after connecting (before sync completes).
+        val height = headerNotification.height.toUInt()
+        val current = _walletState.value
+        if (current.blockHeight != height) {
+            _walletState.value = current.copy(blockHeight = height)
+        }
+        if (BuildConfig.DEBUG) {
+            Log.d(
+                TAG,
+                "Subscribed to block headers, tip at height ${headerNotification.height}",
+            )
         }
     }
 
@@ -312,6 +406,9 @@ class WalletRepository(context: Context) {
     // Minimum acceptable fee rate from connected Electrum server (sat/vB)
     private val _minFeeRate = MutableStateFlow(CachingElectrumProxy.DEFAULT_MIN_FEE_RATE)
     val minFeeRate: StateFlow<Double> = _minFeeRate.asStateFlow()
+
+    private val _connectionEvents = MutableSharedFlow<ConnectionEvent>(extraBufferCapacity = 1)
+    val connectionEvents: SharedFlow<ConnectionEvent> = _connectionEvents.asSharedFlow()
 
     /**
      * Convert a sat/vB fee rate (potentially fractional, e.g. 0.5) to a BDK FeeRate
@@ -464,30 +561,33 @@ class WalletRepository(context: Context) {
         }
 
         // Watch-only or finalization failed: estimate from reference sizes.
-        // Prefer Descriptor.maxWeightToSatisfy() for accurate, descriptor-derived
-        // input weight (handles multisig, complex scripts, etc.)
-        val inputWU: Long =
+        // Descriptor.maxWeightToSatisfy() is only the satisfaction delta, not the
+        // full serialized input weight, so derive the supported address type and
+        // use the complete Optech reference weights instead.
+        val walletAddrType =
             try {
                 val pubDescStr = wallet.publicDescriptor(KeychainKind.EXTERNAL)
-                val desc = Descriptor(pubDescStr, wallet.network())
-                desc.maxWeightToSatisfy().toLong()
+                BitcoinUtils.detectDescriptorAddressType(pubDescStr)
             } catch (_: Exception) {
-                // Fallback: detect address type from the wallet's receive address
-                val walletAddrType =
-                    try {
-                        val addr = wallet.revealNextAddress(KeychainKind.EXTERNAL)
-                        val addrStr = addr.address.toString()
-                        BitcoinUtils.detectAddressType(addrStr) ?: AddressType.SEGWIT
-                    } catch (_: Exception) {
-                        AddressType.SEGWIT
-                    }
-                BitcoinUtils.inputWeightWU(walletAddrType)
-            }
+                null
+            } ?: try {
+                val addr = wallet.revealNextAddress(KeychainKind.EXTERNAL)
+                BitcoinUtils.detectAddressType(addr.address.toString())
+            } catch (_: Exception) {
+                null
+            } ?: AddressType.SEGWIT
+        val inputWU = BitcoinUtils.inputWeightWU(walletAddrType)
+        val hasWitness = walletAddrType != AddressType.LEGACY
 
         val numInputs = unsignedTx.input().size
         val outputScriptLengths = unsignedTx.output().map { it.scriptPubkey.toBytes().size }
 
-        return BitcoinUtils.estimateVsizeFromComponents(numInputs, inputWU, outputScriptLengths)
+        return BitcoinUtils.estimateVsizeFromComponents(
+            numInputs = numInputs,
+            inputWeightWU = inputWU,
+            outputScriptLengths = outputScriptLengths,
+            hasWitness = hasWitness,
+        )
     }
 
     /**
@@ -1054,6 +1154,42 @@ class WalletRepository(context: Context) {
         }
 
     /**
+     * Import a Liquid-only watch-only wallet from a CT descriptor.
+     * Creates a StoredWallet record without initializing a BDK wallet.
+     */
+    suspend fun importLiquidWatchOnlyWallet(
+        name: String,
+        ctDescriptor: String,
+        gapLimit: Int,
+    ): WalletResult<String> = withContext(Dispatchers.IO) {
+        try {
+            val walletId = UUID.randomUUID().toString()
+            val storedWallet = StoredWallet(
+                id = walletId,
+                name = name,
+                addressType = AddressType.SEGWIT,
+                derivationPath = "liquid_ct",
+                isWatchOnly = true,
+                network = WalletNetwork.BITCOIN,
+            )
+            secureStorage.saveWalletMetadata(storedWallet)
+            secureStorage.setLiquidDescriptor(walletId, ctDescriptor)
+            secureStorage.setLiquidWatchOnly(walletId, true)
+            secureStorage.setLayer2Enabled(true)
+            secureStorage.setLiquidEnabledForWallet(walletId, true)
+            secureStorage.setLiquidGapLimit(walletId, gapLimit)
+            secureStorage.setNeedsFullSync(walletId, false)
+            secureStorage.setNeedsLiquidFullSync(walletId, true)
+            secureStorage.setActiveWalletId(walletId)
+            updateWalletState()
+            WalletResult.Success(walletId)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to import Liquid watch-only wallet", e)
+            WalletResult.Error("Failed to import: ${e.message ?: e.javaClass.simpleName}", e)
+        }
+    }
+
+    /**
      * Switch to a different wallet
      */
     suspend fun switchWallet(walletId: String): WalletResult<Unit> =
@@ -1099,6 +1235,12 @@ class WalletRepository(context: Context) {
                     return@withContext WalletResult.Success(Unit)
                 }
 
+                // Liquid-only watch-only wallets have no BDK wallet
+                if (storedWallet.derivationPath == "liquid_ct") {
+                    updateWalletState()
+                    return@withContext WalletResult.Success(Unit)
+                }
+
                 val isWifWallet = secureStorage.hasPrivateKey(walletId)
 
                 // Load wallet with persistent SQLite storage
@@ -1130,7 +1272,7 @@ class WalletRepository(context: Context) {
                     walletInternalDescriptor = null
                     walletIsSingleKey = true
                 } else {
-                    val (externalDescriptor, internalDescriptor) =
+                    var (externalDescriptor, internalDescriptor) =
                         when {
                             secureStorage.hasExtendedKey(walletId) -> {
                                 // Watch-only wallet - include master fingerprint for PSBT signing
@@ -1182,24 +1324,44 @@ class WalletRepository(context: Context) {
                     wallet =
                         try {
                             Wallet.load(externalDescriptor, internalDescriptor, persister)
-                        } catch (_: Exception) {
-                            if (BuildConfig.DEBUG) Log.d(TAG, "No existing wallet DB found, creating new wallet for $walletId")
-                            val newWallet =
-                                Wallet(
-                                    descriptor = externalDescriptor,
-                                    changeDescriptor = internalDescriptor,
-                                    network = bdkNetwork,
-                                    persister = persister,
-                                )
-                            newWallet.persist(persister)
-                            newWallet
+                        } catch (e: Exception) {
+                            tryLoadWatchOnlyWalletWithCompatibleOrigin(
+                                walletId = walletId,
+                                storedWallet = storedWallet,
+                                network = bdkNetwork,
+                                persister = persister,
+                                loadError = e,
+                            )?.let { (loadedWallet, fallbackExternal, fallbackInternal) ->
+                                externalDescriptor = fallbackExternal
+                                internalDescriptor = fallbackInternal
+                                loadedWallet
+                            } ?: run {
+                                if (isDescriptorMismatch(e)) {
+                                    throw e
+                                }
+                                if (BuildConfig.DEBUG) {
+                                    Log.d(TAG, "Wallet DB load failed, creating new wallet for $walletId: ${e.message}")
+                                }
+                                val newWallet =
+                                    Wallet(
+                                        descriptor = externalDescriptor,
+                                        changeDescriptor = internalDescriptor,
+                                        network = bdkNetwork,
+                                        persister = persister,
+                                    )
+                                newWallet.persist(persister)
+                                newWallet
+                            }
                         }
                     walletExternalDescriptor = externalDescriptor
                     walletInternalDescriptor = internalDescriptor
                     walletIsSingleKey = false
                 }
 
-                updateWalletState()
+                updateWalletStateLightweight()
+                wallet?.let { loadedWallet ->
+                    scheduleDetailedTransactionRefresh(walletId, loadedWallet)
+                }
 
                 WalletResult.Success(Unit)
             } catch (e: Exception) {
@@ -1553,6 +1715,7 @@ class WalletRepository(context: Context) {
                             CachingElectrumProxy(
                                 targetHost = cleanHost,
                                 targetPort = config.port,
+                                proxyOwner = "bitcoin-bdk",
                                 useSsl = true,
                                 useTorProxy = useTor,
                                 connectionTimeoutMs = if (useTor) 30000 else 15000,
@@ -1566,7 +1729,7 @@ class WalletRepository(context: Context) {
                         if (BuildConfig.DEBUG) {
                             Log.d(
                                 TAG,
-                                "Caching proxy started on port $localPort -> $cleanHost:${config.port} (tor=$useTor)",
+                                    "Bitcoin proxy started on port $localPort -> $cleanHost:${config.port} (tor=$useTor, ssl=true)",
                             )
                         }
                         client = ElectrumClient("tcp://127.0.0.1:$localPort")
@@ -1575,6 +1738,7 @@ class WalletRepository(context: Context) {
                             CachingElectrumProxy(
                                 targetHost = cleanHost,
                                 targetPort = config.port,
+                                proxyOwner = "bitcoin-bdk",
                                 useSsl = false,
                                 useTorProxy = true,
                                 connectionTimeoutMs = 30000,
@@ -1586,7 +1750,7 @@ class WalletRepository(context: Context) {
                         if (BuildConfig.DEBUG) {
                             Log.d(
                                 TAG,
-                                "Caching proxy started on port $localPort -> $cleanHost:${config.port} (tor=true, ssl=false)",
+                                    "Bitcoin proxy started on port $localPort -> $cleanHost:${config.port} (tor=true, ssl=false)",
                             )
                         }
                         client = ElectrumClient("tcp://127.0.0.1:$localPort")
@@ -1595,6 +1759,7 @@ class WalletRepository(context: Context) {
                             CachingElectrumProxy(
                                 targetHost = cleanHost,
                                 targetPort = config.port,
+                                proxyOwner = "bitcoin-bdk",
                                 useSsl = false,
                                 useTorProxy = false,
                                 connectionTimeoutMs = 15000,
@@ -1606,7 +1771,7 @@ class WalletRepository(context: Context) {
                         if (BuildConfig.DEBUG) {
                             Log.d(
                                 TAG,
-                                "Caching proxy started on port $localPort -> $cleanHost:${config.port} (tor=false, ssl=false)",
+                                    "Bitcoin proxy started on port $localPort -> $cleanHost:${config.port} (tor=false, ssl=false)",
                             )
                         }
                         client = ElectrumClient("tcp://127.0.0.1:$localPort")
@@ -1690,6 +1855,7 @@ class WalletRepository(context: Context) {
                             CachingElectrumProxy(
                                 targetHost = cleanHost,
                                 targetPort = config.port,
+                                proxyOwner = "bitcoin-bdk",
                                 useSsl = true,
                                 useTorProxy = useTor,
                                 connectionTimeoutMs = if (useTor) 30000 else 15000,
@@ -1703,7 +1869,7 @@ class WalletRepository(context: Context) {
                         if (BuildConfig.DEBUG) {
                             Log.d(
                                 TAG,
-                                "Caching proxy started on port $localPort -> $cleanHost:${config.port} (tor=$useTor)",
+                                    "Bitcoin proxy started on port $localPort -> $cleanHost:${config.port} (tor=$useTor, ssl=true)",
                             )
                         }
                         client = ElectrumClient("tcp://127.0.0.1:$localPort")
@@ -1712,6 +1878,7 @@ class WalletRepository(context: Context) {
                             CachingElectrumProxy(
                                 targetHost = cleanHost,
                                 targetPort = config.port,
+                                proxyOwner = "bitcoin-bdk",
                                 useSsl = false,
                                 useTorProxy = true,
                                 connectionTimeoutMs = 30000,
@@ -1723,7 +1890,7 @@ class WalletRepository(context: Context) {
                         if (BuildConfig.DEBUG) {
                             Log.d(
                                 TAG,
-                                "Caching proxy started on port $localPort -> $cleanHost:${config.port} (tor=true, ssl=false)",
+                                    "Bitcoin proxy started on port $localPort -> $cleanHost:${config.port} (tor=true, ssl=false)",
                             )
                         }
                         client = ElectrumClient("tcp://127.0.0.1:$localPort")
@@ -1732,6 +1899,7 @@ class WalletRepository(context: Context) {
                             CachingElectrumProxy(
                                 targetHost = cleanHost,
                                 targetPort = config.port,
+                                proxyOwner = "bitcoin-bdk",
                                 useSsl = false,
                                 useTorProxy = false,
                                 connectionTimeoutMs = 15000,
@@ -1743,7 +1911,7 @@ class WalletRepository(context: Context) {
                         if (BuildConfig.DEBUG) {
                             Log.d(
                                 TAG,
-                                "Caching proxy started on port $localPort -> $cleanHost:${config.port} (tor=false, ssl=false)",
+                                    "Bitcoin proxy started on port $localPort -> $cleanHost:${config.port} (tor=false, ssl=false)",
                             )
                         }
                         client = ElectrumClient("tcp://127.0.0.1:$localPort")
@@ -1823,6 +1991,14 @@ class WalletRepository(context: Context) {
             // Watch address wallets have no BDK wallet — route to Electrum-only sync
             if (wallet == null && secureStorage.hasWatchAddress(activeWalletId)) {
                 return@withContext syncWatchAddress(activeWalletId)
+            }
+
+            // Liquid-only wallets have no BDK wallet — sync is handled by LiquidRepository
+            if (wallet == null) {
+                val meta = secureStorage.getWalletMetadata(activeWalletId)
+                if (meta?.derivationPath == "liquid_ct") {
+                    return@withContext WalletResult.Success(Unit)
+                }
             }
 
             val currentWallet = wallet ?: return@withContext WalletResult.Error("Wallet not initialized")
@@ -2003,11 +2179,12 @@ class WalletRepository(context: Context) {
                 }
 
                 try {
+                    val fullScanBatchSize = getActiveFullScanBatchSize()
                     _walletState.value = _walletState.value.copy(isSyncing = true, isFullSyncing = showProgress, error = null)
-                    if (BuildConfig.DEBUG) Log.d(TAG, "Starting full sync (address discovery, batch=$currentBatchSize)")
+                    if (BuildConfig.DEBUG) Log.d(TAG, "Starting full sync (address discovery, batch=$fullScanBatchSize)")
 
                     val fullScanProgress = java.util.concurrent.atomic.AtomicLong(0)
-                    val fullScanRequest =
+                    fun buildFullScanRequest() =
                         currentWallet.startFullScan()
                             .inspectSpksForAllKeychains(
                                 object : FullScanScriptInspector {
@@ -2033,73 +2210,68 @@ class WalletRepository(context: Context) {
                             )
                             .build()
 
-                    // Pre-warm BDK's internal tx_cache to avoid cold-start penalty.
-                    //
-                    // The CachingElectrumProxy intercepts blockchain.transaction.get requests
-                    // from BDK and serves cached tx hex from SQLite instantly. For txids not
-                    // yet in the persistent cache, we pipeline-fetch them via the proxy's
-                    // shared upstream socket to warm both the server-side cache and our local
-                    // SQLite cache. BDK's serial fetchTx() calls then hit the proxy cache.
-                    //
-                    // Net effect: fullScan's internal fetch_tx() calls are near-instant for
-                    // all known txids (proxy serves from SQLite without network round-trips).
-                    _walletState.value =
-                        _walletState.value.copy(
-                            syncProgress = SyncProgress(status = "Preparing sync..."),
-                        )
-                    val knownTxids = currentWallet.transactions().map { it.transaction.computeTxid() }
-                    if (knownTxids.isNotEmpty()) {
-                        // Pipeline-fetch any txids not yet in our persistent cache.
-                        // The proxy caches responses in SQLite, so future fetchTx() calls
-                        // from BDK will be served from cache without network round-trips.
-                        val proxy = cachingProxy
-                        if (proxy != null) {
-                            val txidStrings = knownTxids.map { it.toString() }
-                            val uncached = electrumCache.findMissingRawTxids(txidStrings)
-                            if (uncached.isNotEmpty()) {
-                                proxy.pipelineFetchTransactions(uncached)
-                                if (BuildConfig.DEBUG) {
-                                    Log.d(
-                                        TAG,
-                                        "Pipeline-fetched ${uncached.size} uncached txs (${txidStrings.size - uncached.size} already cached)",
-                                    )
-                                }
-                            } else {
-                                if (BuildConfig.DEBUG) {
-                                    Log.d(
-                                        TAG,
-                                        "All ${txidStrings.size} txs already in persistent cache",
-                                    )
-                                }
-                            }
-                        }
-                        // BDK serial fetchTx — hits proxy cache for known txids
-                        for (txid in knownTxids) {
-                            try {
-                                client.fetchTx(txid)
-                            } catch (e: Exception) {
-                                if (BuildConfig.DEBUG) Log.w(TAG, "tx_cache warm failed for $txid: ${e.message}")
-                            }
-                        }
-                        if (BuildConfig.DEBUG) Log.d(TAG, "Pre-warmed tx_cache with ${knownTxids.size} transactions")
-                    }
-
-                    // No timeout on full scan - large wallets with extensive tx history
-                    // can legitimately take minutes. TCP-level timeouts handle dead connections.
-                    // Only fetch prev txouts on the very first sync (needsFullSync=true).
-                    // After that they're persisted in the database; re-fetching them on every
-                    // app-launch full scan adds extra cold Electrum queries for no benefit.
-                    val needsPrevTxouts = secureStorage.needsFullSync(activeWalletId)
-                    val walletGapLimit =
-                        (secureStorage.getWalletMetadata(activeWalletId)?.gapLimit
-                            ?: StoredWallet.DEFAULT_GAP_LIMIT).toULong()
+                    val proxy = cachingProxy
+                    proxy?.setBridgeReadTimeout(FULL_SCAN_SO_TIMEOUT_MS)
                     val update =
-                        client.fullScan(
-                            request = fullScanRequest,
-                            stopGap = walletGapLimit,
-                            batchSize = FULL_SCAN_BATCH_SIZE,
-                            fetchPrevTxouts = needsPrevTxouts,
-                        )
+                        try {
+                            _walletState.value =
+                                _walletState.value.copy(
+                                    syncProgress = SyncProgress(status = "Preparing sync..."),
+                                )
+
+                            val allScriptHashes = getAllRevealedScriptHashes(currentWallet)
+                            if (proxy != null && allScriptHashes.isNotEmpty()) {
+                                val currentStatuses = proxy.subscribeScriptHashes(allScriptHashes)
+                                proxy.setValidStatuses(currentStatuses)
+
+                                if (BuildConfig.DEBUG) {
+                                    val persistedStatuses = electrumCache.loadScriptHashStatuses()
+                                    val unchangedCount =
+                                        currentStatuses.count { (scriptHash, status) ->
+                                            status != null && persistedStatuses[scriptHash] == status
+                                        }
+                                    val changedCount = currentStatuses.size - unchangedCount
+                                    Log.d(
+                                        TAG,
+                                        "Prepared full sync history cache for ${currentStatuses.size} revealed scripts " +
+                                            "($unchangedCount unchanged, $changedCount changed)",
+                                    )
+                                }
+                            }
+
+                            // No timeout on full scan - large wallets with extensive tx history
+                            // can legitimately take minutes. TCP-level timeouts handle dead connections.
+                            // Do not fetch prev txouts during full scan (same as Sparrow): only txs
+                            // from scripthash history are needed; chasing input prevouts multiplies
+                            // transaction.get traffic with little benefit for balance/UTXO correctness.
+                            val needsPrevTxouts = false
+                            val walletGapLimit =
+                                (secureStorage.getWalletMetadata(activeWalletId)?.gapLimit
+                                    ?: StoredWallet.DEFAULT_GAP_LIMIT).toULong()
+                            try {
+                                client.fullScan(
+                                    request = buildFullScanRequest(),
+                                    stopGap = walletGapLimit,
+                                    batchSize = fullScanBatchSize,
+                                    fetchPrevTxouts = needsPrevTxouts,
+                                )
+                            } catch (e: Exception) {
+                                if (!isTransientElectrumSyncError(e)) throw e
+                                if (BuildConfig.DEBUG) {
+                                    Log.w(TAG, "Full scan transient failure, retrying once: ${e.message}")
+                                }
+                                delay(2_000)
+                                client.fullScan(
+                                    request = buildFullScanRequest(),
+                                    stopGap = walletGapLimit,
+                                    batchSize = fullScanBatchSize,
+                                    fetchPrevTxouts = needsPrevTxouts,
+                                )
+                            }
+                        } finally {
+                            proxy?.clearValidStatuses()
+                            proxy?.setBridgeReadTimeout(null)
+                        }
 
                     // Success: reset batch size
                     currentBatchSize = SYNC_BATCH_SIZE
@@ -2119,20 +2291,26 @@ class WalletRepository(context: Context) {
                             syncProgress = SyncProgress(status = "Saving to database..."),
                         )
                     walletPersister?.let { currentWallet.persist(it) }
+                    var postSyncWallet = currentWallet
 
                     // BDK's in-memory UTXO/keychain index can be stale after
                     // applyUpdateEvents when the full scan revealed new addresses.
                     // Reloading from the persisted database forces a full rebuild
                     // so that balance() matches the actual transaction set.
                     if (events.isNotEmpty()) {
+                        refreshWalletTransactionCache(currentWallet)
                         val preReloadBalance = try { amountToSats(currentWallet.balance().total) } catch (_: Exception) { null }
                         if (reloadWalletFromDatabase()) {
+                            postSyncWallet = wallet ?: currentWallet
+                            refreshWalletTransactionCache(postSyncWallet)
                             if (BuildConfig.DEBUG) {
-                                val postBalance = try { amountToSats(wallet!!.balance().total) } catch (_: Exception) { null }
+                                val postBalance = try { amountToSats(postSyncWallet.balance().total) } catch (_: Exception) { null }
                                 if (preReloadBalance != postBalance) {
                                     Log.w(TAG, "Full scan reload corrected balance: $preReloadBalance -> $postBalance")
                                 }
                             }
+                        } else {
+                            wallet = currentWallet
                         }
                     }
 
@@ -2146,9 +2324,9 @@ class WalletRepository(context: Context) {
 
                     _walletState.value =
                         _walletState.value.copy(
-                            syncProgress = SyncProgress(status = "Processing transactions..."),
+                            syncProgress = SyncProgress(status = "Updating wallet..."),
                         )
-                    updateWalletState()
+                    updateWalletStateLightweight()
 
                     // Reclaim revealed-but-unused addresses that have no label
                     try {
@@ -2163,8 +2341,9 @@ class WalletRepository(context: Context) {
                         _walletState.value.copy(
                             syncProgress = SyncProgress(status = "Refreshing address cache..."),
                         )
-                    refreshScriptHashCache(currentWallet)
+                    refreshScriptHashCache(postSyncWallet)
                     _walletState.value = _walletState.value.copy(isSyncing = false, isFullSyncing = false, syncProgress = null)
+                    scheduleDetailedTransactionRefresh(activeWalletId, postSyncWallet)
 
                     if (BuildConfig.DEBUG) Log.d(TAG, "Full sync completed successfully")
                     WalletResult.Success(Unit)
@@ -2662,10 +2841,9 @@ class WalletRepository(context: Context) {
                 proxy.notifications.collect { notification ->
                     if (!isActive) return@collect
 
-                    // Subscription socket detected dead server — stop collecting.
-                    // The heartbeat loop in ViewModel will handle disconnect + auto-switch.
                     if (notification is ElectrumNotification.ConnectionLost) {
-                        if (BuildConfig.DEBUG) Log.w(TAG, "Subscription socket reported connection lost")
+                        Log.w(TAG, "Subscription socket reported connection lost")
+                        _connectionEvents.tryEmit(ConnectionEvent.ConnectionLost)
                         return@collect
                     }
 
@@ -5122,6 +5300,8 @@ class WalletRepository(context: Context) {
 
                 // Delete wallet data from secure storage
                 secureStorage.deleteWallet(walletId)
+                electrumCache.clearAllHistory()
+                electrumCache.clearConfirmedTransactionDetails(walletId)
 
                 // Delete BDK database files
                 deleteWalletDatabase(walletId)
@@ -5171,6 +5351,7 @@ class WalletRepository(context: Context) {
                 cachingProxy?.stop()
                 cachingProxy = null
                 _minFeeRate.value = CachingElectrumProxy.DEFAULT_MIN_FEE_RATE
+                electrumCache.clearAllHistory()
                 clearScriptHashCache()
             }
         }
@@ -5186,6 +5367,7 @@ class WalletRepository(context: Context) {
             cachingProxy?.stop()
             cachingProxy = null
             _minFeeRate.value = CachingElectrumProxy.DEFAULT_MIN_FEE_RATE
+            electrumCache.clearAllHistory()
             clearScriptHashCache()
             _walletState.value =
                 _walletState.value.copy(
@@ -5340,6 +5522,23 @@ class WalletRepository(context: Context) {
         return secureStorage.getActiveElectrumServer()
     }
 
+    private fun getActiveFullScanBatchSize(): ULong {
+        val config = getElectrumConfig()
+        val useSlowPath = isTorEnabled() || config?.useTor == true || config?.isOnionAddress() == true
+        return if (useSlowPath) FULL_SCAN_BATCH_SIZE_TOR else FULL_SCAN_BATCH_SIZE_CLEARNET
+    }
+
+    private fun getWalletTransactionDescriptorCacheKey(activeWalletId: String?): String? {
+        if (activeWalletId.isNullOrBlank()) return null
+        val externalDescriptor = walletExternalDescriptor?.toString() ?: return null
+        val internalDescriptor = walletInternalDescriptor?.toString().orEmpty()
+        return if (walletIsSingleKey) {
+            "single|$externalDescriptor"
+        } else {
+            "paired|$externalDescriptor|$internalDescriptor"
+        }
+    }
+
     /**
      * Get all saved Electrum servers, seeding defaults on first launch only.
      * If user deletes all servers, they stay deleted.
@@ -5391,6 +5590,10 @@ class WalletRepository(context: Context) {
      */
     fun saveElectrumServer(config: ElectrumConfig): ElectrumConfig {
         return secureStorage.saveElectrumServer(config)
+    }
+
+    fun reorderElectrumServerIds(orderedIds: List<String>) {
+        secureStorage.reorderElectrumServerIds(orderedIds)
     }
 
     /**
@@ -5603,6 +5806,30 @@ class WalletRepository(context: Context) {
         secureStorage.setSpendUnconfirmed(enabled)
     }
 
+    fun getPsbtQrDensity(): SecureStorage.QrDensity {
+        return secureStorage.getPsbtQrDensity()
+    }
+
+    fun setPsbtQrDensity(density: SecureStorage.QrDensity) {
+        secureStorage.setPsbtQrDensity(density)
+    }
+
+    fun getPsbtQrBrightness(): Float {
+        return secureStorage.getPsbtQrBrightness()
+    }
+
+    fun setPsbtQrBrightness(brightness: Float) {
+        secureStorage.setPsbtQrBrightness(brightness)
+    }
+
+    fun getPsbtQrPlaybackSpeed(): SecureStorage.QrPlaybackSpeed {
+        return secureStorage.getPsbtQrPlaybackSpeed()
+    }
+
+    fun setPsbtQrPlaybackSpeed(speed: SecureStorage.QrPlaybackSpeed) {
+        secureStorage.setPsbtQrPlaybackSpeed(speed)
+    }
+
     fun isNfcEnabled(): Boolean {
         return secureStorage.isNfcEnabled()
     }
@@ -5656,6 +5883,10 @@ class WalletRepository(context: Context) {
     fun setPriceSource(source: String) {
         secureStorage.setPriceSource(source)
     }
+
+    fun getPriceCurrency(): String = secureStorage.getPriceCurrency()
+
+    fun setPriceCurrency(currencyCode: String) = secureStorage.setPriceCurrency(currencyCode)
 
     fun getAllWalletIds(): List<String> = secureStorage.getWalletIds()
 
@@ -5714,6 +5945,24 @@ class WalletRepository(context: Context) {
 
     fun setLiquidEnabledForWallet(walletId: String, enabled: Boolean) =
         secureStorage.setLiquidEnabledForWallet(walletId, enabled)
+
+    fun getLiquidGapLimit(walletId: String): Int =
+        secureStorage.getLiquidGapLimit(walletId)
+
+    fun setLiquidGapLimit(walletId: String, gapLimit: Int) =
+        secureStorage.setLiquidGapLimit(walletId, gapLimit)
+
+    fun isLiquidWatchOnly(walletId: String): Boolean =
+        secureStorage.isLiquidWatchOnly(walletId)
+
+    fun setLiquidWatchOnly(walletId: String, watchOnly: Boolean) =
+        secureStorage.setLiquidWatchOnly(walletId, watchOnly)
+
+    fun getLiquidDescriptor(walletId: String): String? =
+        secureStorage.getLiquidDescriptor(walletId)
+
+    fun setLiquidDescriptor(walletId: String, descriptor: String) =
+        secureStorage.setLiquidDescriptor(walletId, descriptor)
 
     fun getFrozenUtxosForWallet(walletId: String): Set<String> =
         secureStorage.getFrozenUtxos(walletId)
@@ -5923,16 +6172,50 @@ class WalletRepository(context: Context) {
             refreshWalletTransactionCache(currentWallet)
         }
         val network = currentWallet.network()
-        return walletTransactionCache
+        val descriptorCacheKey = getWalletTransactionDescriptorCacheKey(activeWalletId)
+        val cachedConfirmedDetails =
+            if (activeWalletId != null && descriptorCacheKey != null) {
+                val confirmedTxids =
+                    walletTransactionCache
+                        .filterValues { it.chainPosition is ChainPosition.Confirmed }
+                        .keys
+                        .toList()
+                electrumCache.loadConfirmedTransactionDetails(activeWalletId, descriptorCacheKey, confirmedTxids)
+            } else {
+                emptyMap()
+            }
+        val newlyBuiltConfirmedDetails = mutableListOf<TransactionDetails>()
+
+        val transactions =
+            walletTransactionCache
             .mapNotNull { (txid, cachedTransaction) ->
-                buildTransactionDetails(
-                    currentWallet = currentWallet,
-                    activeWalletId = activeWalletId,
-                    txid = txid,
-                    cachedTransaction = cachedTransaction,
-                    network = network,
-                )
+                val cachedDetails =
+                    if (cachedTransaction.chainPosition is ChainPosition.Confirmed) {
+                        activeWalletId?.let { secureStorage.removeTxFirstSeen(it, txid) }
+                        cachedConfirmedDetails[txid]
+                    } else {
+                        null
+                    }
+
+                cachedDetails
+                    ?: buildTransactionDetails(
+                        currentWallet = currentWallet,
+                        activeWalletId = activeWalletId,
+                        txid = txid,
+                        cachedTransaction = cachedTransaction,
+                        network = network,
+                    )?.also { details ->
+                        if (details.isConfirmed) {
+                            newlyBuiltConfirmedDetails += details
+                        }
+                    }
             }.sortedByDescending { it.timestamp ?: Long.MAX_VALUE }
+
+        if (activeWalletId != null && descriptorCacheKey != null && newlyBuiltConfirmedDetails.isNotEmpty()) {
+            electrumCache.putConfirmedTransactionDetails(activeWalletId, descriptorCacheKey, newlyBuiltConfirmedDetails)
+        }
+
+        return transactions
     }
 
     private fun buildWalletStateChecksum(
@@ -5970,6 +6253,120 @@ class WalletRepository(context: Context) {
         incrementalReconcileCounter += 1
     }
 
+    private fun updateWalletStateLightweight() {
+        val currentWallet = wallet ?: run {
+            updateWalletState()
+            return
+        }
+        val previousState = _walletState.value
+        val activeWalletId = secureStorage.getActiveWalletId()
+        val shouldPreserveDerivedState = previousState.activeWallet?.id == activeWalletId
+        val activeWallet: StoredWallet?
+        val allWallets: List<StoredWallet>
+
+        try {
+            activeWallet = activeWalletId?.let { secureStorage.getWalletMetadata(it) }
+            allWallets = secureStorage.getAllWallets()
+        } catch (e: IllegalArgumentException) {
+            _walletState.value =
+                WalletState(
+                    isInitialized = secureStorage.getWalletIds().isNotEmpty(),
+                    wallets = emptyList(),
+                    activeWallet = null,
+                    error = e.message,
+                )
+            return
+        }
+
+        try {
+            val balance = currentWallet.balance()
+            val lastAddress =
+                try {
+                    currentWallet.nextUnusedAddress(KeychainKind.EXTERNAL).address.toString()
+                } catch (_: Exception) {
+                    previousState.currentAddress
+                }
+            val lastSyncTime = activeWalletId?.let { secureStorage.getLastSyncTime(it) }
+            val latestBlockHeight =
+                try {
+                    currentWallet.latestCheckpoint().height
+                } catch (_: Exception) {
+                    previousState.blockHeight
+                }
+
+            _walletState.value =
+                previousState.copy(
+                    isInitialized = true,
+                    wallets = allWallets,
+                    activeWallet = activeWallet,
+                    balanceSats = amountToSats(balance.total),
+                    pendingIncomingSats = if (shouldPreserveDerivedState) previousState.pendingIncomingSats else 0UL,
+                    pendingOutgoingSats = if (shouldPreserveDerivedState) previousState.pendingOutgoingSats else 0UL,
+                    isTransactionHistoryLoading = true,
+                    transactions = if (shouldPreserveDerivedState) previousState.transactions else emptyList(),
+                    currentAddress = lastAddress,
+                    lastSyncTimestamp = lastSyncTime,
+                    blockHeight = latestBlockHeight,
+                    error = null,
+                )
+        } catch (_: Exception) {
+            _walletState.value =
+                previousState.copy(
+                    wallets = allWallets,
+                    activeWallet = activeWallet,
+                    error = "Failed to update wallet state",
+                )
+        }
+    }
+
+    private fun scheduleDetailedTransactionRefresh(
+        walletId: String,
+        walletSnapshot: Wallet,
+    ) {
+        transactionRefreshJob?.cancel()
+        transactionRefreshJob =
+            repositoryScope.launch {
+                try {
+                    syncMutex.withLock {
+                        if (!isActive || secureStorage.getActiveWalletId() != walletId || wallet !== walletSnapshot) {
+                            return@withLock
+                        }
+
+                        val transactions = buildTransactionDetailsList(walletSnapshot, walletId)
+                        val visibleTransactions = filterPendingReplacementTransactions(walletId, transactions)
+                        val currentState = _walletState.value
+                        val checksum = buildWalletStateChecksum(currentState.balanceSats, visibleTransactions)
+
+                        if (!isActive || secureStorage.getActiveWalletId() != walletId || wallet !== walletSnapshot) {
+                            return@withLock
+                        }
+
+                        _walletState.value =
+                            currentState.copy(
+                                pendingIncomingSats = checksum.pendingIncomingSats,
+                                pendingOutgoingSats = checksum.pendingOutgoingSats,
+                                isTransactionHistoryLoading = false,
+                                transactions = visibleTransactions,
+                                error = null,
+                            )
+                        markIncrementalReconcileCompleted()
+                        if (BuildConfig.DEBUG) {
+                            Log.d(TAG, "Background transaction refresh completed with ${visibleTransactions.size} transactions")
+                        }
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    if (BuildConfig.DEBUG) {
+                        Log.w(TAG, "Background transaction refresh failed: ${e.message}")
+                    }
+                    if (secureStorage.getActiveWalletId() == walletId && wallet === walletSnapshot) {
+                        _walletState.value = _walletState.value.copy(isTransactionHistoryLoading = false)
+                    }
+                }
+            }
+    }
+
     private fun updateWalletState() {
         val currentWallet = wallet
         val previousState = _walletState.value
@@ -5997,6 +6394,7 @@ class WalletRepository(context: Context) {
                 val watchState = getWatchAddressState(activeWalletId, activeWallet, allWallets)
                 _walletState.value =
                     watchState.copy(
+                        isTransactionHistoryLoading = false,
                         isSyncing = previousState.isSyncing,
                         isFullSyncing = previousState.isFullSyncing,
                         syncProgress = previousState.syncProgress,
@@ -6010,6 +6408,7 @@ class WalletRepository(context: Context) {
                         balanceSats = 0UL,
                         pendingIncomingSats = 0UL,
                         pendingOutgoingSats = 0UL,
+                        isTransactionHistoryLoading = false,
                         transactions = emptyList(),
                         currentAddress = null,
                         currentAddressInfo = null,
@@ -6063,6 +6462,7 @@ class WalletRepository(context: Context) {
                     balanceSats = stateChecksum.balanceSats,
                     pendingIncomingSats = stateChecksum.pendingIncomingSats,
                     pendingOutgoingSats = stateChecksum.pendingOutgoingSats,
+                    isTransactionHistoryLoading = false,
                     transactions = visibleTransactions,
                     currentAddress = lastAddress,
                     lastSyncTimestamp = lastSyncTime,
@@ -6211,6 +6611,7 @@ class WalletRepository(context: Context) {
                     balanceSats = checksum.balanceSats,
                     pendingIncomingSats = checksum.pendingIncomingSats,
                     pendingOutgoingSats = checksum.pendingOutgoingSats,
+                    isTransactionHistoryLoading = false,
                     transactions = sortedTransactions,
                     currentAddress = lastAddress,
                     lastSyncTimestamp = lastSyncTime,
@@ -6520,5 +6921,9 @@ class WalletRepository(context: Context) {
         return when (this) {
             WalletNetwork.BITCOIN -> Network.BITCOIN
         }
+    }
+
+    sealed interface ConnectionEvent {
+        data object ConnectionLost : ConnectionEvent
     }
 }

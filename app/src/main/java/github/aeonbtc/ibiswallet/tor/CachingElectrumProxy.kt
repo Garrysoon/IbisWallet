@@ -52,13 +52,16 @@ sealed class ElectrumNotification {
 }
 
 /**
- * Protocol-aware local TCP proxy between BDK's ElectrumClient and the real
- * Electrum server. Combines the roles of the former TorProxyBridge (SSL
+ * Protocol-aware local TCP proxy between a local Electrum consumer (Bitcoin
+ * BDK or Liquid LWK) and the real Electrum server. Combines the roles of the
+ * former TorProxyBridge (SSL
  * termination, Tor SOCKS5) and ElectrumFeatureService (relay fee, verbose tx)
  * into a single class with three upstream connections:
  *
- * 1. **Bridge connection** — Bidirectional stream copy (preserves BDK batching)
- *    with line-level interception for `blockchain.transaction.get`:
+ * 1. **Bridge connection** — Bidirectional stream copy (preserves client batching)
+ *    with line-level interception for cacheable Electrum methods:
+ *    - `blockchain.scripthash.get_history`: cache hits served instantly when
+ *      validated by a pre-subscribed script hash status
  *    - BDK→Server: cache hits served instantly without forwarding
  *    - Server→BDK: responses cached in SQLite for future hits
  *
@@ -77,6 +80,7 @@ sealed class ElectrumNotification {
 class CachingElectrumProxy(
     private val targetHost: String,
     private val targetPort: Int,
+    private val proxyOwner: String = "electrum-client",
     private val useSsl: Boolean = false,
     private val useTorProxy: Boolean = false,
     private val torSocksHost: String = "127.0.0.1",
@@ -93,6 +97,7 @@ class CachingElectrumProxy(
         private const val TOR_RETRY_DELAY_MS = 2000L
         const val DEFAULT_MIN_FEE_RATE = 1.0
         private const val BTC_PER_KB_TO_SAT_PER_VB = 100_000.0
+        private const val PIPELINE_CHUNK_SIZE = 100
 
         /** Read timeout for the subscription socket (5 minutes).
          *  If no data arrives in this window (not even a block header),
@@ -109,6 +114,10 @@ class CachingElectrumProxy(
         private const val PING_LOCK_TIMEOUT_MS = 3_000L
     }
 
+    private val endpointLabel = "$targetHost:$targetPort"
+
+    private fun roleTag(role: String): String = "[$proxyOwner/$role]"
+
     // ==================== Bridge (BDK traffic) ====================
 
     private var serverSocket: ServerSocket? = null
@@ -121,10 +130,13 @@ class CachingElectrumProxy(
     private var clientSocket: Socket? = null
     private var bridgeTargetSocket: Socket? = null
     private var preConnectedSocket: Socket? = null
+    @Volatile private var bridgeSoTimeoutOverride: Int? = null
 
-    // Tracks in-flight blockchain.transaction.get request ids for caching responses.
+    // Tracks in-flight cacheable bridge requests for caching responses.
     // Populated by the BDK→Server reader, consumed by the Server→BDK reader.
     private val pendingTxGetRequests = ConcurrentHashMap<Int, String>() // id → txid
+    private val pendingHistoryRequests = ConcurrentHashMap<Int, String>() // id → scriptHash
+    private val validScriptHashStatuses = ConcurrentHashMap<String, String>() // scriptHash → current status
 
     // ==================== Direct queries (verbose tx, relay fee) ====================
 
@@ -157,7 +169,7 @@ class CachingElectrumProxy(
     @Synchronized
     fun start(): Int {
         if (isRunning) {
-            if (BuildConfig.DEBUG) Log.d(TAG, "Proxy already running on port $localPort")
+            if (BuildConfig.DEBUG) Log.d(TAG, "${roleTag("lifecycle")} Proxy already running on port $localPort")
             return localPort
         }
 
@@ -173,14 +185,14 @@ class CachingElectrumProxy(
             if (BuildConfig.DEBUG) {
                 Log.d(
                     TAG,
-                    "Proxy started on port $localPort -> $targetHost:$targetPort (SSL=$useSsl, Tor=$useTorProxy)",
+                    "${roleTag("lifecycle")} Proxy started on port $localPort -> $endpointLabel (SSL=$useSsl, Tor=$useTorProxy)",
                 )
             }
 
             bridgeJob = scope.launch { acceptConnections() }
             return localPort
         } catch (e: Exception) {
-            if (BuildConfig.DEBUG) Log.e(TAG, "Failed to start proxy", e)
+            if (BuildConfig.DEBUG) Log.e(TAG, "${roleTag("lifecycle")} Failed to start proxy", e)
             stop()
             throw e
         }
@@ -188,7 +200,7 @@ class CachingElectrumProxy(
 
     @Synchronized
     fun stop() {
-        if (BuildConfig.DEBUG) Log.d(TAG, "Stopping proxy")
+        if (BuildConfig.DEBUG) Log.d(TAG, "${roleTag("lifecycle")} Stopping proxy")
         isRunning = false
         bridgeJob?.cancel()
         bridgeJob = null
@@ -208,11 +220,34 @@ class CachingElectrumProxy(
         serverSocket = null
         localPort = 0
         pendingTxGetRequests.clear()
+        pendingHistoryRequests.clear()
+        validScriptHashStatuses.clear()
         scope.cancel()
     }
 
     fun setPreConnectedSocket(socket: Socket) {
         preConnectedSocket = socket
+    }
+
+    fun setBridgeReadTimeout(timeoutMs: Int?) {
+        bridgeSoTimeoutOverride = timeoutMs
+        try {
+            bridgeTargetSocket?.soTimeout = timeoutMs ?: soTimeoutMs
+        } catch (_: Exception) {
+        }
+    }
+
+    fun setValidStatuses(statuses: Map<String, String?>) {
+        validScriptHashStatuses.clear()
+        statuses.forEach { (scriptHash, status) ->
+            if (!status.isNullOrBlank()) {
+                validScriptHashStatuses[scriptHash] = status
+            }
+        }
+    }
+
+    fun clearValidStatuses() {
+        validScriptHashStatuses.clear()
     }
 
     // ==================== Bidirectional Bridge ====================
@@ -221,64 +256,78 @@ class CachingElectrumProxy(
         withContext(Dispatchers.IO) {
             while (isRunning && isActive) {
                 try {
-                    if (BuildConfig.DEBUG) Log.d(TAG, "Waiting for BDK connection on port $localPort...")
+                    if (BuildConfig.DEBUG) {
+                        Log.d(
+                            TAG,
+                            "${roleTag("bridge")} Waiting for local client on port $localPort (normal between sync/request sessions)",
+                        )
+                    }
                     val client = serverSocket?.accept() ?: break
-                    client.soTimeout = soTimeoutMs
+                    // The loopback client may pause between request bursts while
+                    // processing responses. Let EOF or the upstream socket decide
+                    // when this bridge session should end.
+                    client.soTimeout = 0
                     clientSocket = client
 
-                    if (BuildConfig.DEBUG) Log.d(TAG, "Accepted BDK connection")
+                    if (BuildConfig.DEBUG) Log.d(TAG, "${roleTag("bridge")} Accepted local client connection")
 
-                    val target = createTargetConnection()
+                    val target = createTargetConnection("bridge")
                     if (target == null) {
-                        if (BuildConfig.DEBUG) Log.e(TAG, "Failed to connect to $targetHost:$targetPort")
+                        if (BuildConfig.DEBUG) Log.e(TAG, "${roleTag("bridge")} Failed to connect upstream to $endpointLabel")
                         closeQuietly(client)
                         continue
                     }
                     bridgeTargetSocket = target
 
-                    if (BuildConfig.DEBUG) Log.d(TAG, "Bridge connected to target, starting bidirectional copy")
+                    if (BuildConfig.DEBUG) {
+                        Log.d(TAG, "${roleTag("bridge")} Upstream connected to $endpointLabel, starting bidirectional copy")
+                    }
                     bridgeConnections(client, target)
                 } catch (_: SocketTimeoutException) {
                     // Accept timeout — loop
                 } catch (e: SocketException) {
                     if (isRunning) {
-                        if (BuildConfig.DEBUG) Log.e(TAG, "Socket exception in accept loop", e)
+                        if (BuildConfig.DEBUG) Log.e(TAG, "${roleTag("bridge")} Socket exception in accept loop", e)
                     }
                     break
                 } catch (e: Exception) {
                     if (isRunning) {
-                        if (BuildConfig.DEBUG) Log.e(TAG, "Error in accept loop", e)
+                        if (BuildConfig.DEBUG) Log.e(TAG, "${roleTag("bridge")} Error in accept loop", e)
                     }
                 }
             }
-            if (BuildConfig.DEBUG) Log.d(TAG, "Accept loop ended")
+            if (BuildConfig.DEBUG) Log.d(TAG, "${roleTag("bridge")} Accept loop ended")
         }
 
     /**
-     * Bidirectional bridge between BDK and the Electrum server.
+     * Bidirectional bridge between the local client and the Electrum server.
      *
      * Uses two concurrent coroutines that copy data line-by-line in each
      * direction, preserving BDK's batched/pipelined request pattern:
      *
-     * **BDK → Server**: Reads each JSON-RPC line from BDK. For
+     * **Client → Server**: Reads each JSON-RPC line from the local client. For
      * `blockchain.transaction.get` requests with a cache hit, responds to BDK
      * directly without forwarding. Cache misses and all other requests are
      * forwarded to the server immediately (preserving batch timing). Pending
      * tx.get request ids are tracked in [pendingTxGetRequests] for response
      * caching.
      *
-     * **Server → BDK**: Reads each line from the server. If the response id
+     * **Server → Client**: Reads each line from the server. If the response id
      * matches a pending tx.get request, the result is cached in SQLite. All
      * lines are forwarded to BDK.
      *
      * Both directions use smart flush (only when no more data is immediately
      * available), which batches small writes into fewer Tor circuit sends.
+     *
+     * A completed bridge session is expected: BDK/LWK may open a local TCP
+     * session for one sync or query burst, close it, then reconnect later.
      */
     private suspend fun bridgeConnections(
         client: Socket,
         target: Socket,
     ) = withContext(Dispatchers.IO) {
         pendingTxGetRequests.clear()
+        pendingHistoryRequests.clear()
 
         // Synchronized writer for BDK — both directions may write to it
         // (cache-hit responses from clientToServer, forwarded from serverToClient)
@@ -305,27 +354,34 @@ class CachingElectrumProxy(
                     )
                 }
 
-            // Wait for either direction to complete (connection closed)
+            // Wait for either direction to complete. Returning to the accept loop
+            // afterwards is normal and means we are ready for the next local session.
             select {
                 clientToServer.onAwait {}
                 serverToClient.onAwait {}
             }
 
-            if (BuildConfig.DEBUG) Log.d(TAG, "Bridge connection ended")
+            if (BuildConfig.DEBUG) {
+                Log.d(
+                    TAG,
+                    "${roleTag("bridge")} Local bridge session ended; waiting for the next client is expected",
+                )
+            }
         } catch (e: Exception) {
-            if (BuildConfig.DEBUG) Log.e(TAG, "Error in bridge", e)
+            if (BuildConfig.DEBUG) Log.e(TAG, "${roleTag("bridge")} Error in bridge", e)
         } finally {
             closeQuietly(client)
             closeQuietly(target)
             clientSocket = null
             bridgeTargetSocket = null
             pendingTxGetRequests.clear()
+            pendingHistoryRequests.clear()
         }
     }
 
     /**
-     * BDK → Server direction. Reads lines from BDK, intercepts tx.get cache
-     * hits, forwards everything else to the server.
+     * Local client → Server direction. Reads lines from the local client,
+     * intercepts tx.get cache hits, forwards everything else to the server.
      */
     private fun copyClientToServer(
         bdkInput: InputStream,
@@ -342,21 +398,30 @@ class CachingElectrumProxy(
                 val line = bdkReader.readLine() ?: break
                 if (line.isBlank()) continue
 
-                // Try to serve blockchain.transaction.get from cache
-                val cacheResponse = tryServFromCache(line)
-                if (cacheResponse != null) {
-                    // Cache hit — respond directly to BDK, don't forward to server
-                    val responseBytes = (cacheResponse + "\n").toByteArray()
-                    bdkWriteLock.withLock {
-                        bdkOutput.write(responseBytes)
-                        bdkOutput.flush()
+                val json =
+                    try {
+                        JSONObject(line)
+                    } catch (_: Exception) {
+                        null
                     }
-                    totalBytes += responseBytes.size
-                    continue
-                }
 
-                // Track tx.get requests so we can cache the server response
-                trackTxGetRequest(line)
+                if (json != null) {
+                    // Try to serve cacheable Electrum requests from cache
+                    val cacheResponse = tryServFromCache(json)
+                    if (cacheResponse != null) {
+                        // Cache hit — respond directly to BDK, don't forward to server
+                        val responseBytes = (cacheResponse + "\n").toByteArray()
+                        bdkWriteLock.withLock {
+                            bdkOutput.write(responseBytes)
+                            bdkOutput.flush()
+                        }
+                        totalBytes += responseBytes.size
+                        continue
+                    }
+
+                    // Track cacheable requests so we can cache the server response (single parse)
+                    trackPendingRequest(json)
+                }
 
                 // Forward to server
                 val bytes = (line + "\n").toByteArray()
@@ -370,10 +435,19 @@ class CachingElectrumProxy(
                     serverBuffered.flush()
                 }
             }
+        } catch (_: SocketTimeoutException) {
+            if (BuildConfig.DEBUG) {
+                Log.w(
+                    TAG,
+                    "${roleTag("bridge")} Local client read timed out unexpectedly, total bytes: $totalBytes",
+                )
+            }
         } catch (_: SocketException) {
-            if (BuildConfig.DEBUG) Log.d(TAG, "[BDK->Server] Socket closed, total bytes: $totalBytes")
+            if (BuildConfig.DEBUG) Log.d(TAG, "${roleTag("bridge")} Local client socket closed, total bytes: $totalBytes")
         } catch (e: IOException) {
-            if (BuildConfig.DEBUG) Log.d(TAG, "[BDK->Server] IO error: ${e.message}, total bytes: $totalBytes")
+            if (BuildConfig.DEBUG) {
+                Log.d(TAG, "${roleTag("bridge")} Local client IO error: ${e.message}, total bytes: $totalBytes")
+            }
         }
         try {
             serverBuffered.flush()
@@ -383,8 +457,8 @@ class CachingElectrumProxy(
     }
 
     /**
-     * Server → BDK direction. Reads lines from server, caches tx.get responses,
-     * forwards everything to BDK.
+     * Server → Local client direction. Reads lines from the server, caches
+     * tx.get responses, forwards everything to the local client.
      */
     private fun copyServerToClient(
         serverInput: InputStream,
@@ -411,10 +485,19 @@ class CachingElectrumProxy(
                 }
                 totalBytes += bytes.size
             }
+        } catch (_: SocketTimeoutException) {
+            if (BuildConfig.DEBUG) {
+                Log.w(
+                    TAG,
+                    "${roleTag("bridge")} Upstream read timed out after ${soTimeoutMs}ms, total bytes: $totalBytes",
+                )
+            }
         } catch (_: SocketException) {
-            if (BuildConfig.DEBUG) Log.d(TAG, "[Server->BDK] Socket closed, total bytes: $totalBytes")
+            if (BuildConfig.DEBUG) Log.d(TAG, "${roleTag("bridge")} Upstream socket closed, total bytes: $totalBytes")
         } catch (e: IOException) {
-            if (BuildConfig.DEBUG) Log.d(TAG, "[Server->BDK] IO error: ${e.message}, total bytes: $totalBytes")
+            if (BuildConfig.DEBUG) {
+                Log.d(TAG, "${roleTag("bridge")} Upstream IO error: ${e.message}, total bytes: $totalBytes")
+            }
         }
         bdkWriteLock.withLock {
             try {
@@ -428,89 +511,119 @@ class CachingElectrumProxy(
     // ==================== Cache Interception ====================
 
     /**
-     * Try to serve a BDK request from cache. Only intercepts non-verbose
-     * `blockchain.transaction.get` requests.
+     * Try to serve a BDK request from cache.
      *
      * @return JSON-RPC response string if cache hit, null if miss
      */
-    private fun tryServFromCache(requestLine: String): String? {
-        val txCache = cache ?: return null
+    private fun tryServFromCache(json: JSONObject): String? {
+        val electrumCache = cache ?: return null
         return try {
-            val json = JSONObject(requestLine)
             val method = json.optString("method", "")
-            if (method != "blockchain.transaction.get") return null
-
             val params = json.optJSONArray("params") ?: return null
             if (params.length() < 1) return null
 
-            // Only intercept non-verbose (BDK always uses non-verbose)
-            if (params.length() >= 2) {
-                val verbose = params.opt(1)
-                if (verbose == true || verbose == java.lang.Boolean.TRUE) return null
-            }
+            when (method) {
+                "blockchain.transaction.get" -> {
+                    // Only intercept non-verbose (BDK always uses non-verbose)
+                    if (params.length() >= 2) {
+                        val verbose = params.opt(1)
+                        if (verbose == true || verbose == java.lang.Boolean.TRUE) return null
+                    }
 
-            val txid = params.optString(0, "")
-            if (txid.isBlank()) return null
+                    val txid = params.optString(0, "")
+                    if (txid.isBlank()) return null
 
-            val cachedHex = txCache.getRawTx(txid) ?: return null
-
-            val response =
-                JSONObject().apply {
-                    put("jsonrpc", "2.0")
-                    put("id", json.opt("id"))
-                    put("result", cachedHex)
+                    val cachedHex = electrumCache.getRawTx(txid) ?: return null
+                    if (BuildConfig.DEBUG) Log.d(TAG, "Cache HIT: tx $txid")
+                    JSONObject().apply {
+                        put("jsonrpc", "2.0")
+                        put("id", json.opt("id"))
+                        put("result", cachedHex)
+                    }.toString()
                 }
-            if (BuildConfig.DEBUG) Log.d(TAG, "Cache HIT: tx $txid")
-            response.toString()
+
+                "blockchain.scripthash.get_history" -> {
+                    val scriptHash = params.optString(0, "")
+                    if (scriptHash.isBlank()) return null
+                    val status = validScriptHashStatuses[scriptHash] ?: return null
+                    val cachedHistory = electrumCache.getHistory(scriptHash, status) ?: return null
+                    if (BuildConfig.DEBUG) Log.d(TAG, "Cache HIT: history $scriptHash")
+                    JSONObject().apply {
+                        put("jsonrpc", "2.0")
+                        put("id", json.opt("id"))
+                        put("result", JSONArray(cachedHistory))
+                    }.toString()
+                }
+
+                else -> null
+            }
         } catch (_: Exception) {
             null
         }
     }
 
     /**
-     * Track a tx.get request so we can cache the server's response.
+     * Track cacheable bridge requests so we can cache the server's response.
      */
-    private fun trackTxGetRequest(requestLine: String) {
+    private fun trackPendingRequest(json: JSONObject) {
         try {
-            val json = JSONObject(requestLine)
             val method = json.optString("method", "")
-            if (method != "blockchain.transaction.get") return
-
             val params = json.optJSONArray("params") ?: return
             if (params.length() < 1) return
-
-            // Only track non-verbose requests
-            if (params.length() >= 2) {
-                val verbose = params.opt(1)
-                if (verbose == true || verbose == java.lang.Boolean.TRUE) return
-            }
-
-            val txid = params.optString(0, "")
             val id = json.optInt("id", -1)
-            if (txid.isNotBlank() && id >= 0) {
-                pendingTxGetRequests[id] = txid
+
+            when (method) {
+                "blockchain.transaction.get" -> {
+                    // Only track non-verbose requests
+                    if (params.length() >= 2) {
+                        val verbose = params.opt(1)
+                        if (verbose == true || verbose == java.lang.Boolean.TRUE) return
+                    }
+
+                    val txid = params.optString(0, "")
+                    if (txid.isNotBlank() && id >= 0) {
+                        pendingTxGetRequests[id] = txid
+                    }
+                }
+
+                "blockchain.scripthash.get_history" -> {
+                    if (validScriptHashStatuses.isEmpty()) return
+                    val scriptHash = params.optString(0, "")
+                    if (scriptHash.isNotBlank() && id >= 0) {
+                        pendingHistoryRequests[id] = scriptHash
+                    }
+                }
             }
         } catch (_: Exception) {
         }
     }
 
     /**
-     * Try to cache a server response line if it matches a pending tx.get request.
+     * Try to cache a server response line if it matches a pending bridge request.
      */
     private fun tryCacheServerResponse(responseLine: String) {
-        val txCache = cache ?: return
-        if (pendingTxGetRequests.isEmpty()) return
+        val electrumCache = cache ?: return
+        if (pendingTxGetRequests.isEmpty() && pendingHistoryRequests.isEmpty()) return
         try {
             val json = JSONObject(responseLine)
             val id = json.optInt("id", -1)
-            val txid = pendingTxGetRequests.remove(id) ?: return
-
             if (json.has("error") && !json.isNull("error")) return
-            val hex = json.optString("result", "")
-            if (hex.isBlank() || hex.length < 20) return
 
-            txCache.putRawTx(txid, hex)
-            if (BuildConfig.DEBUG) Log.d(TAG, "Cache STORE: tx $txid (${hex.length / 2} bytes)")
+            val txid = pendingTxGetRequests.remove(id)
+            if (txid != null) {
+                val hex = json.optString("result", "")
+                if (hex.isBlank() || hex.length < 20) return
+
+                electrumCache.putRawTx(txid, hex)
+                if (BuildConfig.DEBUG) Log.d(TAG, "Cache STORE: tx $txid (${hex.length / 2} bytes)")
+                return
+            }
+
+            val scriptHash = pendingHistoryRequests.remove(id) ?: return
+            val status = validScriptHashStatuses[scriptHash] ?: return
+            val result = json.optJSONArray("result") ?: return
+            electrumCache.putHistory(scriptHash, status, result.toString())
+            if (BuildConfig.DEBUG) Log.d(TAG, "Cache STORE: history $scriptHash (${result.length()} entries)")
         } catch (_: Exception) {
         }
     }
@@ -537,7 +650,7 @@ class CachingElectrumProxy(
         // Create a new direct connection
         closeDirectConnectionLocked()
         try {
-            val socket = createTargetConnection() ?: return false
+            val socket = createTargetConnection("direct") ?: return false
             directSocket = socket
 
             val newWriter = PrintWriter(socket.getOutputStream(), false)
@@ -548,7 +661,7 @@ class CachingElectrumProxy(
 
             return performDirectHandshakeLocked(newWriter, newReader)
         } catch (e: Exception) {
-            if (BuildConfig.DEBUG) Log.w(TAG, "Failed to create direct connection: ${e.message}")
+            if (BuildConfig.DEBUG) Log.w(TAG, "${roleTag("direct")} Failed to create connection: ${e.message}")
             return false
         }
     }
@@ -580,10 +693,10 @@ class CachingElectrumProxy(
             }
 
             directHandshakeDone = true
-            if (BuildConfig.DEBUG) Log.d(TAG, "Direct query handshake completed")
+            if (BuildConfig.DEBUG) Log.d(TAG, "${roleTag("direct")} Handshake completed")
             true
         } catch (e: Exception) {
-            if (BuildConfig.DEBUG) Log.w(TAG, "Direct handshake failed: ${e.message}")
+            if (BuildConfig.DEBUG) Log.w(TAG, "${roleTag("direct")} Handshake failed: ${e.message}")
             false
         }
     }
@@ -737,7 +850,7 @@ class CachingElectrumProxy(
         // If we can't acquire the lock, someone else is actively using the
         // direct socket — the connection is alive by definition.
         if (!directLock.tryLock(PING_LOCK_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
-            if (BuildConfig.DEBUG) Log.d(TAG, "Ping: direct socket busy (lock held), treating as alive")
+            if (BuildConfig.DEBUG) Log.d(TAG, "${roleTag("direct")} Ping skipped because socket is busy; treating as alive")
             return true
         }
         try {
@@ -760,7 +873,7 @@ class CachingElectrumProxy(
                     )
                 return response != null
             } catch (e: Exception) {
-                if (BuildConfig.DEBUG) Log.w(TAG, "Ping failed: ${e.message}")
+                if (BuildConfig.DEBUG) Log.w(TAG, "${roleTag("direct")} Ping failed: ${e.message}")
                 closeDirectConnectionLocked()
                 return false
             } finally {
@@ -798,7 +911,7 @@ class CachingElectrumProxy(
 
         closeSubConnectionLocked()
         try {
-            val socket = createTargetConnection() ?: return false
+            val socket = createTargetConnection("subscription") ?: return false
             // Subscription socket uses a read timeout so we can detect silently-dead
             // servers. On timeout we ping to verify, and emit ConnectionLost if dead.
             socket.soTimeout = SUB_SOCKET_TIMEOUT_MS
@@ -812,7 +925,7 @@ class CachingElectrumProxy(
 
             return performSubHandshakeLocked(newWriter, newReader)
         } catch (e: Exception) {
-            if (BuildConfig.DEBUG) Log.w(TAG, "Failed to create subscription connection: ${e.message}")
+            if (BuildConfig.DEBUG) Log.w(TAG, "${roleTag("subscription")} Failed to create connection: ${e.message}")
             return false
         }
     }
@@ -844,10 +957,10 @@ class CachingElectrumProxy(
             }
 
             subHandshakeDone = true
-            if (BuildConfig.DEBUG) Log.d(TAG, "Subscription socket handshake completed")
+            if (BuildConfig.DEBUG) Log.d(TAG, "${roleTag("subscription")} Handshake completed")
             true
         } catch (e: Exception) {
-            if (BuildConfig.DEBUG) Log.w(TAG, "Subscription handshake failed: ${e.message}")
+            if (BuildConfig.DEBUG) Log.w(TAG, "${roleTag("subscription")} Handshake failed: ${e.message}")
             false
         }
     }
@@ -910,7 +1023,7 @@ class CachingElectrumProxy(
                             val hex = result.optString("hex", "")
                             if (height > 0) {
                                 _notifications.tryEmit(ElectrumNotification.NewBlockHeader(height, hex))
-                                if (BuildConfig.DEBUG) Log.d(TAG, "Subscribed to block headers, tip at $height")
+                                if (BuildConfig.DEBUG) Log.d(TAG, "${roleTag("subscription")} Subscribed to block headers, tip at $height")
                             }
                         }
                     } catch (e: Exception) {
@@ -955,14 +1068,14 @@ class CachingElectrumProxy(
                     }
                 }
 
-                if (BuildConfig.DEBUG) Log.d(TAG, "Subscribed ${results.size} script hashes on subscription socket")
+                if (BuildConfig.DEBUG) Log.d(TAG, "${roleTag("subscription")} Subscribed ${results.size} script hashes")
 
                 // 5. Start the notification listener coroutine
                 startNotificationListener(reader)
 
                 results
             } catch (e: Exception) {
-                if (BuildConfig.DEBUG) Log.w(TAG, "Subscription setup failed: ${e.message}")
+                if (BuildConfig.DEBUG) Log.w(TAG, "${roleTag("subscription")} Setup failed: ${e.message}")
                 closeSubConnectionLocked()
                 emptyMap()
             }
@@ -1015,7 +1128,7 @@ class CachingElectrumProxy(
             if (BuildConfig.DEBUG) {
                 Log.d(
                     TAG,
-                    "Sent ${scriptHashes.size} additional subscribe requests (responses handled by listener)",
+                    "${roleTag("subscription")} Sent ${scriptHashes.size} additional subscribe requests",
                 )
             }
 
@@ -1036,8 +1149,9 @@ class CachingElectrumProxy(
      * notifications to the [_notifications] flow.
      *
      * IMPORTANT: The listener does NOT hold [subLock] during readLine().
-     * readLine() blocks indefinitely (soTimeout=0) waiting for server pushes,
-     * so holding a lock would deadlock stop(). Instead, coordination with
+     * The subscription socket uses a long read timeout (5 minutes), then
+     * verifies liveness with [ping()]. Holding the lock during readLine() would
+     * still deadlock stop(). Instead, coordination with
      * [subscribeAdditionalScriptHashes] uses [subListenerPaused]: the writer
      * sets this flag to pause the listener, sends requests, reads responses
      * itself, then unpauses.
@@ -1047,7 +1161,7 @@ class CachingElectrumProxy(
         subListenerPaused = false
         subListenerJob =
             scope.launch {
-                if (BuildConfig.DEBUG) Log.d(TAG, "Notification listener started")
+                if (BuildConfig.DEBUG) Log.d(TAG, "${roleTag("subscription")} Notification listener started")
                 try {
                     while (isActive && isRunning) {
                         val line =
@@ -1057,14 +1171,19 @@ class CachingElectrumProxy(
                                 } catch (_: SocketTimeoutException) {
                                     // No data in SUB_SOCKET_TIMEOUT_MS — verify connection
                                     // is alive with a lightweight ping on the direct socket.
-                                    if (BuildConfig.DEBUG) Log.d(TAG, "Sub socket timeout, pinging server...")
+                                    if (BuildConfig.DEBUG) {
+                                        Log.d(
+                                            TAG,
+                                            "${roleTag("subscription")} No push data for ${SUB_SOCKET_TIMEOUT_MS}ms; pinging direct socket",
+                                        )
+                                    }
                                     if (ping()) {
                                         // Server is alive, just quiet. Continue listening.
-                                        if (BuildConfig.DEBUG) Log.d(TAG, "Ping OK, server still alive")
+                                        if (BuildConfig.DEBUG) Log.d(TAG, "${roleTag("subscription")} Ping OK, upstream still alive")
                                         return@withContext "" // blank line = continue
                                     } else {
                                         // Server is dead — emit ConnectionLost
-                                        if (BuildConfig.DEBUG) Log.w(TAG, "Ping failed, server is dead")
+                                        if (BuildConfig.DEBUG) Log.w(TAG, "${roleTag("subscription")} Ping failed; emitting ConnectionLost")
                                         _notifications.tryEmit(ElectrumNotification.ConnectionLost)
                                         return@withContext null
                                     }
@@ -1074,7 +1193,10 @@ class CachingElectrumProxy(
                             }
 
                         if (line == null) {
-                            if (BuildConfig.DEBUG) Log.d(TAG, "Subscription socket closed, listener exiting")
+                            if (BuildConfig.DEBUG) {
+                                Log.w(TAG, "${roleTag("subscription")} Upstream socket closed (EOF); emitting ConnectionLost")
+                            }
+                            _notifications.tryEmit(ElectrumNotification.ConnectionLost)
                             break
                         }
 
@@ -1091,15 +1213,15 @@ class CachingElectrumProxy(
                             }
                             // Non-push lines (stale responses) are silently ignored
                         } catch (e: Exception) {
-                            if (BuildConfig.DEBUG) Log.w(TAG, "Failed to parse notification: ${e.message}")
+                            if (BuildConfig.DEBUG) Log.w(TAG, "${roleTag("subscription")} Failed to parse notification: ${e.message}")
                         }
                     }
                 } catch (_: CancellationException) {
                     // Normal cancellation
                 } catch (e: Exception) {
-                    if (BuildConfig.DEBUG) Log.w(TAG, "Notification listener error: ${e.message}")
+                    if (BuildConfig.DEBUG) Log.w(TAG, "${roleTag("subscription")} Notification listener error: ${e.message}")
                 }
-                if (BuildConfig.DEBUG) Log.d(TAG, "Notification listener stopped")
+                if (BuildConfig.DEBUG) Log.d(TAG, "${roleTag("subscription")} Notification listener stopped")
             }
     }
 
@@ -1194,52 +1316,61 @@ class CachingElectrumProxy(
         if (txids.isEmpty()) return 0
         return directLock.withLock {
             if (!ensureDirectConnectionLocked()) return@withLock 0
-            val writer = directWriter ?: return@withLock 0
-            val reader = directReader ?: return@withLock 0
-
+            var totalReceived = 0
             try {
-                val idToTxid = mutableMapOf<Int, String>()
-                for (txid in txids) {
-                    val id = directRequestId++
-                    idToTxid[id] = txid
-                    val req =
-                        JSONObject().apply {
-                            put("id", id)
-                            put("method", "blockchain.transaction.get")
-                            put("params", JSONArray().apply { put(txid) })
-                        }
-                    writer.println(req.toString())
+                for (chunk in txids.chunked(PIPELINE_CHUNK_SIZE)) {
+                    val chunkReceived = pipelineFetchChunkLocked(chunk)
+                    totalReceived += chunkReceived
+                    if (chunkReceived < chunk.size) break
                 }
-                writer.flush()
-
-                var received = 0
-                repeat(txids.size) {
-                    val line = reader.readLine()
-                    if (line == null) {
-                        closeDirectConnectionLocked()
-                        return@withLock received
-                    }
-                    val json = JSONObject(line)
-                    if (json.has("method") && json.optString("method") == "blockchain.scripthash.subscribe") {
-                        val extra = reader.readLine()
-                        if (extra == null) {
-                            closeDirectConnectionLocked()
-                            return@withLock received
-                        }
-                        tryCachePipelineResponse(extra, idToTxid)
-                        received++
-                    } else {
-                        tryCachePipelineResponse(line, idToTxid)
-                        received++
-                    }
-                }
-                received
+                totalReceived
             } catch (e: Exception) {
                 if (BuildConfig.DEBUG) Log.w(TAG, "Pipeline tx fetch failed: ${e.message}")
                 closeDirectConnectionLocked()
-                0
+                totalReceived
             }
         }
+    }
+
+    private fun pipelineFetchChunkLocked(txids: List<String>): Int {
+        val writer = directWriter ?: return 0
+        val reader = directReader ?: return 0
+
+        val idToTxid = mutableMapOf<Int, String>()
+        for (txid in txids) {
+            val id = directRequestId++
+            idToTxid[id] = txid
+            val req = JSONObject().apply {
+                put("id", id)
+                put("method", "blockchain.transaction.get")
+                put("params", JSONArray().apply { put(txid) })
+            }
+            writer.println(req.toString())
+        }
+        writer.flush()
+
+        var received = 0
+        repeat(txids.size) {
+            val line = reader.readLine()
+            if (line == null) {
+                closeDirectConnectionLocked()
+                return received
+            }
+            val json = JSONObject(line)
+            if (json.has("method") && json.optString("method") == "blockchain.scripthash.subscribe") {
+                val extra = reader.readLine()
+                if (extra == null) {
+                    closeDirectConnectionLocked()
+                    return received
+                }
+                tryCachePipelineResponse(extra, idToTxid)
+                received++
+            } else {
+                tryCachePipelineResponse(line, idToTxid)
+                received++
+            }
+        }
+        return received
     }
 
     private fun tryCachePipelineResponse(
@@ -1648,11 +1779,16 @@ class CachingElectrumProxy(
         directLock.withLock { closeDirectConnectionLocked() }
     }
 
-    private fun createTargetConnection(): Socket? {
+    private fun createTargetConnection(role: String): Socket? {
+        val readTimeoutMs = if (role == "bridge") bridgeSoTimeoutOverride ?: soTimeoutMs else soTimeoutMs
         preConnectedSocket?.let { socket ->
             preConnectedSocket = null
             if (!socket.isClosed && socket.isConnected) {
-                if (BuildConfig.DEBUG) Log.d(TAG, "Reusing pre-connected socket from cert probe")
+                try {
+                    socket.soTimeout = readTimeoutMs
+                } catch (_: Exception) {
+                }
+                if (BuildConfig.DEBUG) Log.d(TAG, "${roleTag(role)} Reusing pre-connected socket from certificate probe")
                 return socket
             }
             closeQuietly(socket)
@@ -1666,7 +1802,7 @@ class CachingElectrumProxy(
                     if (useTorProxy) {
                         val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress(torSocksHost, torSocksPort))
                         Socket(proxy).also {
-                            it.soTimeout = soTimeoutMs
+                            it.soTimeout = readTimeoutMs
                             it.connect(
                                 InetSocketAddress.createUnresolved(targetHost, targetPort),
                                 connectionTimeoutMs,
@@ -1674,7 +1810,7 @@ class CachingElectrumProxy(
                         }
                     } else {
                         Socket().also {
-                            it.soTimeout = soTimeoutMs
+                            it.soTimeout = readTimeoutMs
                             it.connect(InetSocketAddress(targetHost, targetPort), connectionTimeoutMs)
                         }
                     }
@@ -1683,7 +1819,9 @@ class CachingElectrumProxy(
                 return result
             } catch (e: SocketException) {
                 closeQuietly(rawSocket)
-                if (BuildConfig.DEBUG) Log.w(TAG, "Connection attempt $attempt/$maxAttempts failed: ${e.message}")
+                if (BuildConfig.DEBUG) {
+                    Log.w(TAG, "${roleTag(role)} Connection attempt $attempt/$maxAttempts failed: ${e.message}")
+                }
                 if (attempt < maxAttempts) {
                     try {
                         Thread.sleep(TOR_RETRY_DELAY_MS * attempt)
@@ -1693,7 +1831,12 @@ class CachingElectrumProxy(
                 }
             } catch (_: SocketTimeoutException) {
                 closeQuietly(rawSocket)
-                if (BuildConfig.DEBUG) Log.w(TAG, "Connection attempt $attempt/$maxAttempts timed out")
+                if (BuildConfig.DEBUG) {
+                    Log.w(
+                        TAG,
+                        "${roleTag(role)} Connection attempt $attempt/$maxAttempts timed out after ${connectionTimeoutMs}ms",
+                    )
+                }
                 if (attempt < maxAttempts) {
                     try {
                         Thread.sleep(TOR_RETRY_DELAY_MS * attempt)
@@ -1703,7 +1846,7 @@ class CachingElectrumProxy(
                 }
             } catch (e: Exception) {
                 closeQuietly(rawSocket)
-                if (BuildConfig.DEBUG) Log.e(TAG, "Failed to create target connection", e)
+                if (BuildConfig.DEBUG) Log.e(TAG, "${roleTag(role)} Failed to create target connection", e)
                 return null
             }
         }
@@ -1751,7 +1894,7 @@ class CachingElectrumProxy(
                 true,
             ) as SSLSocket
         sslSocket.startHandshake()
-        if (BuildConfig.DEBUG) Log.d(TAG, "SSL handshake completed with $targetHost:$targetPort")
+        if (BuildConfig.DEBUG) Log.d(TAG, "${roleTag("tls")} SSL handshake completed with $endpointLabel")
         return sslSocket
     }
 

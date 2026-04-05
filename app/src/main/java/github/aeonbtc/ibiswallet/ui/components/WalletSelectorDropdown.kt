@@ -128,6 +128,7 @@ fun WalletSelectorPanel(
     lastFullSyncTimes: Map<String, Long?> = emptyMap(),
     layer2Enabled: Boolean = false,
     isLiquidEnabledForWallet: (String) -> Boolean = { false },
+    isLiquidWatchOnlyForWallet: (String) -> Boolean = { false },
     onSetLiquidEnabledForWallet: (String, Boolean) -> Unit = { _, _ -> },
     isWalletLockAvailable: Boolean = false,
     onSetWalletLocked: (String, Boolean) -> Unit = { _, _ -> },
@@ -192,6 +193,7 @@ fun WalletSelectorPanel(
                                 lastFullSyncTime = lastFullSyncTimes[wallet.id],
                                 layer2Enabled = layer2Enabled,
                                 isLiquidEnabled = isLiquidEnabledForWallet(wallet.id),
+                                isLiquidWatchOnly = isLiquidWatchOnlyForWallet(wallet.id),
                                 isWalletLockAvailable = isWalletLockAvailable,
                                 onClick = {
                                     if (!isActive) {
@@ -261,13 +263,15 @@ private fun WalletPanelItem(
     lastFullSyncTime: Long? = null,
     layer2Enabled: Boolean = false,
     isLiquidEnabled: Boolean = false,
+    isLiquidWatchOnly: Boolean = false,
     isWalletLockAvailable: Boolean = false,
     onClick: () -> Unit,
     onSync: () -> Unit = {},
     onSetLiquidEnabled: (Boolean) -> Unit = {},
     onSetWalletLocked: (Boolean) -> Unit = {},
 ) {
-    val liquidToggleEnabled = !wallet.isLocked
+    val liquidToggleEnabled = !wallet.isLocked && !isLiquidWatchOnly
+    val liquidChecked = isLiquidWatchOnly || isLiquidEnabled
     val lockedPrimaryTextColor = ErrorRed.copy(alpha = 0.85f)
     val lockedSecondaryTextColor = ErrorRed.copy(alpha = 0.6f)
     Row(
@@ -388,10 +392,13 @@ private fun WalletPanelItem(
                     "Never fully synced"
                 }
             val showLiquidToggle =
-                layer2Enabled &&
-                    !wallet.isWatchOnly &&
-                    wallet.derivationPath != "single" &&
-                    wallet.seedFormat == SeedFormat.BIP39
+                isLiquidWatchOnly ||
+                    (
+                        layer2Enabled &&
+                            !wallet.isWatchOnly &&
+                            wallet.derivationPath != "single" &&
+                            wallet.seedFormat == SeedFormat.BIP39
+                    )
             Text(
                 text = syncText,
                 style = MaterialTheme.typography.bodySmall.copy(fontSize = 14.sp, lineHeight = 18.sp),
@@ -434,7 +441,7 @@ private fun WalletPanelItem(
                             text = "Liquid",
                             style = MaterialTheme.typography.bodySmall.copy(fontSize = 14.sp, lineHeight = 18.sp),
                             color =
-                                if (liquidToggleEnabled && isLiquidEnabled) {
+                                if (liquidChecked) {
                                     LiquidTeal
                                 } else if (wallet.isLocked) {
                                     lockedSecondaryTextColor
@@ -444,10 +451,15 @@ private fun WalletPanelItem(
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         SquareToggle(
-                            checked = isLiquidEnabled,
-                            onCheckedChange = onSetLiquidEnabled,
+                            checked = liquidChecked,
+                            onCheckedChange = { enabled ->
+                                if (!isLiquidWatchOnly) {
+                                    onSetLiquidEnabled(enabled)
+                                }
+                            },
                             enabled = liquidToggleEnabled,
                             checkedColor = LiquidTeal,
+                            disabledCheckedColor = LiquidTeal,
                             trackWidth = 36.dp,
                             trackHeight = 20.dp,
                             thumbSize = 14.dp,

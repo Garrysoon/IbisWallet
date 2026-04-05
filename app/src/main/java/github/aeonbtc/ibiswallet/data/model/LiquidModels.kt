@@ -7,6 +7,57 @@ package github.aeonbtc.ibiswallet.data.model
  */
 
 // ──────────────────────────────────────────────
+// Liquid assets
+// ──────────────────────────────────────────────
+
+data class LiquidAsset(
+    val assetId: String,
+    val ticker: String,
+    val name: String,
+    val precision: Int = 8,
+) {
+    val isPolicyAsset: Boolean get() = assetId == LBTC_ASSET_ID
+
+    companion object {
+        const val LBTC_ASSET_ID =
+            "6f0279e9ed041c3d710a9f57d0c02928416460c4b722ae3457a11eec381c526d"
+        const val USDT_ASSET_ID =
+            "ce091c998b83c78bb71a632313ba3760f1763d9cfcffae02258ffa9865a37bd2"
+
+        val LBTC = LiquidAsset(
+            assetId = LBTC_ASSET_ID,
+            ticker = "L-BTC",
+            name = "Liquid Bitcoin",
+        )
+
+        val USDT = LiquidAsset(
+            assetId = USDT_ASSET_ID,
+            ticker = "USDt",
+            name = "Tether USD",
+        )
+
+        private val KNOWN_ASSETS = mapOf(
+            LBTC_ASSET_ID to LBTC,
+            USDT_ASSET_ID to USDT,
+        )
+
+        fun resolve(assetId: String): LiquidAsset =
+            KNOWN_ASSETS[assetId] ?: LiquidAsset(
+                assetId = assetId,
+                ticker = assetId.take(8) + "\u2026",
+                name = "Unknown Asset",
+            )
+
+        fun isPolicyAsset(assetId: String): Boolean = assetId == LBTC_ASSET_ID
+    }
+}
+
+data class LiquidAssetBalance(
+    val asset: LiquidAsset,
+    val amount: Long,
+)
+
+// ──────────────────────────────────────────────
 // Layer & wallet state
 // ──────────────────────────────────────────────
 
@@ -15,32 +66,51 @@ enum class WalletLayer { LAYER1, LAYER2 }
 
 /** Liquid wallet state — parallel to WalletState for Bitcoin */
 data class LiquidWalletState(
+    val walletId: String? = null,
     val isInitialized: Boolean = false,
     val balanceSats: Long = 0,
+    val assetBalances: List<LiquidAssetBalance> = emptyList(),
     val transactions: List<LiquidTransaction> = emptyList(),
     val currentAddress: String? = null,
     val currentAddressIndex: UInt? = null,
     val currentAddressLabel: String? = null,
     val isSyncing: Boolean = false,
+    val isFullSyncing: Boolean = false,
+    val syncProgress: SyncProgress? = null,
+    val isTransactionHistoryLoading: Boolean = false,
     val lastSyncTimestamp: Long = 0,
     val error: String? = null,
-)
+) {
+    fun balanceForAsset(assetId: String): Long =
+        assetBalances.firstOrNull { it.asset.assetId == assetId }?.amount ?: 0L
+
+    val usdtBalanceAmount: Long get() = balanceForAsset(LiquidAsset.USDT_ASSET_ID)
+    val hasNonLbtcAssets: Boolean get() = assetBalances.any { !it.asset.isPolicyAsset }
+}
 
 data class LiquidTransaction(
     val txid: String,
     val balanceSatoshi: Long,
     val fee: Long,
+    val feeRate: Double? = null,
+    val vsize: Double? = null,
+    val assetDeltas: Map<String, Long> = emptyMap(),
     val height: Int? = null,
     val timestamp: Long? = null,
+    val unblindedUrl: String? = null,
     val walletAddress: String? = null,
     val walletAddressAmountSats: Long? = null,
     val changeAddress: String? = null,
     val changeAmountSats: Long? = null,
+    val recipientAddress: String? = null,
     val memo: String = "",
     val source: LiquidTxSource = LiquidTxSource.NATIVE,
     val type: LiquidTxType = LiquidTxType.SEND,
     val swapDetails: LiquidSwapDetails? = null,
-)
+) {
+    fun deltaForAsset(assetId: String): Long = assetDeltas[assetId] ?: 0L
+    val involvesNonLbtcAsset: Boolean get() = assetDeltas.any { !LiquidAsset.isPolicyAsset(it.key) && it.value != 0L }
+}
 
 enum class LiquidTxType { SEND, RECEIVE, SWAP }
 
@@ -66,16 +136,28 @@ data class LiquidSwapDetails(
     val refundAddress: String? = null,
     val sendAmountSats: Long = 0,
     val expectedReceiveAmountSats: Long = 0,
+    val paymentInput: String? = null,
+    val resolvedPaymentInput: String? = null,
+    val invoice: String? = null,
+    val status: String? = null,
+    val timeoutBlockHeight: Int? = null,
+    val refundPublicKey: String? = null,
+    val claimPublicKey: String? = null,
+    val swapTree: String? = null,
+    val blindingKey: String? = null,
 )
 
 enum class LiquidSendKind {
     LBTC,
+    LIQUID_ASSET,
     LIGHTNING_BOLT11,
     LIGHTNING_BOLT12,
+    LIGHTNING_LNURL,
 }
 
 data class LiquidSendPreview(
     val kind: LiquidSendKind,
+    val assetId: String? = null,
     val recipientDisplay: String,
     val recipients: List<Recipient> = emptyList(),
     val totalRecipientSats: Long? = null,
@@ -94,7 +176,33 @@ data class LiquidSendPreview(
 ) {
     val totalSpendSats: Long?
         get() = if (totalRecipientSats != null && feeSats != null) totalRecipientSats + feeSats else null
+
+    val resolvedAsset: LiquidAsset
+        get() = LiquidAsset.resolve(assetId ?: LiquidAsset.LBTC_ASSET_ID)
+
+    val isLbtc: Boolean get() = assetId == null || LiquidAsset.isPolicyAsset(assetId)
 }
+
+/**
+ * State for the Liquid PSET export/sign/broadcast flow (watch-only wallets).
+ * Mirrors [github.aeonbtc.ibiswallet.viewmodel.PsbtState] for Bitcoin.
+ */
+data class LiquidPsetState(
+    val isCreating: Boolean = false,
+    val isBroadcasting: Boolean = false,
+    val broadcastStatus: String? = null,
+    val unsignedPsetBase64: String? = null,
+    val signedPsetBase64: String? = null,
+    val pendingLabel: String? = null,
+    val error: String? = null,
+    val recipientAddress: String? = null,
+    val recipientAmountSats: Long = 0,
+    val feeSats: Long = 0,
+    val totalInputSats: Long = 0,
+    val unsignedPsetInputCount: Int = 0,
+    val unsignedPsetOutputCount: Int = 0,
+    val assetId: String? = null,
+)
 
 sealed interface LightningPaymentExecutionPlan {
     val paymentInput: String
@@ -135,6 +243,11 @@ sealed interface LightningPaymentExecutionPlan {
 
 sealed class LiquidSendState {
     data object Idle : LiquidSendState()
+
+    data class Estimating(
+        val kind: LiquidSendKind,
+        val preview: LiquidSendPreview? = null,
+    ) : LiquidSendState()
 
     data class ReviewReady(
         val preview: LiquidSendPreview,
@@ -387,6 +500,7 @@ data class PendingSwapSession(
     val direction: SwapDirection,
     val sendAmount: Long,
     val requestKey: String? = null,
+    val label: String? = null,
     val usesMaxAmount: Boolean = false,
     val selectedFundingOutpoints: List<String> = emptyList(),
     val estimatedTerms: EstimatedSwapTerms,
@@ -428,6 +542,7 @@ sealed class SwapState {
 data class PendingLightningInvoiceSession(
     val swapId: String,
     val snapshot: String,
+    val invoice: String,
     val amountSats: Long,
     val createdAt: Long = System.currentTimeMillis(),
 )

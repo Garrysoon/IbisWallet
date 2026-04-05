@@ -28,6 +28,7 @@ internal sealed interface ParsedSendRecipient {
         val amountSats: Long? = null,
         val label: String? = null,
         val message: String? = null,
+        val assetId: String? = null,
     ) : ParsedSendRecipient
 
     data class Lightning(
@@ -53,6 +54,7 @@ internal sealed interface ParsedSendRecipient {
 internal enum class LightningKind {
     BOLT11,
     BOLT12,
+    LNURL,
 }
 
 internal data class SendRouteResolution(
@@ -170,6 +172,7 @@ internal fun parseSendRecipient(input: String): ParsedSendRecipient {
                 amountSats = liquidBip21.satoshi?.toLong(),
                 label = queryParams["label"],
                 message = queryParams["message"],
+                assetId = queryParams["assetid"],
             )
         }
         PaymentKind.LIGHTNING_INVOICE -> {
@@ -192,10 +195,19 @@ internal fun parseSendRecipient(input: String): ParsedSendRecipient {
             )
         }
         PaymentKind.LN_URL -> {
-            ParsedSendRecipient.UnsupportedLightning(
-                rawInput = trimmed,
-                errorMessage = "LNURL is not supported on Liquid send",
-            )
+            val lnurlUrl = payment.lnurl()?.takeIf { it.isNotBlank() }
+            if (lnurlUrl != null) {
+                ParsedSendRecipient.Lightning(
+                    rawInput = trimmed,
+                    paymentInput = lnurlUrl,
+                    kind = LightningKind.LNURL,
+                )
+            } else {
+                ParsedSendRecipient.UnsupportedLightning(
+                    rawInput = trimmed,
+                    errorMessage = "Invalid LNURL",
+                )
+            }
         }
         PaymentKind.BIP353 -> {
             ParsedSendRecipient.Lightning(
@@ -327,7 +339,7 @@ internal fun layer2RecipientValidationError(parsed: ParsedSendRecipient): String
                 else -> null
             }
         is ParsedSendRecipient.UnsupportedLightning -> parsed.errorMessage
-        else -> "Enter a Liquid address, BOLT11 invoice, or BOLT12 offer"
+        else -> "Enter a Liquid address, LN invoice, BOLT12 offer, or Lightning Address"
     }
 }
 
@@ -345,6 +357,7 @@ private fun ParsedSendRecipient.Liquid.toLayer2Draft(useSats: Boolean): SendScre
         amountInput = amountSats?.let { formatSatsForDraft(it, useSats) }.orEmpty(),
         label = label.orEmpty(),
         feeRate = LAYER2_DEFAULT_FEE_RATE,
+        assetId = assetId,
     )
 }
 

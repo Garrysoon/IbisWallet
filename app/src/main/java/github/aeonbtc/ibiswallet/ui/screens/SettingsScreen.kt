@@ -32,6 +32,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import github.aeonbtc.ibiswallet.data.BtcPriceService
 import github.aeonbtc.ibiswallet.data.local.SecureStorage
 import github.aeonbtc.ibiswallet.tor.TorStatus
 import github.aeonbtc.ibiswallet.ui.components.SquareToggle
@@ -58,6 +59,8 @@ fun SettingsScreen(
     onCustomFeeSourceUrlSave: (String) -> Unit = {},
     currentPriceSource: String = SecureStorage.PRICE_SOURCE_OFF,
     onPriceSourceChange: (String) -> Unit = {},
+    currentPriceCurrency: String = SecureStorage.DEFAULT_PRICE_CURRENCY,
+    onPriceCurrencyChange: (String) -> Unit = {},
     currentMempoolServer: String = SecureStorage.MEMPOOL_SPACE,
     onMempoolServerChange: (String) -> Unit = {},
     customMempoolUrl: String = "",
@@ -421,10 +424,10 @@ fun SettingsScreen(
                     }
                 val torStatusColor =
                     when (torStatus) {
-                        TorStatus.CONNECTED -> SuccessGreen
-                        TorStatus.CONNECTING, TorStatus.STARTING -> SuccessGreen.copy(alpha = 0.6f)
+                        TorStatus.CONNECTED -> TorPurple
+                        TorStatus.CONNECTING, TorStatus.STARTING -> TorPurple.copy(alpha = 0.6f)
                         TorStatus.ERROR -> ErrorRed
-                        TorStatus.DISCONNECTED -> TextSecondary
+                        TorStatus.DISCONNECTED, TorStatus.STOPPING -> TextSecondary
                     }
                 val torStatusText =
                     when (torStatus) {
@@ -432,7 +435,7 @@ fun SettingsScreen(
                         TorStatus.CONNECTING -> "Tor connecting..."
                         TorStatus.STARTING -> "Tor starting..."
                         TorStatus.ERROR -> "Tor error"
-                        TorStatus.DISCONNECTED -> "Tor will start automatically"
+                        TorStatus.DISCONNECTED, TorStatus.STOPPING -> "Tor will start automatically"
                     }
 
                 CompactTextFieldWithSave(
@@ -523,7 +526,7 @@ fun SettingsScreen(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // BTC/USD Price Source
+            // BTC/fiat Price Source
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
                     imageVector = Icons.Default.AttachMoney,
@@ -533,7 +536,7 @@ fun SettingsScreen(
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = "USD Price Source",
+                    text = "Fiat Price Source",
                     style = MaterialTheme.typography.titleMedium,
                     color = TextSecondary,
                 )
@@ -545,6 +548,16 @@ fun SettingsScreen(
                 currentSource = currentPriceSource,
                 onSourceSelected = onPriceSourceChange,
             )
+
+            if (currentPriceSource != SecureStorage.PRICE_SOURCE_OFF) {
+                Spacer(modifier = Modifier.height(6.dp))
+
+                PriceCurrencyDropdown(
+                    currentSource = currentPriceSource,
+                    currentCurrency = currentPriceCurrency,
+                    onCurrencySelected = onPriceCurrencyChange,
+                )
+            }
 
             if (currentPriceSource == SecureStorage.PRICE_SOURCE_MEMPOOL_ONION) {
                 TorStatusIndicator(
@@ -1219,7 +1232,7 @@ private data class PriceSourceOption(
 )
 
 /**
- * Dropdown for selecting BTC/USD price source
+ * Dropdown for selecting BTC/fiat price source
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -1234,7 +1247,7 @@ private fun PriceSourceDropdown(
             PriceSourceOption(
                 id = SecureStorage.PRICE_SOURCE_OFF,
                 name = "Disabled",
-                description = "No USD prices",
+                description = "No fiat prices",
             ),
             PriceSourceOption(
                 id = SecureStorage.PRICE_SOURCE_MEMPOOL,
@@ -1288,6 +1301,67 @@ private fun PriceSourceDropdown(
                     },
                     leadingIcon = {
                         if (option.id == currentSource) {
+                            Icon(
+                                imageVector = Icons.Default.Check,
+                                contentDescription = "Selected",
+                                tint = BitcoinOrange,
+                            )
+                        }
+                    },
+                )
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun PriceCurrencyDropdown(
+    currentSource: String,
+    currentCurrency: String,
+    onCurrencySelected: (String) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+
+    val currencyOptions = remember(currentSource) { BtcPriceService.getSupportedFiatCurrencies(currentSource) }
+    val selectedOption =
+        currencyOptions.find { it.code == currentCurrency } ?: currencyOptions.firstOrNull()
+
+    if (selectedOption == null) return
+
+    ExposedDropdownMenuBox(
+        expanded = expanded,
+        onExpandedChange = { expanded = it },
+    ) {
+        CompactDropdownField(
+            value = "${selectedOption.code} · ${selectedOption.name}",
+            expanded = expanded,
+            modifier = Modifier.menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable),
+        )
+
+        ExposedDropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            modifier =
+                Modifier
+                    .exposedDropdownSize(true)
+                    .background(DarkSurface),
+        ) {
+            currencyOptions.forEach { option ->
+                DropdownMenuItem(
+                    text = {
+                        DropdownOptionText(
+                            title = "${option.code} · ${option.name}",
+                            subtitle = "",
+                            selected = option.code == currentCurrency,
+                        )
+                    },
+                    onClick = {
+                        onCurrencySelected(option.code)
+                        expanded = false
+                    },
+                    leadingIcon = {
+                        if (option.code == currentCurrency) {
                             Icon(
                                 imageVector = Icons.Default.Check,
                                 contentDescription = "Selected",
@@ -1577,11 +1651,13 @@ private fun DropdownOptionText(
             style = TextStyle(fontSize = 14.5.sp),
             color = if (selected) BitcoinOrange else MaterialTheme.colorScheme.onBackground,
         )
-        Text(
-            text = subtitle,
-            style = TextStyle(fontSize = 12.5.sp),
-            color = TextSecondary,
-        )
+        if (subtitle.isNotBlank()) {
+            Text(
+                text = subtitle,
+                style = TextStyle(fontSize = 12.5.sp),
+                color = TextSecondary,
+            )
+        }
     }
 }
 
@@ -1633,10 +1709,10 @@ private fun TorStatusIndicator(
 ) {
     val torStatusColor =
         when (torStatus) {
-            TorStatus.CONNECTED -> SuccessGreen
-            TorStatus.CONNECTING, TorStatus.STARTING -> SuccessGreen.copy(alpha = 0.6f)
+            TorStatus.CONNECTED -> TorPurple
+            TorStatus.CONNECTING, TorStatus.STARTING -> TorPurple.copy(alpha = 0.6f)
             TorStatus.ERROR -> ErrorRed
-            TorStatus.DISCONNECTED -> TextSecondary
+            TorStatus.DISCONNECTED, TorStatus.STOPPING -> TextSecondary
         }
     val torStatusText =
         when (torStatus) {
@@ -1644,11 +1720,14 @@ private fun TorStatusIndicator(
             TorStatus.CONNECTING -> "Tor connecting..."
             TorStatus.STARTING -> "Tor starting..."
             TorStatus.ERROR -> "Tor error"
-            TorStatus.DISCONNECTED -> "Tor will start automatically"
+            TorStatus.DISCONNECTED, TorStatus.STOPPING -> "Tor will start automatically"
         }
 
     Row(
-        modifier = modifier.fillMaxWidth(),
+        modifier =
+            modifier
+                .fillMaxWidth()
+                .padding(end = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.End,
     ) {

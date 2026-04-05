@@ -228,7 +228,7 @@ object ElectrumSeedUtil {
         var parentFp = byteArrayOf(0, 0, 0, 0)
         var depth = 0
 
-        for ((i, segment) in segments.withIndex()) {
+        for (segment in segments) {
             val pubKey = publicKeyFromPrivate(currentKey)
             parentFp = hash160(pubKey).copyOfRange(0, 4)
             val (childKey, childChainCode) = if (segment >= 0x80000000L) {
@@ -238,7 +238,7 @@ object ElectrumSeedUtil {
             }
             currentKey = childKey
             currentChainCode = childChainCode
-            depth = i + 1
+            depth += 1
         }
 
         return encodeXprv(
@@ -356,6 +356,72 @@ object ElectrumSeedUtil {
                 )
             }
         }
+    }
+
+    /**
+     * Derive an xpub string at the given derivation path from a root seed.
+     * Always uses standard xpub version bytes (0x0488B21E).
+     */
+    fun deriveXpub(seed: ByteArray, path: String): String {
+        val (masterKey, masterChainCode) = masterKeyFromSeed(seed)
+        val segments = parsePath(path)
+        if (segments.isEmpty()) {
+            val pubKey = publicKeyFromPrivate(masterKey)
+            return encodeXpub(
+                version = XPUB_VERSION,
+                depth = 0,
+                parentFingerprint = byteArrayOf(0, 0, 0, 0),
+                childNumber = 0L,
+                chainCode = masterChainCode,
+                publicKey = pubKey,
+            )
+        }
+
+        var currentKey = masterKey
+        var currentChainCode = masterChainCode
+        var parentFp = byteArrayOf(0, 0, 0, 0)
+
+        for (segment in segments) {
+            val pubKey = publicKeyFromPrivate(currentKey)
+            parentFp = hash160(pubKey).copyOfRange(0, 4)
+            val (childKey, childChainCode) = if (segment >= 0x80000000L) {
+                deriveHardenedChild(currentKey, currentChainCode, segment)
+            } else {
+                deriveNormalChild(currentKey, currentChainCode, segment)
+            }
+            currentKey = childKey
+            currentChainCode = childChainCode
+        }
+
+        val pubKey = publicKeyFromPrivate(currentKey)
+        return encodeXpub(
+            version = XPUB_VERSION,
+            depth = segments.size,
+            parentFingerprint = parentFp,
+            childNumber = segments.last(),
+            chainCode = currentChainCode,
+            publicKey = pubKey,
+        )
+    }
+
+    /**
+     * Compute the SLIP-77 master blinding key from a BIP32 seed.
+     * HMAC-SHA512(key="Symmetric key seed", data=seed) → first 32 bytes.
+     */
+    fun computeSlip77BlindingKey(seed: ByteArray): ByteArray {
+        val hmac = hmacSha512("Symmetric key seed".toByteArray(), seed)
+        return hmac.copyOfRange(0, 32)
+    }
+
+    /**
+     * Build a Liquid CT descriptor string from a BIP39 seed (with passphrase already applied).
+     * Format uses a wildcard suffix after `<0;1>/`, producing the same descriptor returned below.
+     */
+    fun buildLiquidCtDescriptor(seed: ByteArray): String {
+        val blindingKey = computeSlip77BlindingKey(seed).toHexString()
+        val fingerprint = computeMasterFingerprint(seed)
+        val xpub = deriveXpub(seed, "m/84'/1776'/0'")
+        return "ct(slip77($blindingKey),elwpkh([$fingerprint/84h/1776h/0h]$xpub/<0;1>/*))"
     }
 
     // ── Normal (non-hardened) Child Derivation ───────────────────────
@@ -508,7 +574,7 @@ object ElectrumSeedUtil {
      * Encode an extended public key as a Base58Check string.
      * Version bytes determine the prefix (xpub, zpub, etc).
      */
-    private fun encodeXpub(
+    internal fun encodeXpub(
         version: ByteArray,
         depth: Int,
         parentFingerprint: ByteArray,
@@ -532,7 +598,7 @@ object ElectrumSeedUtil {
     /**
      * HMAC-SHA512.
      */
-    private fun hmacSha512(key: ByteArray, data: ByteArray): ByteArray {
+    internal fun hmacSha512(key: ByteArray, data: ByteArray): ByteArray {
         val mac = Mac.getInstance("HmacSHA512")
         mac.init(SecretKeySpec(key, "HmacSHA512"))
         return mac.doFinal(data)
@@ -548,7 +614,7 @@ object ElectrumSeedUtil {
     /**
      * RIPEMD-160(SHA-256(data)) — "hash160".
      */
-    private fun hash160(data: ByteArray): ByteArray {
+    internal fun hash160(data: ByteArray): ByteArray {
         val sha = sha256(data)
         return ripemd160(sha)
     }

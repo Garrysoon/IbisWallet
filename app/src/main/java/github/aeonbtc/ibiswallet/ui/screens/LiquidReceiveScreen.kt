@@ -2,6 +2,7 @@
 
 package github.aeonbtc.ibiswallet.ui.screens
 
+import android.content.Intent
 import android.graphics.Bitmap
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
@@ -27,6 +28,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -67,7 +69,10 @@ import github.aeonbtc.ibiswallet.data.local.SecureStorage
 import github.aeonbtc.ibiswallet.data.model.LightningInvoiceLimits
 import github.aeonbtc.ibiswallet.data.model.LightningInvoiceState
 import github.aeonbtc.ibiswallet.nfc.NdefHostApduService
+import github.aeonbtc.ibiswallet.ui.components.AmountLabel
 import github.aeonbtc.ibiswallet.ui.components.IbisButton
+import github.aeonbtc.ibiswallet.ui.components.ReceiveActionButton
+import github.aeonbtc.ibiswallet.data.model.LiquidAsset
 import github.aeonbtc.ibiswallet.ui.components.SquareToggle
 import github.aeonbtc.ibiswallet.ui.theme.BorderColor
 import github.aeonbtc.ibiswallet.ui.theme.DarkCard
@@ -94,10 +99,12 @@ fun LiquidReceiveScreen(
     currentAddressLabel: String? = null,
     denomination: String = SecureStorage.DENOMINATION_BTC,
     btcPrice: Double? = null,
+    fiatCurrency: String = SecureStorage.DEFAULT_PRICE_CURRENCY,
     privacyMode: Boolean = false,
     boltzEnabled: Boolean = true,
     lightningInvoiceState: LightningInvoiceState = LightningInvoiceState.Idle,
     lightningInvoiceLimits: LightningInvoiceLimits? = null,
+    selectedAssetId: String? = null,
     onEnsureLiquidAddress: () -> Unit = {},
     onGenerateLiquidAddress: () -> Unit = {},
     onSaveLiquidAddressLabel: (String, String) -> Unit = { _, _ -> },
@@ -107,6 +114,7 @@ fun LiquidReceiveScreen(
     onWarmLightningInvoice: () -> Unit = {},
     onFetchLightningLimits: () -> Unit = {},
     onResetLightningInvoice: () -> Unit = {},
+    onToggleDenomination: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val focusManager = LocalFocusManager.current
@@ -177,12 +185,15 @@ fun LiquidReceiveScreen(
         }
     }
 
+    val isNonLbtcAsset = selectedAssetId != null &&
+        selectedAssetId != LiquidAsset.LBTC_ASSET_ID
+
     val liquidRequestContent =
-        remember(liquidAddress, amountInSats, showAmountField, labelText, showLabelField) {
+        remember(liquidAddress, amountInSats, showAmountField, labelText, showLabelField, selectedAssetId) {
             liquidAddress?.let { address ->
                 val liquidAmountSats = amountInSats?.takeIf { showAmountField && it > 0 }
                 val label = labelText.trim().takeIf { showLabelField && it.isNotBlank() }
-                if (liquidAmountSats != null || label != null) {
+                if (liquidAmountSats != null || label != null || isNonLbtcAsset) {
                     val params = mutableListOf<String>()
                     liquidAmountSats?.let {
                         val liquidAmount = it.toDouble() / 100_000_000.0
@@ -190,6 +201,9 @@ fun LiquidReceiveScreen(
                     }
                     label?.let {
                         params += "label=${URLEncoder.encode(it, "UTF-8")}"
+                    }
+                    if (isNonLbtcAsset) {
+                        params += "assetid=$selectedAssetId"
                     }
                     "liquidnetwork:$address?${params.joinToString("&")}"
                 } else {
@@ -430,42 +444,53 @@ fun LiquidReceiveScreen(
 
                     Spacer(modifier = Modifier.height(12.dp))
 
-                    Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                        Box(
-                            contentAlignment = Alignment.Center,
-                            modifier = Modifier
-                                .size(44.dp)
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(DarkSurface)
-                                .clickable(enabled = liquidAddress != null) {
-                                    activeQrContent?.let { content ->
-                                        SecureClipboard.copyAndScheduleClear(context, "Liquid Address", content)
-                                        Toast.makeText(context, "Address copied", Toast.LENGTH_SHORT).show()
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        ReceiveActionButton(
+                            text = "Copy",
+                            icon = Icons.Default.ContentCopy,
+                            tint = LiquidTeal,
+                            onClick = {
+                                liquidRequestContent?.let { content ->
+                                    SecureClipboard.copyAndScheduleClear(context, "Liquid Address", content)
+                                    Toast.makeText(context, "Address copied", Toast.LENGTH_SHORT).show()
+                                }
+                            },
+                            enabled = liquidRequestContent != null,
+                            iconSize = 17.dp,
+                        )
+                        ReceiveActionButton(
+                            text = "New",
+                            icon = Icons.Default.Refresh,
+                            tint = LiquidTeal,
+                            onClick = onGenerateLiquidAddress,
+                            iconSize = 20.dp,
+                        )
+                        ReceiveActionButton(
+                            text = "Share",
+                            icon = Icons.Default.Share,
+                            tint = LiquidTeal,
+                            onClick = {
+                                liquidRequestContent?.let { content ->
+                                    val shareIntent =
+                                        Intent(Intent.ACTION_SEND).apply {
+                                            type = "text/plain"
+                                            putExtra(Intent.EXTRA_TEXT, content)
+                                        }
+                                    runCatching {
+                                        context.startActivity(
+                                            Intent.createChooser(shareIntent, "Share receive request"),
+                                        )
+                                    }.onFailure {
+                                        Toast.makeText(context, "No app available to share", Toast.LENGTH_SHORT).show()
                                     }
-                                },
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.ContentCopy,
-                                contentDescription = "Copy",
-                                tint = if (liquidAddress != null) LiquidTeal else TextSecondary.copy(alpha = 0.5f),
-                                modifier = Modifier.size(20.dp),
-                            )
-                        }
-                        Box(
-                            contentAlignment = Alignment.Center,
-                            modifier = Modifier
-                                .size(44.dp)
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(DarkSurface)
-                                .clickable(enabled = true) { onGenerateLiquidAddress() },
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Refresh,
-                                contentDescription = "Generate New Liquid Address",
-                                tint = LiquidTeal,
-                                modifier = Modifier.size(24.dp),
-                            )
-                        }
+                                }
+                            },
+                            enabled = liquidRequestContent != null,
+                        )
                     }
 
                     Column(modifier = Modifier.fillMaxWidth()) {
@@ -498,14 +523,11 @@ fun LiquidReceiveScreen(
                                     horizontalArrangement = Arrangement.SpaceBetween,
                                     verticalAlignment = Alignment.CenterVertically,
                                 ) {
-                                    Text(
-                                        text = when {
-                                            isUsdMode -> "Amount (USD)"
-                                            useSats -> "Amount (sats)"
-                                            else -> "Amount (BTC)"
-                                        },
-                                        style = MaterialTheme.typography.labelLarge,
-                                        color = TextSecondary,
+                                    AmountLabel(
+                                        useSats = useSats,
+                                        isUsdMode = isUsdMode,
+                                        fiatCurrency = fiatCurrency,
+                                        onToggleDenomination = onToggleDenomination,
                                     )
                                     if (btcPrice != null && btcPrice > 0) {
                                         Card(
@@ -526,10 +548,10 @@ fun LiquidReceiveScreen(
                                             border = BorderStroke(1.dp, if (isUsdMode) LiquidTeal else BorderColor),
                                         ) {
                                             Text(
-                                                text = "USD",
+                                                text = fiatCurrency,
                                                 style = MaterialTheme.typography.labelMedium,
                                                 color = if (isUsdMode) LiquidTeal else TextSecondary,
-                                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
                                             )
                                         }
                                     }
@@ -543,7 +565,7 @@ fun LiquidReceiveScreen(
                                             "≈ ${formatLiquidAmountForReceive(amountInSats.toULong(), useSats)} ${liquidDisplayUnit(useSats)}"
                                         } else {
                                             val usdValue = (amountInSats / 100_000_000.0) * btcPrice
-                                            "≈ $${String.format(Locale.US, "%,.2f", usdValue)}"
+                                            "≈ ${formatFiat(usdValue, fiatCurrency)}"
                                         }
                                     } else {
                                         null
@@ -580,7 +602,7 @@ fun LiquidReceiveScreen(
                                     },
                                     leadingIcon =
                                         if (isUsdMode) {
-                                            { Text("$", color = TextSecondary) }
+                                            { Text(fiatCurrency, color = TextSecondary) }
                                         } else {
                                             null
                                         },
@@ -859,6 +881,7 @@ fun LiquidReceiveScreen(
                                     useSats = useSats,
                                     isUsdMode = lightningIsUsdMode,
                                     btcPrice = btcPrice,
+                                    fiatCurrency = fiatCurrency,
                                     privacyMode = privacyMode,
                                     lightningInvoiceLimits = lightningInvoiceLimits,
                                     labelText = lightningLabelText,
@@ -874,6 +897,7 @@ fun LiquidReceiveScreen(
                                     },
                                     onShowLabelFieldChange = { lightningShowLabelField = it },
                                     onLabelTextChange = { lightningLabelText = it },
+                                    onToggleDenomination = onToggleDenomination,
                                 )
                             }
                         }
@@ -885,6 +909,7 @@ fun LiquidReceiveScreen(
                                 useSats = useSats,
                                 isUsdMode = lightningIsUsdMode,
                                 btcPrice = btcPrice,
+                                fiatCurrency = fiatCurrency,
                                 privacyMode = privacyMode,
                                 lightningInvoiceLimits = lightningInvoiceLimits,
                                 labelText = lightningLabelText,
@@ -900,6 +925,7 @@ fun LiquidReceiveScreen(
                                 },
                                 onShowLabelFieldChange = { lightningShowLabelField = it },
                                 onLabelTextChange = { lightningLabelText = it },
+                                onToggleDenomination = onToggleDenomination,
                             )
                         }
                     }
@@ -1017,6 +1043,7 @@ private fun LightningInvoiceForm(
     useSats: Boolean,
     isUsdMode: Boolean,
     btcPrice: Double?,
+    fiatCurrency: String,
     privacyMode: Boolean,
     lightningInvoiceLimits: LightningInvoiceLimits?,
     labelText: String,
@@ -1025,6 +1052,7 @@ private fun LightningInvoiceForm(
     onUsdModeChange: (Boolean) -> Unit,
     onShowLabelFieldChange: (Boolean) -> Unit,
     onLabelTextChange: (String) -> Unit,
+    onToggleDenomination: () -> Unit = {},
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -1052,14 +1080,11 @@ private fun LightningInvoiceForm(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(
-                    text = when {
-                        isUsdMode -> "Amount (USD)"
-                        useSats -> "Amount (sats)"
-                        else -> "Amount (BTC)"
-                    },
-                    style = MaterialTheme.typography.labelLarge,
-                    color = TextSecondary,
+                AmountLabel(
+                    useSats = useSats,
+                    isUsdMode = isUsdMode,
+                    fiatCurrency = fiatCurrency,
+                    onToggleDenomination = onToggleDenomination,
                 )
                 if (btcPrice != null && btcPrice > 0) {
                     Card(
@@ -1073,10 +1098,10 @@ private fun LightningInvoiceForm(
                         border = BorderStroke(1.dp, if (isUsdMode) LiquidTeal else BorderColor),
                     ) {
                         Text(
-                            text = "USD",
+                            text = fiatCurrency,
                             style = MaterialTheme.typography.labelMedium,
                             color = if (isUsdMode) LiquidTeal else TextSecondary,
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
                         )
                     }
                 }
@@ -1090,7 +1115,7 @@ private fun LightningInvoiceForm(
                         "≈ ${formatLiquidAmountForReceive(amountInSats.toULong(), useSats)} ${liquidDisplayUnit(useSats)}"
                     } else {
                         val usdValue = (amountInSats / 100_000_000.0) * btcPrice
-                        "≈ $${String.format(Locale.US, "%,.2f", usdValue)}"
+                        "≈ ${formatFiat(usdValue, fiatCurrency)}"
                     }
                 } else {
                     null
@@ -1126,7 +1151,7 @@ private fun LightningInvoiceForm(
                 },
                 leadingIcon =
                     if (isUsdMode) {
-                        { Text("$", color = TextSecondary) }
+                        { Text(fiatCurrency, color = TextSecondary) }
                     } else {
                         null
                     },
