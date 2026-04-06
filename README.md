@@ -30,7 +30,6 @@ Designed for experienced users - no hand-holding, no training wheels.
 - **Lightning Payments** - Pay Bolt 11 and Bolt 12 invoices, or Lightning addresses via Boltz submarine swaps
 - **Lightning Invoices** - Generate Bolt 11 invoices via Boltz reverse swaps
 - **Watch-only Liquid Wallets** - Import Liquid watch-only wallets using SLIP77 descriptors
-- **Gap Limit Support** - Configure Liquid wallet gap limits for broader address discovery
 - **Liquid USDt** - Hold and transact USDt on Liquid
 - **Chain Swaps** - BTC ↔ L-BTC atomic swaps via Boltz and SideSwap
 - **Coin Control** - Select specific Liquid UTXOs for swaps and Lightning payments
