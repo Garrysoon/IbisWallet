@@ -5,4 +5,24 @@
     <string name="nfc_service_description">Bitcoin payment address</string>
     <string name="startup_loading_artwork">Ibis launch artwork</string>
     <string name="version_format">Version: %1$s</string>
+    <string name="wallet_notifications_title">Wallet Notifications</string>
+    <string name="wallet_notifications_subtitle_default">Incoming transaction alerts</string>
+    <string name="wallet_notifications_subtitle_permission_required">Grant Android notification permission</string>
+    <string name="wallet_notifications_subtitle_android_blocked">Android notifications are blocked</string>
+    <string name="wallet_notifications_permission_denied">Android notification permission denied</string>
+    <string name="wallet_notifications_android_blocked">Android notifications are disabled for this app</string>
+    <string name="foreground_connectivity_title">Background Connectivity</string>
+    <string name="foreground_connectivity_subtitle">Keep Electrum and Tor connections alive</string>
+    <string name="foreground_connectivity_channel_name">Background Connectivity</string>
+    <string name="foreground_connectivity_channel_description">Persistent connectivity for Electrum and Tor services</string>
+    <string name="foreground_connectivity_notification_title">Background Server Connectivity</string>
+    <string name="foreground_connectivity_status_bitcoin">Bitcoin</string>
+    <string name="foreground_connectivity_status_liquid">Liquid</string>
+    <string name="foreground_connectivity_status_tor">Tor</string>
+    <string name="nfc_status_ready">NFC</string>
+    <string name="nfc_status_receive_ready">NFC Receive</string>
+    <string name="nfc_status_detecting">NFC Reading</string>
+    <string name="nfc_status_received">NFC Received</string>
+    <string name="nfc_status_share_ready">NFC Share</string>
+    <string name="nfc_status_sharing">NFC Sharing</string>
 </resources>

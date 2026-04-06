@@ -4,6 +4,7 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.CAMERA" />
@@ -94,6 +95,11 @@
                 android:name="android.nfc.cardemulation.host_apdu_service"
                 android:resource="@xml/nfc_ndef_aid" />
         </service>
+
+        <service
+            android:name=".service.ConnectivityForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
         
         <!-- Tor Service for onion routing -->
         <service
