@@ -32,7 +32,7 @@ Designed for experienced users - no hand-holding, no training wheels.
 - **Watch-only Liquid Wallets** - Import Liquid watch-only wallets using SLIP77 descriptors
 - **Liquid USDt** - Hold and transact USDt on Liquid
 - **Chain Swaps** - BTC ↔ L-BTC atomic swaps via Boltz and SideSwap
-- **Coin Control** - Select specific Liquid UTXOs for swaps and Lightning payments
+- **Coin Control** - Select specific UTXOs for swaps and Lightning payments
 - **BIP329 Labels** - Label support for Liquid transactions
 
 ### Privacy & Security
