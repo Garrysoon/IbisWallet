@@ -10,6 +10,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -52,9 +53,10 @@ import github.aeonbtc.ibiswallet.data.model.StoredWallet
 import github.aeonbtc.ibiswallet.data.model.WalletImportConfig
 import github.aeonbtc.ibiswallet.data.model.WalletNetwork
 import github.aeonbtc.ibiswallet.ui.components.Bip39SuggestionRow
-import github.aeonbtc.ibiswallet.ui.components.ScrollableAlertDialog
+import github.aeonbtc.ibiswallet.ui.components.IbisConfirmDialog
 import github.aeonbtc.ibiswallet.ui.components.SensitiveSeedIme
 import github.aeonbtc.ibiswallet.ui.components.SquareToggle
+import github.aeonbtc.ibiswallet.ui.components.rememberBringIntoViewRequesterOnExpand
 import github.aeonbtc.ibiswallet.ui.components.sensitiveSeedKeyboardOptions
 import github.aeonbtc.ibiswallet.ui.theme.*
 import github.aeonbtc.ibiswallet.util.BitcoinUtils
@@ -91,6 +93,7 @@ fun SecurityScreen(
     currentLockTiming: SecureStorage.LockTiming = SecureStorage.LockTiming.WHEN_MINIMIZED,
     isBiometricAvailable: Boolean = false,
     screenshotsDisabled: Boolean = false,
+    randomizePinPad: Boolean = false,
     isDuressEnabled: Boolean = false,
     isDuressMode: Boolean = false,
     hasWallet: Boolean = true,
@@ -101,6 +104,7 @@ fun SecurityScreen(
     onDisableSecurity: () -> Unit = {},
     onLockTimingChange: (SecureStorage.LockTiming) -> Unit = {},
     onScreenshotsDisabledChange: (Boolean) -> Unit = {},
+    onRandomizePinPadChange: (Boolean) -> Unit = {},
     onSetupDuress: (
         pin: String,
         config: WalletImportConfig,
@@ -321,7 +325,6 @@ fun SecurityScreen(
                         )
                     }
 
-                    // Lock timing dropdown (only shown when security is enabled)
                     if (currentSecurityMethod != SecureStorage.SecurityMethod.NONE) {
                         HorizontalDivider(
                             modifier = Modifier.padding(vertical = 12.dp),
@@ -340,6 +343,61 @@ fun SecurityScreen(
                             currentTiming = currentLockTiming,
                             onTimingSelected = onLockTimingChange,
                         )
+
+                        HorizontalDivider(
+                            modifier = Modifier.padding(vertical = 12.dp),
+                            color = BorderColor,
+                        )
+
+                        Row(
+                            modifier =
+                                Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable(enabled = isPinEnabled) { onRandomizePinPadChange(!randomizePinPad) },
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.weight(1f),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Refresh,
+                                    contentDescription = null,
+                                    tint = if (isPinEnabled) BitcoinOrange else TextSecondary.copy(alpha = 0.5f),
+                                    modifier = Modifier.size(24.dp),
+                                )
+                                Spacer(modifier = Modifier.width(12.dp))
+                                ToggleOptionText(
+                                    title = "Randomize PIN pad",
+                                    subtitle =
+                                        if (isPinEnabled) {
+                                            "Shuffle keypad digits on unlock"
+                                        } else {
+                                            "Enable PIN code lock first"
+                                        },
+                                    titleColor =
+                                        if (isPinEnabled) {
+                                            MaterialTheme.colorScheme.onBackground
+                                        } else {
+                                            TextSecondary.copy(alpha = 0.5f)
+                                        },
+                                    subtitleColor =
+                                        if (isPinEnabled) {
+                                            TextSecondary
+                                        } else {
+                                            TextSecondary.copy(alpha = 0.5f)
+                                        },
+                                )
+                            }
+
+                            SquareToggle(
+                                checked = randomizePinPad,
+                                onCheckedChange = onRandomizePinPadChange,
+                                enabled = isPinEnabled,
+                            )
+                        }
                     }
                 }
             }
@@ -700,131 +758,62 @@ fun SecurityScreen(
 
         // Disable Cloak Mode Confirmation Dialog
         if (showDisableCloakDialog) {
-            ScrollableAlertDialog(
+            IbisConfirmDialog(
                 onDismissRequest = { showDisableCloakDialog = false },
-                title = {
-                    Text(
-                        text = "Disable Cloak Mode?",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.onBackground,
-                    )
+                title = "Disable Cloak Mode?",
+                message = "The app icon will revert to Ibis Wallet after restart. You may need to re-add the homescreen shortcut.",
+                confirmText = "Disable",
+                confirmColor = ErrorRed,
+                onConfirm = {
+                    onDisableCloakMode()
+                    showDisableCloakDialog = false
+                    onRestartApp()
                 },
-                text = {
-                    Text(
-                        text = "The app icon will revert to Ibis Wallet after restart. You may need to re-add the homescreen shortcut.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = TextSecondary,
-                    )
-                },
-                confirmButton = {
-                    TextButton(
-                        onClick = {
-                            onDisableCloakMode()
-                            showDisableCloakDialog = false
-                            onRestartApp()
-                        },
-                    ) {
-                        Text("Disable & Restart", color = ErrorRed)
-                    }
-                },
-                dismissButton = {
-                    TextButton(onClick = { showDisableCloakDialog = false }) {
-                        Text("Cancel", color = TextSecondary)
-                    }
-                },
-                containerColor = DarkSurface,
-                shape = RoundedCornerShape(12.dp),
             )
         }
 
         // Cloak Mode Restart Prompt
         if (showCloakRestartDialog) {
-            ScrollableAlertDialog(
+            IbisConfirmDialog(
                 onDismissRequest = { showCloakRestartDialog = false },
-                title = {
-                    Text(
-                        text = "Restart Required",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.onBackground,
-                    )
+                title = "Restart Required",
+                message = "Restart the app to activate cloak mode.\n\nEnter your cloak pin in the calculator app and press the '=' key to unlock.",
+                confirmText = "Restart",
+                onConfirm = {
+                    showCloakRestartDialog = false
+                    onRestartApp()
                 },
-                text = {
-                    Text(
-                        text = "Restart the app to activate cloak mode.\n\nEnter your cloak pin in the calculator app and press the '=' key to unlock.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = TextSecondary,
-                    )
-                },
-                confirmButton = {
-                    TextButton(
-                        onClick = {
-                            showCloakRestartDialog = false
-                            onRestartApp()
-                        },
-                    ) {
-                        Text("Restart", color = BitcoinOrange)
-                    }
-                },
-                dismissButton = {
-                    TextButton(onClick = { showCloakRestartDialog = false }) {
-                        Text("Later", color = TextSecondary)
-                    }
-                },
-                containerColor = DarkSurface,
-                shape = RoundedCornerShape(12.dp),
+                dismissText = "Later",
             )
         }
 
         // Disable Duress Confirmation Dialog
         if (showDisableDuressDialog) {
-            ScrollableAlertDialog(
+            IbisConfirmDialog(
                 onDismissRequest = { showDisableDuressDialog = false },
-                title = {
-                    Text(
-                        text = "Disable Duress PIN?",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.onBackground,
-                    )
+                title = "Disable Duress PIN?",
+                message = "The decoy wallet will be removed.",
+                confirmText = "Disable",
+                confirmColor = ErrorRed,
+                onConfirm = {
+                    onDisableDuress()
+                    showDisableDuressDialog = false
                 },
-                text = {
-                    Text(
-                        text = "The decoy wallet will be removed.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = TextSecondary,
-                    )
-                },
-                confirmButton = {
-                    TextButton(
-                        onClick = {
-                            onDisableDuress()
-                            showDisableDuressDialog = false
-                        },
-                    ) {
-                        Text("Disable", color = ErrorRed)
-                    }
-                },
-                dismissButton = {
-                    TextButton(onClick = { showDisableDuressDialog = false }) {
-                        Text("Cancel", color = TextSecondary)
-                    }
-                },
-                containerColor = DarkSurface,
-                shape = RoundedCornerShape(12.dp),
             )
         }
 
         // Enable Auto-Wipe Confirmation Dialog
         if (showAutoWipeConfirmDialog) {
-            ScrollableAlertDialog(
+            IbisConfirmDialog(
                 onDismissRequest = { showAutoWipeConfirmDialog = false },
-                title = {
-                    Text(
-                        text = "Enable Auto-Wipe?",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.onBackground,
-                    )
+                title = "Enable Auto-Wipe?",
+                confirmText = "Enable",
+                confirmColor = ErrorRed,
+                onConfirm = {
+                    onAutoWipeThresholdChange(SecureStorage.AutoWipeThreshold.AFTER_10)
+                    showAutoWipeConfirmDialog = false
                 },
-                text = {
+                body = {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(
                             text = "All wallet data will be permanently erased after repeated failed unlock attempts. This cannot be undone.",
@@ -838,61 +827,21 @@ fun SecurityScreen(
                         )
                     }
                 },
-                confirmButton = {
-                    TextButton(
-                        onClick = {
-                            onAutoWipeThresholdChange(SecureStorage.AutoWipeThreshold.AFTER_10)
-                            showAutoWipeConfirmDialog = false
-                        },
-                    ) {
-                        Text("Enable", color = ErrorRed)
-                    }
-                },
-                dismissButton = {
-                    TextButton(onClick = { showAutoWipeConfirmDialog = false }) {
-                        Text("Cancel", color = TextSecondary)
-                    }
-                },
-                containerColor = DarkSurface,
-                shape = RoundedCornerShape(12.dp),
             )
         }
 
         // Disable Security Confirmation Dialog
         if (showDisableConfirmDialog) {
-            ScrollableAlertDialog(
+            IbisConfirmDialog(
                 onDismissRequest = { showDisableConfirmDialog = false },
-                title = {
-                    Text(
-                        text = "Disable Security?",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.onBackground,
-                    )
+                title = "Disable Security?",
+                message = "Anyone with access to your device will be able to open the app.",
+                confirmText = "Disable",
+                confirmColor = ErrorRed,
+                onConfirm = {
+                    onDisableSecurity()
+                    showDisableConfirmDialog = false
                 },
-                text = {
-                    Text(
-                        text = "Anyone with access to your device will be able to open the app.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = TextSecondary,
-                    )
-                },
-                confirmButton = {
-                    TextButton(
-                        onClick = {
-                            onDisableSecurity()
-                            showDisableConfirmDialog = false
-                        },
-                    ) {
-                        Text("Disable", color = ErrorRed)
-                    }
-                },
-                dismissButton = {
-                    TextButton(onClick = { showDisableConfirmDialog = false }) {
-                        Text("Cancel", color = TextSecondary)
-                    }
-                },
-                containerColor = DarkSurface,
-                shape = RoundedCornerShape(12.dp),
             )
         }
     }
@@ -1083,15 +1032,15 @@ private fun PinNumberPad(
             listOf("", "0", ""),
         )
 
-    val keypadButtonSize = 64.dp
+    val keypadButtonSize = 72.dp
 
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
         numbers.forEachIndexed { rowIndex, row ->
             Row(
-                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                horizontalArrangement = Arrangement.spacedBy(18.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 row.forEachIndexed { colIndex, number ->
@@ -1114,7 +1063,7 @@ private fun PinNumberPad(
                                     imageVector = Icons.AutoMirrored.Filled.Backspace,
                                     contentDescription = "Backspace",
                                     tint = TextSecondary,
-                                    modifier = Modifier.size(24.dp),
+                                    modifier = Modifier.size(26.dp),
                                 )
                             }
                         }
@@ -1134,7 +1083,7 @@ private fun PinNumberPad(
                                 Text(
                                     text = number,
                                     style = MaterialTheme.typography.headlineMedium,
-                                    fontSize = 24.sp,
+                                    fontSize = 28.sp,
                                 )
                             }
                         }
@@ -1320,6 +1269,19 @@ private fun DuressSetupScreen(
     var masterFingerprint by remember { mutableStateOf("") }
     var useCustomGapLimit by remember { mutableStateOf(false) }
     var gapLimitText by remember { mutableStateOf("") }
+    val advancedOptionsBringIntoViewRequester = rememberBringIntoViewRequesterOnExpand(showAdvancedOptions, "security_advanced")
+    val customFingerprintBringIntoViewRequester = rememberBringIntoViewRequesterOnExpand(useCustomFingerprint, "security_fingerprint")
+    val passphraseBringIntoViewRequester =
+        rememberBringIntoViewRequesterOnExpand(
+            usePassphrase,
+            "security_passphrase",
+        )
+    val customGapLimitBringIntoViewRequester = rememberBringIntoViewRequesterOnExpand(useCustomGapLimit, "security_gap_limit")
+    val customPathBringIntoViewRequester =
+        rememberBringIntoViewRequesterOnExpand(
+            useCustomPath,
+            "security_path",
+        )
     var selectedAddressType by remember { mutableStateOf(AddressType.SEGWIT) }
     val context = LocalContext.current
     val secureStorage = remember { SecureStorage.getInstance(context) }
@@ -1428,8 +1390,9 @@ private fun DuressSetupScreen(
             """\[([a-fA-F0-9]{8})/""".toRegex().find(trimmedImportInput)?.groupValues?.get(1)?.lowercase()
         }
     val hasEmbeddedFingerprint = parsedFingerprint != null
+    val suppressImportMnemonicValidation = isWifKey || isBitcoinAddress
     val importWords =
-        if (!isExtendedKey && !isWatchOnlyKey) {
+        if (!isExtendedKey && !isWatchOnlyKey && !suppressImportMnemonicValidation) {
             trimmedImportInput.split("\\s+".toRegex()).filter { it.isNotBlank() }
         } else {
             emptyList()
@@ -1467,7 +1430,9 @@ private fun DuressSetupScreen(
             importWords.all { it in bip39WordSet }
     val mnemonicValidation =
         remember(manualSeedPhrase, isExtendedKey, isWatchOnlyKey, isValidWordCount, allTypedWordsValid) {
-            if (!isExtendedKey && !isWatchOnlyKey && isValidWordCount && allTypedWordsValid) {
+            if (!isExtendedKey && !isWatchOnlyKey && !suppressImportMnemonicValidation &&
+                isValidWordCount && allTypedWordsValid
+            ) {
                 try {
                     Mnemonic.fromString(trimmedImportInput)
                     DuressMnemonicValidation.Valid
@@ -2351,6 +2316,7 @@ private fun DuressSetupScreen(
                         Column(
                             modifier =
                                 Modifier
+                                    .bringIntoViewRequester(advancedOptionsBringIntoViewRequester)
                                     .fillMaxWidth()
                                     .padding(horizontal = 16.dp)
                                     .padding(bottom = 16.dp),
@@ -2395,7 +2361,7 @@ private fun DuressSetupScreen(
                                         enter = expandVertically(),
                                         exit = shrinkVertically(),
                                     ) {
-                                        Column {
+                                        Column(modifier = Modifier.bringIntoViewRequester(customFingerprintBringIntoViewRequester)) {
                                             Spacer(modifier = Modifier.height(8.dp))
                                             OutlinedTextField(
                                                 value = masterFingerprint,
@@ -2478,7 +2444,7 @@ private fun DuressSetupScreen(
                                 enter = expandVertically(),
                                 exit = shrinkVertically(),
                             ) {
-                                Column {
+                                Column(modifier = Modifier.bringIntoViewRequester(passphraseBringIntoViewRequester)) {
                                     Spacer(modifier = Modifier.height(8.dp))
                                     OutlinedTextField(
                                         value = passphrase,
@@ -2595,7 +2561,7 @@ private fun DuressSetupScreen(
                                 enter = expandVertically(),
                                 exit = shrinkVertically(),
                             ) {
-                                Column {
+                                Column(modifier = Modifier.bringIntoViewRequester(customGapLimitBringIntoViewRequester)) {
                                     Spacer(modifier = Modifier.height(8.dp))
                                     OutlinedTextField(
                                         value = gapLimitText,
@@ -2641,7 +2607,7 @@ private fun DuressSetupScreen(
                                 enter = expandVertically(),
                                 exit = shrinkVertically(),
                             ) {
-                                Column {
+                                Column(modifier = Modifier.bringIntoViewRequester(customPathBringIntoViewRequester)) {
                                     Spacer(modifier = Modifier.height(8.dp))
                                     OutlinedTextField(
                                         value = customPath,

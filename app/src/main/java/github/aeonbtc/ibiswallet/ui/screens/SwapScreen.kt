@@ -21,6 +21,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -83,6 +85,7 @@ import androidx.core.net.toUri
 import github.aeonbtc.ibiswallet.data.local.SecureStorage
 import github.aeonbtc.ibiswallet.data.model.FeeEstimationResult
 import github.aeonbtc.ibiswallet.data.model.LiquidAsset
+import github.aeonbtc.ibiswallet.data.model.LiquidTransaction
 import github.aeonbtc.ibiswallet.data.model.PendingSwapPhase
 import github.aeonbtc.ibiswallet.data.model.PendingSwapSession
 import github.aeonbtc.ibiswallet.data.model.SwapDirection
@@ -90,12 +93,14 @@ import github.aeonbtc.ibiswallet.data.model.SwapLimits
 import github.aeonbtc.ibiswallet.data.model.SwapService
 import github.aeonbtc.ibiswallet.data.model.SwapState
 import github.aeonbtc.ibiswallet.data.model.UtxoInfo
+import github.aeonbtc.ibiswallet.data.model.TransactionDetails
 import github.aeonbtc.ibiswallet.ui.components.AmountLabel
 import github.aeonbtc.ibiswallet.ui.components.FeeRateOption
 import github.aeonbtc.ibiswallet.ui.components.FeeRateSection
 import github.aeonbtc.ibiswallet.ui.components.IbisButton
 import github.aeonbtc.ibiswallet.ui.components.ScrollableDialogSurface
 import github.aeonbtc.ibiswallet.ui.components.formatFeeRate
+import github.aeonbtc.ibiswallet.ui.components.rememberBringIntoViewRequesterOnExpand
 import github.aeonbtc.ibiswallet.ui.theme.AccentBlue
 import github.aeonbtc.ibiswallet.ui.theme.BitcoinOrange
 import github.aeonbtc.ibiswallet.ui.theme.BorderColor
@@ -120,6 +125,7 @@ import java.util.Locale
 private const val MIN_LIQUID_SWAP_FEE_RATE = 0.1
 private const val ESTIMATED_LIQUID_SWAP_TX_VSIZE = 200
 private const val BOLTZ_RESCUE_URL = "https://boltz.exchange/rescue/external"
+private const val BOLTZ_SWAP_CONFIRMATION_TARGET = 2
 
 /**
  * Swap screen for BTC <-> L-BTC peg-in / peg-out.
@@ -137,6 +143,10 @@ fun SwapScreen(
     sideSwapEnabled: Boolean = true,
     btcBalanceSats: Long = 0,
     lbtcBalanceSats: Long = 0,
+    btcTransactions: List<TransactionDetails> = emptyList(),
+    btcBlockHeight: UInt? = null,
+    liquidTransactions: List<LiquidTransaction> = emptyList(),
+    liquidBlockHeight: UInt? = null,
     btcUtxos: List<UtxoInfo> = emptyList(),
     liquidUtxos: List<UtxoInfo> = emptyList(),
     spendUnconfirmed: Boolean = false,
@@ -202,6 +212,17 @@ fun SwapScreen(
     val useCustomBitcoinFeeRate = useCustomBitcoinFeeRateState.value
     val useCustomLiquidFeeRate = useCustomLiquidFeeRateState.value
     val showCoinControl = showCoinControlState.value
+    val advancedOptionsBringIntoViewRequester = rememberBringIntoViewRequesterOnExpand(showAdvancedOptions, "swap_advanced")
+    val customDestinationBringIntoViewRequester =
+        rememberBringIntoViewRequesterOnExpand(
+            useCustomBitcoinDestination || useCustomLiquidDestination,
+            "swap_destination",
+        )
+    val customFeeBringIntoViewRequester =
+        rememberBringIntoViewRequesterOnExpand(
+            useCustomBitcoinFeeRate || useCustomLiquidFeeRate,
+            "swap_fees",
+        )
     val clearSwapForm = {
         amountInput = ""
         isUsdMode = false
@@ -224,6 +245,12 @@ fun SwapScreen(
         reviewDialogSwap = null
         selectedBitcoinUtxos.clear()
         selectedLiquidUtxos.clear()
+    }
+    val clearMaxSelectionForServiceChange: (SwapService) -> Unit = { newService ->
+        if (isMaxMode && selectedService != newService) {
+            isMaxMode = false
+            amountInput = ""
+        }
     }
     val preparedSwap = when (swapState) {
         is SwapState.ReviewReady -> swapState.swap
@@ -413,12 +440,28 @@ fun SwapScreen(
         maxOf(0L, availableBalance - estimatedLiquidFundingFee)
     }
     val sourceAvailableBalance = if (isPegIn) availableBalance else estimatedSpendableBalance
+    val transientExecutingSwap =
+        reviewDialogSwap?.takeIf { swap ->
+            swap.swapId == executingReviewSwapId || swap.swapId == broadcastingSwapId
+        }
     val balanceWarning = remember(
         amountSats,
         estimatedSpendableBalance,
         isPegIn,
+        preparedSwap?.swapId,
+        transientExecutingSwap?.swapId,
     ) {
+        val activeReviewedMaxLiquidSwap =
+            sequenceOf(preparedSwap, transientExecutingSwap)
+                .filterNotNull()
+                .firstOrNull { swap ->
+                swap.direction == SwapDirection.LBTC_TO_BTC &&
+                    swap.usesMaxAmount &&
+                    amountSats != null &&
+                    swap.sendAmount == amountSats
+                }
         when {
+            activeReviewedMaxLiquidSwap != null -> null
             amountSats == null -> null
             amountSats > estimatedSpendableBalance -> if (isPegIn) {
                 "Amount exceeds available BTC balance"
@@ -605,6 +648,10 @@ fun SwapScreen(
                 boltzRescueMnemonic = boltzRescueMnemonic,
                 expanded = pendingSwapsExpanded,
                 onExpandedChange = { pendingSwapsExpanded = it },
+                btcTransactions = btcTransactions,
+                btcBlockHeight = btcBlockHeight,
+                liquidTransactions = liquidTransactions,
+                liquidBlockHeight = liquidBlockHeight,
                 useSats = useSats,
                 unit = unit,
                 privacyMode = privacyMode,
@@ -1066,6 +1113,7 @@ fun SwapScreen(
                     selectedOption = selectedProvider,
                     enabled = !isSwapLocked,
                     onOptionSelected = { option ->
+                        clearMaxSelectionForServiceChange(option.service)
                         selectedService = option.service
                         onPreferredServiceChange(option.service)
                         onResetSwap()
@@ -1161,6 +1209,7 @@ fun SwapScreen(
                     Column(
                         modifier =
                             Modifier
+                                .bringIntoViewRequester(advancedOptionsBringIntoViewRequester)
                                 .fillMaxWidth()
                                 .padding(top = 12.dp),
                     ) {
@@ -1191,7 +1240,7 @@ fun SwapScreen(
                             enter = expandVertically(),
                             exit = shrinkVertically(),
                         ) {
-                            Column {
+                            Column(modifier = Modifier.bringIntoViewRequester(customDestinationBringIntoViewRequester)) {
                                 Spacer(modifier = Modifier.height(8.dp))
                                 OutlinedTextField(
                                     value = currentCustomDestination,
@@ -1261,7 +1310,7 @@ fun SwapScreen(
                             enter = expandVertically(),
                             exit = shrinkVertically(),
                         ) {
-                            Column {
+                            Column(modifier = Modifier.bringIntoViewRequester(customFeeBringIntoViewRequester)) {
                                 Spacer(modifier = Modifier.height(8.dp))
                                 if (isPegIn) {
                                     Column(
@@ -1492,6 +1541,8 @@ fun SwapScreen(
                 val failedSwap = swapState.swap
                 var showDetails by remember { mutableStateOf(false) }
                 val context = LocalContext.current
+                val failedDetailsBringIntoViewRequester =
+                    rememberBringIntoViewRequesterOnExpand(showDetails, "failed_swap_details")
 
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -1539,6 +1590,7 @@ fun SwapScreen(
                             AnimatedVisibility(visible = showDetails) {
                                 Column(
                                     modifier = Modifier
+                                        .bringIntoViewRequester(failedDetailsBringIntoViewRequester)
                                         .fillMaxWidth()
                                         .padding(top = 8.dp),
                                 ) {
@@ -1705,11 +1757,16 @@ private fun PendingSwapsCard(
     boltzRescueMnemonic: String?,
     expanded: Boolean,
     onExpandedChange: (Boolean) -> Unit,
+    btcTransactions: List<TransactionDetails>,
+    btcBlockHeight: UInt?,
+    liquidTransactions: List<LiquidTransaction>,
+    liquidBlockHeight: UInt?,
     useSats: Boolean,
     unit: String,
     privacyMode: Boolean,
 ) {
     val expandedSwapIds = remember { mutableStateMapOf<String, Boolean>() }
+    val cardBringIntoViewRequester = rememberBringIntoViewRequesterOnExpand(expanded, "pending_swaps_card")
 
     LaunchedEffect(pendingSwaps) {
         val activeIds = pendingSwaps.map { it.swapId }.toSet()
@@ -1754,7 +1811,11 @@ private fun PendingSwapsCard(
             }
 
             AnimatedVisibility(visible = expanded) {
-                Column(modifier = Modifier.padding(top = 12.dp)) {
+                Column(
+                    modifier = Modifier
+                        .padding(top = 12.dp)
+                        .bringIntoViewRequester(cardBringIntoViewRequester),
+                ) {
                     pendingSwaps.forEachIndexed { index, pendingSwap ->
                         if (index > 0) {
                             Spacer(modifier = Modifier.height(8.dp))
@@ -1762,6 +1823,10 @@ private fun PendingSwapsCard(
                         PendingSwapRow(
                             pendingSwap = pendingSwap,
                             boltzRescueMnemonic = boltzRescueMnemonic,
+                            btcTransactions = btcTransactions,
+                            btcBlockHeight = btcBlockHeight,
+                            liquidTransactions = liquidTransactions,
+                            liquidBlockHeight = liquidBlockHeight,
                             useSats = useSats,
                             unit = unit,
                             privacyMode = privacyMode,
@@ -1781,6 +1846,10 @@ private fun PendingSwapsCard(
 private fun PendingSwapRow(
     pendingSwap: PendingSwapSession,
     boltzRescueMnemonic: String?,
+    btcTransactions: List<TransactionDetails>,
+    btcBlockHeight: UInt?,
+    liquidTransactions: List<LiquidTransaction>,
+    liquidBlockHeight: UInt?,
     useSats: Boolean,
     unit: String,
     privacyMode: Boolean,
@@ -1798,6 +1867,7 @@ private fun PendingSwapRow(
     val sendAmountText = pendingSwapDisplayAmount(pendingSwap.sendAmount, useSats, unit, privacyMode)
     val showRescueKeyDialogState = rememberSaveable(pendingSwap.swapId) { mutableStateOf(false) }
     val showRescueKeyDialog = showRescueKeyDialogState.value
+    val rowBringIntoViewRequester = rememberBringIntoViewRequesterOnExpand(expanded, "pending_swap_${pendingSwap.swapId}")
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -1849,7 +1919,7 @@ private fun PendingSwapRow(
                 enter = expandVertically(),
                 exit = shrinkVertically(),
             ) {
-                Column {
+                Column(modifier = Modifier.bringIntoViewRequester(rowBringIntoViewRequester)) {
                     Spacer(modifier = Modifier.height(12.dp))
 
                     Row(
@@ -1879,25 +1949,48 @@ private fun PendingSwapRow(
 
                     Spacer(modifier = Modifier.height(8.dp))
 
-                    Text(
-                        text = "Confirmations: ${pendingSwap.status}",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = TextSecondary,
-                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.Bottom,
+                    ) {
+                        Text(
+                            text =
+                                "Confirmations: ${
+                                    pendingSwapConfirmationStatus(
+                                        pendingSwap = pendingSwap,
+                                        btcTransactions = btcTransactions,
+                                        btcBlockHeight = btcBlockHeight,
+                                        liquidTransactions = liquidTransactions,
+                                        liquidBlockHeight = liquidBlockHeight,
+                                    )
+                                }",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = TextSecondary,
+                            modifier = Modifier.weight(1f),
+                        )
+                        if (shouldShowBoltzRescueMnemonic(pendingSwap, boltzRescueMnemonic)) {
+                            Spacer(modifier = Modifier.width(8.dp))
+                            OutlinedButton(
+                                onClick = { showRescueKeyDialogState.value = true },
+                                modifier = Modifier.height(32.dp),
+                                shape = RoundedCornerShape(8.dp),
+                                border = BorderStroke(1.dp, BorderColor),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                            ) {
+                                Text(
+                                    text = "Rescue Key",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = TextPrimary,
+                                )
+                            }
+                        }
+                    }
 
-                    Spacer(modifier = Modifier.height(12.dp))
+                    Spacer(modifier = Modifier.height(10.dp))
                     HorizontalDivider(color = BorderColor)
                     Spacer(modifier = Modifier.height(8.dp))
 
-                    if (shouldShowBoltzRescueMnemonic(pendingSwap, boltzRescueMnemonic)) {
-                        PendingSwapDetailRowWithAction(
-                            label = idLabel,
-                            value = pendingSwap.swapId,
-                            onActionClick = { showRescueKeyDialogState.value = true },
-                        )
-                    } else {
-                        PendingSwapDetailRow(idLabel, pendingSwap.swapId)
-                    }
+                    PendingSwapDetailRow(idLabel, pendingSwap.swapId)
                     pendingSwap.label?.takeIf { it.isNotBlank() }?.let {
                         PendingSwapDetailRow("Label", it)
                     }
@@ -1919,6 +2012,45 @@ private fun PendingSwapRow(
     }
 }
 
+private fun pendingSwapConfirmationStatus(
+    pendingSwap: PendingSwapSession,
+    btcTransactions: List<TransactionDetails>,
+    btcBlockHeight: UInt?,
+    liquidTransactions: List<LiquidTransaction>,
+    liquidBlockHeight: UInt?,
+): String {
+    if (pendingSwap.service != SwapService.BOLTZ) {
+        return pendingSwap.status
+    }
+
+    val fundingTxid = pendingSwap.fundingTxid?.takeIf { it.isNotBlank() } ?: return pendingSwap.status
+    val confirmations =
+        when (pendingSwap.direction) {
+            SwapDirection.BTC_TO_LBTC ->
+                btcTransactions.firstOrNull { it.txid.equals(fundingTxid, ignoreCase = true) }?.let { tx ->
+                    tx.confirmationTime?.let { confirmation ->
+                        btcBlockHeight?.let { tip ->
+                            (tip.toLong() - confirmation.height.toLong() + 1L).coerceAtLeast(1L).toInt()
+                        } ?: 1
+                    } ?: 0
+                }
+            SwapDirection.LBTC_TO_BTC ->
+                liquidTransactions.firstOrNull { it.txid.equals(fundingTxid, ignoreCase = true) }?.let { tx ->
+                    tx.height?.let { height ->
+                        liquidBlockHeight?.let { tip ->
+                            (tip.toLong() - height.toLong() + 1L).coerceAtLeast(1L).toInt()
+                        } ?: 1
+                    } ?: 0
+                }
+        }
+
+    if (confirmations != null) {
+        return "${confirmations.coerceIn(0, BOLTZ_SWAP_CONFIRMATION_TARGET)}/$BOLTZ_SWAP_CONFIRMATION_TARGET"
+    }
+
+    return "0/$BOLTZ_SWAP_CONFIRMATION_TARGET"
+}
+
 @Composable
 private fun PendingSwapAmountColumn(
     label: String,
@@ -1936,9 +2068,9 @@ private fun PendingSwapAmountColumn(
         Spacer(modifier = Modifier.height(4.dp))
         Text(
             text = value,
-            style = MaterialTheme.typography.bodyMedium,
+            style = MaterialTheme.typography.titleMedium,
             color = accentColor,
-            fontWeight = FontWeight.Medium,
+            fontWeight = FontWeight.SemiBold,
         )
         Spacer(modifier = Modifier.height(2.dp))
         Text(
@@ -2006,104 +2138,23 @@ private fun PendingSwapDetailRow(
             .fillMaxWidth()
             .padding(vertical = 4.dp),
     ) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.bodyMedium,
-            color = TextSecondary,
-        )
-        Spacer(modifier = Modifier.height(4.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(
-                text = truncateAddress(value),
-                style = MaterialTheme.typography.bodyMedium,
-                color = TextPrimary,
-                modifier = Modifier.weight(1f),
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-            IconButton(
-                onClick = {
-                    SecureClipboard.copyAndScheduleClear(context, label, value)
-                    showCopied = true
-                },
-                modifier = Modifier.size(36.dp),
-            ) {
-                Icon(
-                    imageVector = Icons.Default.ContentCopy,
-                    contentDescription = "Copy $label",
-                    tint = LiquidTeal,
-                    modifier = Modifier.size(18.dp),
-                )
-            }
-        }
-        if (showCopied) {
-            Text(
-                text = "Copied to clipboard!",
-                style = MaterialTheme.typography.labelSmall,
-                color = LiquidTeal,
-            )
-        }
-    }
-}
-
-@Composable
-private fun PendingSwapDetailRowWithAction(
-    label: String,
-    value: String,
-    onActionClick: () -> Unit,
-) {
-    val context = LocalContext.current
-    var showCopied by remember { mutableStateOf(false) }
-
-    LaunchedEffect(showCopied, value) {
-        if (!showCopied) return@LaunchedEffect
-        delay(1_500)
-        showCopied = false
-    }
-
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp),
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Text(
-                text = label,
-                style = MaterialTheme.typography.bodyMedium,
-                color = TextSecondary,
-                modifier = Modifier.weight(1f),
-            )
-            OutlinedButton(
-                onClick = onActionClick,
-                modifier = Modifier.height(32.dp),
-                shape = RoundedCornerShape(8.dp),
-                border = BorderStroke(1.dp, BorderColor),
-                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
-            ) {
+            Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = "Rescue Key",
-                    style = MaterialTheme.typography.labelMedium,
+                    text = label,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = TextSecondary,
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = truncateAddress(value),
+                    style = MaterialTheme.typography.bodyMedium,
                     color = TextPrimary,
                 )
             }
-        }
-        Spacer(modifier = Modifier.height(4.dp))
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                text = truncateAddress(value),
-                style = MaterialTheme.typography.bodyMedium,
-                color = TextPrimary,
-                modifier = Modifier.weight(1f),
-            )
             Spacer(modifier = Modifier.width(8.dp))
             IconButton(
                 onClick = {
@@ -2121,9 +2172,10 @@ private fun PendingSwapDetailRowWithAction(
             }
         }
         if (showCopied) {
+            Spacer(modifier = Modifier.height(4.dp))
             Text(
                 text = "Copied to clipboard!",
-                style = MaterialTheme.typography.labelSmall,
+                style = MaterialTheme.typography.bodySmall,
                 color = LiquidTeal,
             )
         }
@@ -2176,7 +2228,7 @@ private fun BoltzRescueMnemonicDialog(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
-                        text = "If swap fails, open Boltz rescue link and paste this 12-word key.",
+                        text = "If swap fails, open Boltz rescue link and paste this 12-word seed.",
                         style = MaterialTheme.typography.bodySmall,
                         color = TextSecondary,
                         modifier = Modifier.weight(1f),
@@ -2961,12 +3013,26 @@ private fun SwapReviewDialog(
     var showSwapIdCopied by remember { mutableStateOf(false) }
     var addressesExpanded by rememberSaveable(orderId) { mutableStateOf(false) }
     var feesExpanded by rememberSaveable(orderId) { mutableStateOf(false) }
+    val addressesBringIntoViewRequester = remember(orderId) { BringIntoViewRequester() }
+    val feesBringIntoViewRequester = remember(orderId) { BringIntoViewRequester() }
     val label = pendingSwap.label?.takeIf { it.isNotBlank() }
 
     LaunchedEffect(showSwapIdCopied, orderId) {
         if (!showSwapIdCopied) return@LaunchedEffect
         delay(1_500)
         showSwapIdCopied = false
+    }
+
+    LaunchedEffect(addressesExpanded, orderId) {
+        if (!addressesExpanded) return@LaunchedEffect
+        delay(180)
+        addressesBringIntoViewRequester.bringIntoView()
+    }
+
+    LaunchedEffect(feesExpanded, orderId) {
+        if (!feesExpanded) return@LaunchedEffect
+        delay(180)
+        feesBringIntoViewRequester.bringIntoView()
     }
 
     ScrollableDialogSurface(
@@ -3139,38 +3205,44 @@ private fun SwapReviewDialog(
                         Spacer(modifier = Modifier.height(14.dp))
                         HorizontalDivider(color = BorderColor.copy(alpha = 0.3f))
                         Spacer(modifier = Modifier.height(14.dp))
-                        Text(
-                            text = if (pendingSwap.service == SwapService.SIDESWAP) "SideSwap Order ID" else "Boltz Swap ID",
-                            style = MaterialTheme.typography.bodyLarge,
-                            color = TextSecondary,
-                        )
-                        Spacer(modifier = Modifier.height(6.dp))
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
+                            verticalAlignment = Alignment.Top,
                         ) {
-                            Text(
-                                text = orderId,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = TextPrimary,
-                                modifier = Modifier.weight(1f),
-                            )
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = if (pendingSwap.service == SwapService.SIDESWAP) "SideSwap Order ID" else "Boltz Swap ID",
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    color = TextSecondary,
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = orderId,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = TextPrimary,
+                                )
+                            }
                             Spacer(modifier = Modifier.width(6.dp))
-                            IconButton(
-                                onClick = {
-                                    SecureClipboard.copyAndScheduleClear(
-                                        context = context,
-                                        label = "Swap ID",
-                                        text = orderId,
-                                    )
-                                    showSwapIdCopied = true
-                                },
-                                modifier = Modifier.size(36.dp),
+                            Box(
+                                contentAlignment = Alignment.Center,
+                                modifier =
+                                    Modifier
+                                        .size(32.dp)
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(DarkSurfaceVariant)
+                                        .clickable {
+                                            SecureClipboard.copyAndScheduleClear(
+                                                context = context,
+                                                label = "Swap ID",
+                                                text = orderId,
+                                            )
+                                            showSwapIdCopied = true
+                                        },
                             ) {
                                 Icon(
                                     imageVector = Icons.Default.ContentCopy,
                                     contentDescription = "Copy swap ID",
-                                    tint = LiquidTeal,
+                                    tint = if (showSwapIdCopied) LiquidTeal else TextSecondary,
                                     modifier = Modifier.size(18.dp),
                                 )
                             }
@@ -3237,6 +3309,7 @@ private fun SwapReviewDialog(
                         AnimatedVisibility(addressesExpanded) {
                             Column(
                                 modifier = Modifier
+                                    .bringIntoViewRequester(addressesBringIntoViewRequester)
                                     .fillMaxWidth()
                                     .padding(top = 12.dp),
                             ) {
@@ -3323,6 +3396,7 @@ private fun SwapReviewDialog(
                         AnimatedVisibility(feesExpanded) {
                             Column(
                                 modifier = Modifier
+                                    .bringIntoViewRequester(feesBringIntoViewRequester)
                                     .fillMaxWidth()
                                     .padding(top = 12.dp),
                             ) {

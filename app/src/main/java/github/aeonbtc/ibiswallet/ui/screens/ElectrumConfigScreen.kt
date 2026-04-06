@@ -76,6 +76,7 @@ import kotlin.math.roundToInt
 import github.aeonbtc.ibiswallet.R
 import github.aeonbtc.ibiswallet.data.model.ElectrumConfig
 import github.aeonbtc.ibiswallet.tor.TorState
+import github.aeonbtc.ibiswallet.ui.components.IbisConfirmDialog
 import github.aeonbtc.ibiswallet.ui.components.ScrollableAlertDialog
 import github.aeonbtc.ibiswallet.tor.TorStatus
 import github.aeonbtc.ibiswallet.ui.components.QrScannerDialog
@@ -164,41 +165,19 @@ fun ElectrumConfigScreen(
 
     // Delete confirmation dialog
     serverToDelete?.let { server ->
-        ScrollableAlertDialog(
+        IbisConfirmDialog(
             onDismissRequest = {
                 @Suppress("AssignedValueIsNeverRead")
                 serverToDelete = null
             },
-            title = {
-                Text(
-                    text = "Delete Server",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.onBackground,
-                )
+            title = "Delete Server",
+            message = "Are you sure you want to delete \"${server.displayName()}\"?",
+            confirmText = "Delete",
+            confirmColor = ErrorRed,
+            onConfirm = {
+                server.id?.let { onDeleteServer(it) }
+                serverToDelete = null
             },
-            text = {
-                Text(
-                    text = "Are you sure you want to delete \"${server.displayName()}\"?",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = TextSecondary,
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        server.id?.let { onDeleteServer(it) }
-                        serverToDelete = null
-                    },
-                ) {
-                    Text("Delete", color = ErrorRed)
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { serverToDelete = null }) {
-                    Text("Cancel", color = TextSecondary)
-                }
-            },
-            containerColor = DarkSurface,
         )
     }
 

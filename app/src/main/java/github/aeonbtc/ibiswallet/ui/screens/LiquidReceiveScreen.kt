@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -29,7 +30,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
-import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -42,6 +42,7 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -57,6 +58,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -65,15 +67,21 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import github.aeonbtc.ibiswallet.MainActivity
+import github.aeonbtc.ibiswallet.R
 import github.aeonbtc.ibiswallet.data.local.SecureStorage
 import github.aeonbtc.ibiswallet.data.model.LightningInvoiceLimits
 import github.aeonbtc.ibiswallet.data.model.LightningInvoiceState
 import github.aeonbtc.ibiswallet.nfc.NdefHostApduService
+import github.aeonbtc.ibiswallet.nfc.NfcRuntimeStatus
+import github.aeonbtc.ibiswallet.nfc.NfcShareUiState
 import github.aeonbtc.ibiswallet.ui.components.AmountLabel
 import github.aeonbtc.ibiswallet.ui.components.IbisButton
+import github.aeonbtc.ibiswallet.ui.components.NfcStatusIndicator
 import github.aeonbtc.ibiswallet.ui.components.ReceiveActionButton
-import github.aeonbtc.ibiswallet.data.model.LiquidAsset
 import github.aeonbtc.ibiswallet.ui.components.SquareToggle
+import github.aeonbtc.ibiswallet.ui.components.rememberBringIntoViewRequesterOnExpand
+import github.aeonbtc.ibiswallet.data.model.LiquidAsset
 import github.aeonbtc.ibiswallet.ui.theme.BorderColor
 import github.aeonbtc.ibiswallet.ui.theme.DarkCard
 import github.aeonbtc.ibiswallet.ui.theme.DarkSurface
@@ -132,6 +140,8 @@ fun LiquidReceiveScreen(
     var lightningShowLabelField by remember { mutableStateOf(false) }
     var lightningLabelText by remember { mutableStateOf("") }
     var liquidQrBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    val amountBringIntoViewRequester = rememberBringIntoViewRequesterOnExpand(showAmountField, "liquid_receive_amount")
+    val labelBringIntoViewRequester = rememberBringIntoViewRequesterOnExpand(showLabelField, "liquid_receive_label")
 
     val amountInSats =
         remember(amountText, useSats, isUsdMode, btcPrice) {
@@ -266,7 +276,22 @@ fun LiquidReceiveScreen(
         }
     }
 
+    val mainActivity = context as? MainActivity
+    val nfcShareOwner = remember { Any() }
     val nfcAvailable = context.getNfcAvailability().canBroadcast
+    val hasNfcSharePayload = nfcAvailable && activeQrContent != null
+    val wantsLightningNfcBadge = liquidReceiveTab == 1 && nfcAvailable
+    val wantsPreferredHceService = hasNfcSharePayload || wantsLightningNfcBadge
+    val nfcShareState by NfcRuntimeStatus.shareState.collectAsState()
+    DisposableEffect(mainActivity, wantsPreferredHceService) {
+        if (mainActivity != null && wantsPreferredHceService) {
+            mainActivity.requestPreferredHceService(nfcShareOwner)
+        }
+        onDispose {
+            mainActivity?.releasePreferredHceService(nfcShareOwner)
+        }
+    }
+    val isNfcBroadcasting = hasNfcSharePayload && mainActivity?.isPreferredHceServiceActive == true
     DisposableEffect(activeQrContent, nfcAvailable) {
         if (nfcAvailable && activeQrContent != null) {
             NdefHostApduService.setNdefPayload(activeQrContent)
@@ -337,26 +362,29 @@ fun LiquidReceiveScreen(
                     color = MaterialTheme.colorScheme.onBackground,
                     modifier = Modifier.fillMaxWidth(),
                 )
-                if (nfcAvailable) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(top = 2.dp),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Sensors,
-                            contentDescription = "NFC broadcasting",
-                            tint = SuccessGreen,
-                            modifier = Modifier.size(14.dp),
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(
-                            text = "NFC",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = SuccessGreen,
-                        )
-                    }
+                if (isNfcBroadcasting || wantsLightningNfcBadge) {
+                    val nfcStatusLabel =
+                        when (nfcShareState) {
+                            NfcShareUiState.Inactive,
+                            NfcShareUiState.Ready,
+                            -> stringResource(R.string.nfc_status_share_ready)
+                            NfcShareUiState.Sharing -> stringResource(R.string.nfc_status_sharing)
+                        }
+                    val nfcStatusColor =
+                        if (nfcShareState == NfcShareUiState.Sharing) {
+                            LiquidTeal
+                        } else {
+                            SuccessGreen
+                        }
+                    NfcStatusIndicator(
+                        label = nfcStatusLabel,
+                        contentDescription = nfcStatusLabel,
+                        modifier =
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(top = 2.dp),
+                        color = nfcStatusColor,
+                    )
                 }
 
                 Spacer(modifier = Modifier.height(12.dp))
@@ -515,7 +543,11 @@ fun LiquidReceiveScreen(
                         }
 
                         AnimatedVisibility(visible = showAmountField) {
-                            Column(modifier = Modifier.fillMaxWidth()) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .bringIntoViewRequester(amountBringIntoViewRequester),
+                            ) {
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -655,32 +687,34 @@ fun LiquidReceiveScreen(
                         }
 
                         AnimatedVisibility(visible = showLabelField) {
-                            OutlinedTextField(
-                                value = labelText,
-                                onValueChange = { labelText = it },
-                                placeholder = { Text("e.g. Payment from Alice") },
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth(),
-                                shape = RoundedCornerShape(8.dp),
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    focusedBorderColor = LiquidTeal,
-                                    unfocusedBorderColor = BorderColor,
-                                    cursorColor = LiquidTeal,
-                                ),
-                                enabled = liquidAddress != null,
-                                trailingIcon = {
-                                    if (labelText.isNotEmpty() && liquidAddress != null) {
-                                        TextButton(
-                                            onClick = {
-                                                onSaveLiquidAddressLabel(liquidAddress, labelText)
-                                                Toast.makeText(context, "Label saved", Toast.LENGTH_SHORT).show()
-                                            },
-                                        ) {
-                                            Text("Save", color = LiquidTeal)
+                            Column(modifier = Modifier.bringIntoViewRequester(labelBringIntoViewRequester)) {
+                                OutlinedTextField(
+                                    value = labelText,
+                                    onValueChange = { labelText = it },
+                                    placeholder = { Text("e.g. Payment from Alice") },
+                                    singleLine = true,
+                                    modifier = Modifier.fillMaxWidth(),
+                                    shape = RoundedCornerShape(8.dp),
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedBorderColor = LiquidTeal,
+                                        unfocusedBorderColor = BorderColor,
+                                        cursorColor = LiquidTeal,
+                                    ),
+                                    enabled = liquidAddress != null,
+                                    trailingIcon = {
+                                        if (labelText.isNotEmpty() && liquidAddress != null) {
+                                            TextButton(
+                                                onClick = {
+                                                    onSaveLiquidAddressLabel(liquidAddress, labelText)
+                                                    Toast.makeText(context, "Label saved", Toast.LENGTH_SHORT).show()
+                                                },
+                                            ) {
+                                                Text("Save", color = LiquidTeal)
+                                            }
                                         }
-                                    }
-                                },
-                            )
+                                    },
+                                )
+                            }
                         }
                     }
                 } else {
@@ -1054,6 +1088,8 @@ private fun LightningInvoiceForm(
     onLabelTextChange: (String) -> Unit,
     onToggleDenomination: () -> Unit = {},
 ) {
+    val labelBringIntoViewRequester = rememberBringIntoViewRequesterOnExpand(showLabelField, "lightning_invoice_label")
+
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(12.dp),
@@ -1238,19 +1274,21 @@ private fun LightningInvoiceForm(
             }
 
             AnimatedVisibility(visible = showLabelField) {
-                OutlinedTextField(
-                    value = labelText,
-                    onValueChange = onLabelTextChange,
-                    placeholder = { Text("e.g. Lightning sale") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(8.dp),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = LiquidTeal,
-                        unfocusedBorderColor = BorderColor,
-                        cursorColor = LiquidTeal,
-                    ),
-                )
+                Column(modifier = Modifier.bringIntoViewRequester(labelBringIntoViewRequester)) {
+                    OutlinedTextField(
+                        value = labelText,
+                        onValueChange = onLabelTextChange,
+                        placeholder = { Text("e.g. Lightning sale") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(8.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = LiquidTeal,
+                            unfocusedBorderColor = BorderColor,
+                            cursorColor = LiquidTeal,
+                        ),
+                    )
+                }
             }
         }
     }

@@ -20,7 +20,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -29,10 +29,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
-import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -40,6 +38,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -51,19 +50,26 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import github.aeonbtc.ibiswallet.MainActivity
+import github.aeonbtc.ibiswallet.R
 import github.aeonbtc.ibiswallet.data.local.SecureStorage
 import github.aeonbtc.ibiswallet.data.model.WalletState
 import github.aeonbtc.ibiswallet.nfc.NdefHostApduService
+import github.aeonbtc.ibiswallet.nfc.NfcRuntimeStatus
+import github.aeonbtc.ibiswallet.nfc.NfcShareUiState
 import github.aeonbtc.ibiswallet.ui.components.AmountLabel
 import github.aeonbtc.ibiswallet.ui.components.IbisButton
+import github.aeonbtc.ibiswallet.ui.components.NfcStatusIndicator
 import github.aeonbtc.ibiswallet.ui.components.ReceiveActionButton
 import github.aeonbtc.ibiswallet.ui.components.SquareToggle
+import github.aeonbtc.ibiswallet.ui.components.rememberBringIntoViewRequesterOnExpand
 import github.aeonbtc.ibiswallet.ui.theme.BitcoinOrange
 import github.aeonbtc.ibiswallet.ui.theme.BorderColor
 import github.aeonbtc.ibiswallet.ui.theme.DarkCard
@@ -102,6 +108,8 @@ fun ReceiveScreen(
     var isUsdMode by remember { mutableStateOf(false) }
     var showEnlargedQr by remember { mutableStateOf(false) }
     var showLabelField by remember { mutableStateOf(false) }
+    val amountBringIntoViewRequester = rememberBringIntoViewRequesterOnExpand(showAmountField, "receive_amount")
+    val labelBringIntoViewRequester = rememberBringIntoViewRequesterOnExpand(showLabelField, "receive_label")
 
     // Convert amount to sats for URI (handles BTC, sats, and USD input)
     val amountInSats =
@@ -158,7 +166,20 @@ fun ReceiveScreen(
     // NFC broadcasting: set NDEF payload to current address/BIP21 URI while on this screen.
     // Another phone tapping this device will receive the same data as scanning the QR code.
     // Respects the NFC setting in Settings — user can disable broadcasting entirely.
+    val mainActivity = context as? MainActivity
+    val nfcShareOwner = remember { Any() }
     val nfcAvailable = context.getNfcAvailability().canBroadcast
+    val hasNfcSharePayload = nfcAvailable && qrContent != null
+    val nfcShareState by NfcRuntimeStatus.shareState.collectAsState()
+    DisposableEffect(mainActivity, hasNfcSharePayload) {
+        if (mainActivity != null && hasNfcSharePayload) {
+            mainActivity.requestPreferredHceService(nfcShareOwner)
+        }
+        onDispose {
+            mainActivity?.releasePreferredHceService(nfcShareOwner)
+        }
+    }
+    val isNfcBroadcasting = hasNfcSharePayload && mainActivity?.isPreferredHceServiceActive == true
     DisposableEffect(qrContent, nfcAvailable) {
         if (nfcAvailable && qrContent != null) {
             NdefHostApduService.setNdefPayload(qrContent)
@@ -249,26 +270,29 @@ fun ReceiveScreen(
                     color = MaterialTheme.colorScheme.onBackground,
                     modifier = Modifier.fillMaxWidth(),
                 )
-                if (nfcAvailable) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(top = 2.dp),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Sensors,
-                            contentDescription = "NFC broadcasting",
-                            tint = SuccessGreen,
-                            modifier = Modifier.size(14.dp),
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(
-                            text = "NFC",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = SuccessGreen,
-                        )
-                    }
+                if (isNfcBroadcasting) {
+                    val nfcStatusLabel =
+                        when (nfcShareState) {
+                            NfcShareUiState.Inactive,
+                            NfcShareUiState.Ready,
+                            -> stringResource(R.string.nfc_status_share_ready)
+                            NfcShareUiState.Sharing -> stringResource(R.string.nfc_status_sharing)
+                        }
+                    val nfcStatusColor =
+                        if (nfcShareState == NfcShareUiState.Sharing) {
+                            BitcoinOrange
+                        } else {
+                            SuccessGreen
+                        }
+                    NfcStatusIndicator(
+                        label = nfcStatusLabel,
+                        contentDescription = nfcStatusLabel,
+                        modifier =
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(top = 2.dp),
+                        color = nfcStatusColor,
+                    )
                 }
 
                 Spacer(modifier = Modifier.height(16.dp))
@@ -399,7 +423,11 @@ fun ReceiveScreen(
 
                     // Amount input field (shown when toggled)
                     AnimatedVisibility(visible = showAmountField) {
-                        Column(modifier = Modifier.fillMaxWidth()) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .bringIntoViewRequester(amountBringIntoViewRequester),
+                        ) {
                             // Amount label row with USD toggle
                             Row(
                                 modifier =
@@ -549,33 +577,35 @@ fun ReceiveScreen(
 
                     // Label input field (shown when toggled)
                     AnimatedVisibility(visible = showLabelField) {
-                        OutlinedTextField(
-                            value = labelText,
-                            onValueChange = { labelText = it },
-                            placeholder = { Text("e.g. Payment from Alice") },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(8.dp),
-                            colors =
-                                OutlinedTextFieldDefaults.colors(
-                                    focusedBorderColor = BitcoinOrange,
-                                    unfocusedBorderColor = BorderColor,
-                                    cursorColor = BitcoinOrange,
-                                ),
-                            enabled = walletState.currentAddress != null,
-                            trailingIcon = {
-                                if (labelText.isNotEmpty() && walletState.currentAddress != null) {
-                                    androidx.compose.material3.TextButton(
-                                        onClick = {
-                                            onSaveLabel(walletState.currentAddress, labelText)
-                                            Toast.makeText(context, "Label saved", Toast.LENGTH_SHORT).show()
-                                        },
-                                    ) {
-                                        Text("Save", color = BitcoinOrange)
+                        Column(modifier = Modifier.bringIntoViewRequester(labelBringIntoViewRequester)) {
+                            OutlinedTextField(
+                                value = labelText,
+                                onValueChange = { labelText = it },
+                                placeholder = { Text("e.g. Payment from Alice") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(8.dp),
+                                colors =
+                                    OutlinedTextFieldDefaults.colors(
+                                        focusedBorderColor = BitcoinOrange,
+                                        unfocusedBorderColor = BorderColor,
+                                        cursorColor = BitcoinOrange,
+                                    ),
+                                enabled = walletState.currentAddress != null,
+                                trailingIcon = {
+                                    if (labelText.isNotEmpty() && walletState.currentAddress != null) {
+                                        androidx.compose.material3.TextButton(
+                                            onClick = {
+                                                onSaveLabel(walletState.currentAddress, labelText)
+                                                Toast.makeText(context, "Label saved", Toast.LENGTH_SHORT).show()
+                                            },
+                                        ) {
+                                            Text("Save", color = BitcoinOrange)
+                                        }
                                     }
-                                }
-                            },
-                        )
+                                },
+                            )
+                        }
                     }
                 }
             }

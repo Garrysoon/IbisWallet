@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -70,6 +71,7 @@ import github.aeonbtc.ibiswallet.ui.theme.DarkSurfaceVariant
 import github.aeonbtc.ibiswallet.ui.theme.ErrorRed
 import github.aeonbtc.ibiswallet.ui.theme.SuccessGreen
 import github.aeonbtc.ibiswallet.ui.theme.TextSecondary
+import github.aeonbtc.ibiswallet.ui.components.rememberBringIntoViewRequesterOnExpand
 import github.aeonbtc.ibiswallet.util.SecureClipboard
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -102,6 +104,9 @@ fun GenerateWalletScreen(
     var showPassphrase by remember { mutableStateOf(false) }
     var useCustomPath by remember { mutableStateOf(false) }
     var customPath by remember { mutableStateOf("") }
+    val advancedOptionsBringIntoViewRequester = rememberBringIntoViewRequesterOnExpand(showAdvancedOptions, "generate_advanced")
+    val passphraseBringIntoViewRequester = rememberBringIntoViewRequesterOnExpand(usePassphrase, "generate_passphrase")
+    val customPathBringIntoViewRequester = rememberBringIntoViewRequesterOnExpand(useCustomPath, "generate_path")
 
     // Generation state
     var generatedMnemonic by remember { mutableStateOf<String?>(null) }
@@ -498,6 +503,7 @@ fun GenerateWalletScreen(
                         Column(
                             modifier =
                                 Modifier
+                                    .bringIntoViewRequester(advancedOptionsBringIntoViewRequester)
                                     .fillMaxWidth()
                                     .padding(horizontal = 16.dp)
                                     .padding(bottom = 16.dp),
@@ -537,7 +543,7 @@ fun GenerateWalletScreen(
                                 enter = expandVertically(),
                                 exit = shrinkVertically(),
                             ) {
-                                Column {
+                                Column(modifier = Modifier.bringIntoViewRequester(passphraseBringIntoViewRequester)) {
                                     Spacer(modifier = Modifier.height(8.dp))
                                     OutlinedTextField(
                                         value = passphrase,
@@ -622,7 +628,7 @@ fun GenerateWalletScreen(
                                 enter = expandVertically(),
                                 exit = shrinkVertically(),
                             ) {
-                                Column {
+                                Column(modifier = Modifier.bringIntoViewRequester(customPathBringIntoViewRequester)) {
                                     Spacer(modifier = Modifier.height(8.dp))
                                     OutlinedTextField(
                                         value = customPath,

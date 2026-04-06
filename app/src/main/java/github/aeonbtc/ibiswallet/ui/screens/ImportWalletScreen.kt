@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -90,6 +91,7 @@ import github.aeonbtc.ibiswallet.ui.components.IbisButton
 import github.aeonbtc.ibiswallet.ui.components.ImportQrScannerDialog
 import github.aeonbtc.ibiswallet.ui.components.SensitiveSeedIme
 import github.aeonbtc.ibiswallet.ui.components.SquareToggle
+import github.aeonbtc.ibiswallet.ui.components.rememberBringIntoViewRequesterOnExpand
 import github.aeonbtc.ibiswallet.ui.components.sensitiveSeedKeyboardOptions
 import github.aeonbtc.ibiswallet.ui.theme.AccentTeal
 import github.aeonbtc.ibiswallet.ui.theme.BitcoinOrange
@@ -195,6 +197,11 @@ fun ImportWalletScreen(
     var masterFingerprint by remember { mutableStateOf("") }
     var useCustomGapLimit by remember { mutableStateOf(false) }
     var gapLimitText by remember { mutableStateOf("") }
+    val advancedOptionsBringIntoViewRequester = rememberBringIntoViewRequesterOnExpand(showAdvancedOptions, "import_advanced")
+    val customFingerprintBringIntoViewRequester = rememberBringIntoViewRequesterOnExpand(useCustomFingerprint, "import_fingerprint")
+    val passphraseBringIntoViewRequester = rememberBringIntoViewRequesterOnExpand(usePassphrase, "import_passphrase")
+    val customPathBringIntoViewRequester = rememberBringIntoViewRequesterOnExpand(useCustomPath, "import_path")
+    val customGapLimitBringIntoViewRequester = rememberBringIntoViewRequesterOnExpand(useCustomGapLimit, "import_gap_limit")
 
     // Determine if input is seed phrase, extended key, output descriptor, WIF key, or address
     val trimmedInput = keyMaterial.trim()
@@ -355,9 +362,11 @@ fun ImportWalletScreen(
         }
     }
 
+    val suppressMnemonicValidation = isWifKey || isBitcoinAddress
+
     // Validate seed phrase word count
     val words =
-        if (!isExtendedKey && !isWatchOnlyKey) {
+        if (!isExtendedKey && !isWatchOnlyKey && !suppressMnemonicValidation) {
             keyMaterial.trim().split("\\s+".toRegex()).filter { it.isNotBlank() }
         } else {
             emptyList()
@@ -409,7 +418,7 @@ fun ImportWalletScreen(
     // Only runs when word count is valid and every word is a complete BIP39 word.
     val mnemonicValidation =
         remember(keyMaterial) {
-            if (!isExtendedKey && isValidWordCount && allTypedWordsValid) {
+            if (!isExtendedKey && !suppressMnemonicValidation && isValidWordCount && allTypedWordsValid) {
                 try {
                     Mnemonic.fromString(keyMaterial.trim())
                     MnemonicValidation.Valid
@@ -1013,6 +1022,7 @@ fun ImportWalletScreen(
                     Column(
                         modifier =
                             Modifier
+                                .bringIntoViewRequester(advancedOptionsBringIntoViewRequester)
                                 .fillMaxWidth()
                                 .padding(horizontal = 16.dp)
                                 .padding(bottom = 16.dp),
@@ -1059,7 +1069,7 @@ fun ImportWalletScreen(
                                     enter = expandVertically(),
                                     exit = shrinkVertically(),
                                 ) {
-                                    Column {
+                                    Column(modifier = Modifier.bringIntoViewRequester(customFingerprintBringIntoViewRequester)) {
                                         Spacer(modifier = Modifier.height(8.dp))
                                         OutlinedTextField(
                                             value = masterFingerprint,
@@ -1142,7 +1152,7 @@ fun ImportWalletScreen(
                             enter = expandVertically(),
                             exit = shrinkVertically(),
                         ) {
-                            Column {
+                            Column(modifier = Modifier.bringIntoViewRequester(passphraseBringIntoViewRequester)) {
                                 Spacer(modifier = Modifier.height(8.dp))
                                 OutlinedTextField(
                                     value = passphrase,
@@ -1234,7 +1244,7 @@ fun ImportWalletScreen(
                             enter = expandVertically(),
                             exit = shrinkVertically(),
                         ) {
-                            Column {
+                            Column(modifier = Modifier.bringIntoViewRequester(customPathBringIntoViewRequester)) {
                                 Spacer(modifier = Modifier.height(8.dp))
                                 OutlinedTextField(
                                     value = customPath,
@@ -1302,7 +1312,7 @@ fun ImportWalletScreen(
                             enter = expandVertically(),
                             exit = shrinkVertically(),
                         ) {
-                            Column {
+                            Column(modifier = Modifier.bringIntoViewRequester(customGapLimitBringIntoViewRequester)) {
                                 Spacer(modifier = Modifier.height(8.dp))
                                 val gapLimitInt = gapLimitText.toIntOrNull()
                                 val gapLimitValid = gapLimitText.isEmpty() || (gapLimitInt != null && gapLimitInt in 1..10000)

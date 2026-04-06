@@ -12,6 +12,7 @@ import github.aeonbtc.ibiswallet.data.boltz.BullBoltzBehavior
 import github.aeonbtc.ibiswallet.data.boltz.boltzElapsedMs
 import github.aeonbtc.ibiswallet.data.boltz.boltzTraceStart
 import github.aeonbtc.ibiswallet.data.boltz.hasBoltzMaxReviewMismatch
+import github.aeonbtc.ibiswallet.data.boltz.isBoltzMaxFundingShortfallError
 import github.aeonbtc.ibiswallet.data.boltz.logBoltzTrace
 import github.aeonbtc.ibiswallet.data.boltz.resolveBoltzMaxReviewMetadata
 import github.aeonbtc.ibiswallet.data.boltz.resolveBoltzReviewFundingPreviewIsMaxSend
@@ -52,6 +53,7 @@ import github.aeonbtc.ibiswallet.data.model.UtxoInfo
 import github.aeonbtc.ibiswallet.data.model.WalletAddress
 import github.aeonbtc.ibiswallet.data.model.WalletLayer
 import github.aeonbtc.ibiswallet.data.repository.LiquidRepository
+import github.aeonbtc.ibiswallet.service.ConnectivityKeepAlivePolicy
 import github.aeonbtc.ibiswallet.data.swap.buildBitcoinSwapFundingRequest
 import github.aeonbtc.ibiswallet.data.swap.buildLiquidSwapFundingRequest
 import github.aeonbtc.ibiswallet.data.swap.resolveBoltzAddressPlan
@@ -78,6 +80,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.isActive
@@ -95,6 +98,7 @@ import kotlin.coroutines.EmptyCoroutineContext
  * and coordinates LiquidRepository for LWK, Boltz, and SideSwap operations.
  */
 class LiquidViewModel(application: Application) : AndroidViewModel(application) {
+    private val appContext = getApplication<Application>()
 
     companion object {
         private const val TAG = "LiquidViewModel"
@@ -321,6 +325,28 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
         }
 
         viewModelScope.launch {
+            combine(
+                isLiquidConnected,
+                _isLayer2Enabled,
+                _boltzApiSource,
+                _sideSwapApiSource,
+                _liquidServersState.map { it.activeServerId },
+            ) { connected, layer2Enabled, boltzSource, sideSwapSource, activeServerId ->
+                listOf(
+                    connected.toString(),
+                    layer2Enabled.toString(),
+                    boltzSource,
+                    sideSwapSource,
+                    activeServerId.orEmpty(),
+                )
+            }
+                .distinctUntilChanged()
+                .collect {
+                    syncForegroundConnectivityPolicy()
+                }
+        }
+
+        viewModelScope.launch {
             liquidState
                 .map { Triple(it.lastSyncTimestamp, it.currentAddress, it.currentAddressLabel) }
                 .distinctUntilChanged()
@@ -442,7 +468,35 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
             repository.close()
             cleanupScope.cancel()
         }
+        ConnectivityKeepAlivePolicy.updateLiquidState(
+            context = appContext,
+            connected = false,
+            electrumUsesTor = false,
+            externalTorRequired = false,
+        )
         super.onCleared()
+    }
+
+    private fun syncForegroundConnectivityPolicy() {
+        ConnectivityKeepAlivePolicy.updateForegroundConnectivityEnabled(
+            context = appContext,
+            enabled = secureStorage.isForegroundConnectivityEnabled(),
+        )
+        ConnectivityKeepAlivePolicy.updateLiquidState(
+            context = appContext,
+            connected = isLiquidConnected.value,
+            electrumUsesTor = isLiquidElectrumTorRequired(),
+            externalTorRequired = shouldKeepLayer2ExternalTorRunning(),
+        )
+    }
+
+    private fun isLiquidElectrumTorRequired(): Boolean {
+        return isLiquidConnected.value && activeLiquidServerRequiresTor()
+    }
+
+    private fun shouldKeepTorRunningForLiquid(localTorRequirement: Boolean): Boolean {
+        syncForegroundConnectivityPolicy()
+        return localTorRequirement || ConnectivityKeepAlivePolicy.hasTorRequirementOutsideLiquid()
     }
 
     private fun launchLiquidJob(
@@ -959,15 +1013,7 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
         usesMaxAmount: Boolean,
         error: Throwable,
     ): Boolean {
-        if (!usesMaxAmount) {
-            return false
-        }
-        return when (direction) {
-            SwapDirection.BTC_TO_LBTC ->
-                error.message?.contains("Insufficient funds", ignoreCase = true) == true
-            SwapDirection.LBTC_TO_BTC ->
-                error.message?.contains("InsufficientFunds", ignoreCase = true) == true
-        }
+        return usesMaxAmount && isBoltzMaxFundingShortfallError(direction, error)
     }
 
     private fun updateTrackedPendingSwapState(
@@ -1181,21 +1227,6 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
             label = label?.trim()?.takeIf { it.isNotBlank() },
             selectedUtxoCount = selectedUtxos?.size ?: 0,
         )
-    }
-
-    private fun shouldReconfirmLightningPayment(
-        previousPreview: LiquidSendPreview,
-        updatedPreview: LiquidSendPreview,
-    ): Boolean {
-        val previousPlan = previousPreview.executionPlan
-        val updatedPlan = updatedPreview.executionPlan
-        return when {
-            previousPlan is LightningPaymentExecutionPlan.BoltzQuote &&
-                updatedPlan is LightningPaymentExecutionPlan.DirectLiquid -> true
-            previousPreview.totalRecipientSats != updatedPreview.totalRecipientSats -> true
-            previousPreview.feeSats != updatedPreview.feeSats -> true
-            else -> false
-        }
     }
 
     private suspend fun resumePendingLightningWorkIfNeeded() {
@@ -1648,7 +1679,8 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
         }
 
         val visibleWalletId = pendingWalletLoadId ?: loadedWalletId.value
-        if (visibleWalletId != null && visibleWalletId != walletId) {
+        val shouldPreloadCachedState = visibleWalletId != null && visibleWalletId != walletId
+        if (shouldPreloadCachedState) {
             resetLiquidUiState()
             clearDerivedLiquidSnapshots()
             repository.clearWalletDisplayState()
@@ -1664,7 +1696,11 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
                 if (previousLifecycleJob == null && repository.isWalletLoaded(walletId)) {
                     handleLoadedWalletResume(walletId)
                 } else {
-                    handleWalletSwitch(walletId, mnemonic)
+                    handleWalletSwitch(
+                        walletId = walletId,
+                        mnemonic = mnemonic,
+                        shouldPreloadCachedState = shouldPreloadCachedState,
+                    )
                 }
             } catch (e: Exception) {
                 clearPendingFullSyncProgress()
@@ -1702,7 +1738,11 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    private suspend fun handleWalletSwitch(walletId: String, mnemonic: String?) {
+    private suspend fun handleWalletSwitch(
+        walletId: String,
+        mnemonic: String?,
+        shouldPreloadCachedState: Boolean,
+    ) {
         cancelAutomaticBoltzPrewarm()
         lastLiquidConnectionReadyAtMs = nowMs()
         val keepServerConnection =
@@ -1717,17 +1757,37 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
         _pendingSwaps.value = emptyList()
         stopAllSwapMonitors()
 
+        val preloadStartedAt = System.currentTimeMillis()
         val preloaded =
-            withContext(Dispatchers.IO) {
-                repository.preloadCachedWalletState(walletId)
+            if (shouldPreloadCachedState) {
+                withContext(Dispatchers.IO) {
+                    repository.preloadCachedWalletState(walletId)
+                }
+            } else {
+                false
             }
+        if (BuildConfig.DEBUG) {
+            Log.d(
+                TAG,
+                "Liquid startup profile: preloadCachedState enabled=$shouldPreloadCachedState " +
+                    "result=$preloaded elapsedMs=${System.currentTimeMillis() - preloadStartedAt}",
+            )
+        }
 
+        val switchStartedAt = System.currentTimeMillis()
         repository.switchWallet(
             walletId = walletId,
             mnemonic = mnemonic,
             preserveConnection = keepServerConnection,
             preloaded = preloaded,
         )
+        if (BuildConfig.DEBUG) {
+            Log.d(
+                TAG,
+                "Liquid startup profile: switchWallet preserveConnection=$keepServerConnection " +
+                    "preloaded=$preloaded elapsedMs=${System.currentTimeMillis() - switchStartedAt}",
+            )
+        }
         if (keepServerConnection) {
             loadedWalletId.value?.let { loadedId ->
                 runRequestedLiquidFullSyncIfNeeded(loadedId)
@@ -1883,7 +1943,7 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
         val serverRequiresTor = config.useTor || config.isOnionAddress()
         val previousServerUsedTor = shouldUseLiquidTor()
         val otherNeedsTor = shouldKeepLayer2ExternalTorRunning()
-        val shouldKeepTorRunning = serverRequiresTor || otherNeedsTor
+        val shouldKeepTorRunning = shouldKeepTorRunningForLiquid(serverRequiresTor || otherNeedsTor)
         connectionJob = launchLiquidJob {
             previousJob?.cancelAndJoin()
             _isLiquidConnecting.value = true
@@ -2025,6 +2085,7 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
                     remove(SwapService.BOLTZ)
                 }
         }
+        syncForegroundConnectivityPolicy()
         if (shouldKeepLayer2TorRunning()) {
             torManager.start()
         } else {
@@ -2069,6 +2130,7 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
         } else if (_isLayer2Enabled.value && liquidContextActive) {
             repository.sideSwapClient.disconnect()
         }
+        syncForegroundConnectivityPolicy()
         if (shouldKeepLayer2TorRunning()) {
             torManager.start()
         } else {
@@ -2095,13 +2157,15 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private fun shouldKeepLayer2TorRunning(): Boolean {
-        return shouldUseLiquidTor() ||
-            shouldKeepLayer2ExternalTorRunning()
+        return shouldKeepTorRunningForLiquid(shouldUseLiquidTor() || shouldKeepLayer2ExternalTorRunning())
     }
 
     private fun shouldKeepLayer2ExternalTorRunning(): Boolean {
-        return _boltzApiSource.value == SecureStorage.BOLTZ_API_TOR ||
-            isSideSwapTor()
+        return _isLayer2Enabled.value &&
+            (
+                _boltzApiSource.value == SecureStorage.BOLTZ_API_TOR ||
+                    isSideSwapTor()
+            )
     }
 
     private fun isSideSwapTor(): Boolean = _sideSwapApiSource.value == SecureStorage.SIDESWAP_API_TOR
@@ -2166,6 +2230,7 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
         _liquidExplorer.value = explorer
         loadLiquidServers()
 
+        syncForegroundConnectivityPolicy()
         if (shouldKeepLayer2TorRunning()) {
             torManager.start()
         } else {
@@ -3155,7 +3220,6 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
             }
             try {
                 if (executionPlan is LightningPaymentExecutionPlan.BoltzQuote) {
-                    val quotedPreview = preview
                     _sendState.value = LiquidSendState.Sending(
                         preview = preview,
                         status = "Preparing Boltz lockup details...",
@@ -3169,10 +3233,6 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
                         selectedUtxos = selectedUtxos,
                         label = label,
                     )
-                    if (shouldReconfirmLightningPayment(quotedPreview, preview)) {
-                        _sendState.value = LiquidSendState.ReviewReady(preview)
-                        return@launchLiquidJob
-                    }
                 }
                 when (executionPlan) {
                     is LightningPaymentExecutionPlan.BoltzSwap -> {
@@ -4398,14 +4458,24 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
         }
         val normalizedCreatedAt = normalizeProviderCreatedAt(order.createdAt)
         val effectiveSendAmount =
-            resolveEffectiveSwapSendAmount(
-                quote = quote,
-                depositAddress = order.pegAddress,
-                usesMaxAmount = usesMaxAmount,
-                selectedFundingUtxos = selectedFundingUtxos,
-                fundingBitcoinFeeRateOverride = fundingBtcFeeRateOverride,
-                resolveBitcoinMaxSend = resolveBitcoinMaxSend,
-            )
+            if (quote.direction == SwapDirection.BTC_TO_LBTC) {
+                resolveEffectiveSwapSendAmount(
+                    quote = quote,
+                    depositAddress = order.pegAddress,
+                    usesMaxAmount = usesMaxAmount,
+                    selectedFundingUtxos = selectedFundingUtxos,
+                    fundingBitcoinFeeRateOverride = fundingBtcFeeRateOverride,
+                    resolveBitcoinMaxSend = resolveBitcoinMaxSend,
+                )
+            } else {
+                resolveEffectiveLiquidSwapSendAmount(
+                    quote = quote,
+                    depositAddress = order.pegAddress,
+                    usesMaxAmount = usesMaxAmount,
+                    selectedFundingUtxos = selectedFundingUtxos,
+                    fundingLiquidFeeRateOverride = fundingLiquidFeeRateOverride,
+                )
+            }
         val effectiveQuote =
             if (effectiveSendAmount != quote.sendAmount) {
                 repository.getSwapQuote(
@@ -4577,6 +4647,38 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
                     "createBoltzReview create stage requestKey=$requestKey swapId=${createdDraft.swapId} " +
                         "elapsedMs=${nowMs() - createStartedAt}",
                 )
+                val lockupNormalizedAmount =
+                    resolveEffectiveLiquidSwapSendAmount(
+                        quote = reviewQuote,
+                        depositAddress = createdDraft.depositAddress ?: throw Exception("Boltz returned an empty lockup address"),
+                        usesMaxAmount = usesMaxAmount,
+                        selectedFundingUtxos = selectedFundingUtxos,
+                        fundingLiquidFeeRateOverride = fundingLiquidFeeRateOverride,
+                    )
+                if (lockupNormalizedAmount != reviewQuote.sendAmount) {
+                    logWarn(
+                        "createBoltzReview max normalized from Liquid lockup requestKey=$requestKey swapId=${createdDraft.swapId} " +
+                            "quoted=${reviewQuote.sendAmount} verified=$lockupNormalizedAmount",
+                        Exception("Boltz max amount changed after Liquid lockup resolution"),
+                    )
+                    if (attempt == 1) {
+                        throw Exception("Unable to lock the max Boltz review to a stable exact amount. Review again.")
+                    }
+                    repository.discardPreparedBoltzChainSwap(createdDraft.swapId)
+                    repository.releasePreparedBoltzChainSwapRuntime(createdDraft.swapId, "max_lockup_recreate")
+                    createdSwapId = null
+                    reviewQuote =
+                        repository.getSwapQuote(
+                            direction = reviewQuote.direction,
+                            amountSats = lockupNormalizedAmount,
+                            service = reviewQuote.service,
+                        )
+                    logDebug(
+                        "createBoltzReview recreated lockup quote requestKey=$requestKey send=${reviewQuote.sendAmount} " +
+                            "receive=${reviewQuote.receiveAmount} btcFee=${reviewQuote.btcNetworkFee} liquidFee=${reviewQuote.liquidNetworkFee}",
+                    )
+                    continue
+                }
                 val fundingPreviewStartedAt = nowMs()
                 val currentFundingPreview =
                     buildBoltzChainFundingPreview(
@@ -4818,6 +4920,35 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
         return effectiveSendAmount
     }
 
+    private suspend fun resolveEffectiveLiquidSwapSendAmount(
+        quote: SwapQuote,
+        depositAddress: String,
+        usesMaxAmount: Boolean,
+        selectedFundingUtxos: List<UtxoInfo>?,
+        fundingLiquidFeeRateOverride: Double?,
+    ): Long {
+        if (!usesMaxAmount) return quote.sendAmount
+        if (quote.direction != SwapDirection.LBTC_TO_BTC) {
+            return quote.sendAmount
+        }
+
+        val feeRate = fundingLiquidFeeRateOverride ?: quote.liquidFeeRate.takeIf { it > 0.0 } ?: 0.1
+        val effectiveSendAmount =
+            repository.previewLbtcSend(
+                address = depositAddress,
+                amountSats = quote.sendAmount,
+                feeRateSatPerVb = feeRate,
+                selectedUtxos = selectedFundingUtxos,
+                isMaxSend = true,
+            ).totalRecipientSats ?: 0L
+
+        if (effectiveSendAmount <= 0L) {
+            throw Exception("Unable to compute the max spendable amount for this swap.")
+        }
+
+        return effectiveSendAmount
+    }
+
     fun executeSwap(
         pendingSwap: PendingSwapSession,
         selectedUtxos: List<UtxoInfo>? = null,
@@ -4896,12 +5027,21 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
                     status = "Sending L-BTC to: ${pendingSwap.depositAddress}",
                 )
             val fundingRequest = buildLiquidSwapFundingRequest(fundingState, liquidFeeRate)
-            ensureLbtcSwapFundingFits(
-                fundingRequest.recipientAddress,
-                fundingRequest.amountSats,
-                fundingRequest.feeRateSatPerVb,
-                selectedUtxos,
-            )
+            if (fundingRequest.isMaxSend) {
+                ensureLbtcMaxSwapFundingMatchesReview(
+                    fundingRequest.recipientAddress,
+                    fundingRequest.amountSats,
+                    fundingRequest.feeRateSatPerVb,
+                    selectedUtxos,
+                )
+            } else {
+                ensureLbtcSwapFundingFits(
+                    fundingRequest.recipientAddress,
+                    fundingRequest.amountSats,
+                    fundingRequest.feeRateSatPerVb,
+                    selectedUtxos,
+                )
+            }
             val fundingTxid = repository.sendLBTC(
                 address = fundingRequest.recipientAddress,
                 amountSats = fundingRequest.amountSats,
@@ -4976,12 +5116,21 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
                     status = "Sending L-BTC to Boltz lockup address...",
                 )
             val fundingRequest = buildLiquidSwapFundingRequest(fundingState, liquidFeeRate)
-            ensureLbtcSwapFundingFits(
-                fundingRequest.recipientAddress,
-                fundingRequest.amountSats,
-                fundingRequest.feeRateSatPerVb,
-                selectedUtxos,
-            )
+            if (fundingRequest.isMaxSend) {
+                ensureLbtcMaxSwapFundingMatchesReview(
+                    fundingRequest.recipientAddress,
+                    fundingRequest.amountSats,
+                    fundingRequest.feeRateSatPerVb,
+                    selectedUtxos,
+                )
+            } else {
+                ensureLbtcSwapFundingFits(
+                    fundingRequest.recipientAddress,
+                    fundingRequest.amountSats,
+                    fundingRequest.feeRateSatPerVb,
+                    selectedUtxos,
+                )
+            }
             val fundingTxid = repository.sendLBTC(
                 address = fundingRequest.recipientAddress,
                 amountSats = fundingRequest.amountSats,
@@ -5032,6 +5181,27 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
         }
         throw Exception(
             "Insufficient L-BTC. At the current Liquid fee rate, max deposit is $maxSpendable sats and exact fee is $exactFee sats.",
+        )
+    }
+
+    private suspend fun ensureLbtcMaxSwapFundingMatchesReview(
+        address: String,
+        reviewedAmountSats: Long,
+        feeRateSatPerVb: Double,
+        selectedUtxos: List<UtxoInfo>? = null,
+    ) {
+        val currentMaxPreview =
+            repository.previewLbtcSend(
+                address = address,
+                amountSats = reviewedAmountSats,
+                feeRateSatPerVb = feeRateSatPerVb,
+                selectedUtxos = selectedUtxos,
+                isMaxSend = true,
+            )
+        val currentMaxAmount = currentMaxPreview.totalRecipientSats ?: 0L
+        if (currentMaxAmount == reviewedAmountSats) return
+        throw Exception(
+            "This max Liquid swap review is stale. Current max deposit is $currentMaxAmount sats at the selected fee rate. Review again.",
         )
     }
 

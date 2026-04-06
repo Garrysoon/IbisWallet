@@ -2,6 +2,7 @@ package github.aeonbtc.ibiswallet.util
 
 import github.aeonbtc.ibiswallet.data.model.WalletLayer
 import github.aeonbtc.ibiswallet.viewmodel.SendScreenDraft
+import java.math.BigDecimal
 import java.net.URLDecoder
 import java.util.Locale
 import lwk.Payment
@@ -90,6 +91,7 @@ internal fun parseSendRecipient(input: String): ParsedSendRecipient {
     val payment = parsePayment(trimmed)
 
     if (payment == null) {
+        parseOpaqueLiquidRecipient(trimmed, queryParams)?.let { return it }
         if (bip353Address != null) {
             return ParsedSendRecipient.Lightning(
                 rawInput = trimmed,
@@ -447,6 +449,39 @@ private fun parseUriQueryParameters(input: String): Map<String, String> {
             key to URLDecoder.decode(value, "UTF-8")
         }
         .toMap()
+}
+
+private fun parseOpaqueLiquidRecipient(
+    input: String,
+    queryParams: Map<String, String>,
+): ParsedSendRecipient.Liquid? {
+    if (!input.startsWith("liquid:", ignoreCase = true) &&
+        !input.startsWith("liquidnetwork:", ignoreCase = true)
+    ) {
+        return null
+    }
+
+    val address = input.substringAfter(':').substringBefore('?').trim()
+    if (address.isBlank()) {
+        return null
+    }
+
+    return ParsedSendRecipient.Liquid(
+        rawInput = input,
+        address = address,
+        amountSats = queryParams["amount"]?.let(::parseLiquidAmountToSats),
+        label = queryParams["label"]?.takeIf { it.isNotBlank() },
+        message = queryParams["message"]?.takeIf { it.isNotBlank() },
+        assetId = queryParams["assetid"]?.takeIf { it.isNotBlank() },
+    )
+}
+
+private fun parseLiquidAmountToSats(amountText: String): Long? {
+    return runCatching {
+        BigDecimal(amountText)
+            .movePointRight(8)
+            .longValueExact()
+    }.getOrNull()
 }
 
 private fun msatsToRoundedSats(amountMsats: ULong): Long {

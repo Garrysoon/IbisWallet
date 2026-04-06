@@ -28,7 +28,6 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
-import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -45,6 +44,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -59,6 +59,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -68,6 +69,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import github.aeonbtc.ibiswallet.MainActivity
+import github.aeonbtc.ibiswallet.R
 import github.aeonbtc.ibiswallet.data.local.SecureStorage
 import github.aeonbtc.ibiswallet.data.model.DryRunResult
 import github.aeonbtc.ibiswallet.data.model.FeeEstimationResult
@@ -76,6 +78,7 @@ import github.aeonbtc.ibiswallet.data.model.UtxoInfo
 import github.aeonbtc.ibiswallet.data.model.WalletState
 import github.aeonbtc.ibiswallet.ui.components.AmountLabel
 import github.aeonbtc.ibiswallet.ui.components.IbisButton
+import github.aeonbtc.ibiswallet.ui.components.NfcStatusIndicator
 import github.aeonbtc.ibiswallet.ui.components.QrScannerDialog
 import github.aeonbtc.ibiswallet.ui.components.ScrollableDialogSurface
 import github.aeonbtc.ibiswallet.ui.components.formatFeeRate
@@ -92,6 +95,8 @@ import github.aeonbtc.ibiswallet.ui.theme.WarningYellow
 import github.aeonbtc.ibiswallet.util.getNfcAvailability
 import github.aeonbtc.ibiswallet.viewmodel.SendScreenDraft
 import github.aeonbtc.ibiswallet.viewmodel.WalletUiState
+import github.aeonbtc.ibiswallet.nfc.NfcReaderUiState
+import github.aeonbtc.ibiswallet.nfc.NfcRuntimeStatus
 import java.util.Locale
 import kotlin.math.roundToLong
 
@@ -193,15 +198,19 @@ fun SendScreen(
     // When another device broadcasts a bitcoin: URI via NFC (e.g. from another
     // wallet's Receive screen), tapping fills the address and amount fields.
     val context = LocalContext.current
+    val mainActivity = context as? MainActivity
+    val nfcReaderOwner = remember { Any() }
     val nfcAvailable = context.getNfcAvailability().canRead
-    DisposableEffect(nfcAvailable) {
-        if (nfcAvailable) {
-            (context as? MainActivity)?.enableNfcReaderMode()
+    DisposableEffect(mainActivity, nfcAvailable) {
+        if (mainActivity != null && nfcAvailable) {
+            mainActivity.requestNfcReaderMode(nfcReaderOwner)
         }
         onDispose {
-            (context as? MainActivity)?.disableNfcReaderMode()
+            mainActivity?.releaseNfcReaderMode(nfcReaderOwner)
         }
     }
+    val isNfcReaderActive = nfcAvailable && mainActivity?.isNfcReaderModeActive == true
+    val nfcReaderState by NfcRuntimeStatus.readerState.collectAsState()
 
     // Multi-recipient mode
     var isMultiMode by remember { mutableStateOf(false) }
@@ -664,24 +673,27 @@ fun SendScreen(
                             style = MaterialTheme.typography.titleLarge,
                             color = MaterialTheme.colorScheme.onBackground,
                         )
-                        if (nfcAvailable) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
+                        if (isNfcReaderActive) {
+                            val nfcStatusLabel =
+                                when (nfcReaderState) {
+                                    NfcReaderUiState.Inactive,
+                                    NfcReaderUiState.Ready,
+                                    -> stringResource(R.string.nfc_status_receive_ready)
+                                    NfcReaderUiState.Detecting -> stringResource(R.string.nfc_status_detecting)
+                                    NfcReaderUiState.Received -> stringResource(R.string.nfc_status_received)
+                                }
+                            val nfcStatusColor =
+                                if (nfcReaderState == NfcReaderUiState.Detecting) {
+                                    BitcoinOrange
+                                } else {
+                                    SuccessGreen
+                                }
+                            NfcStatusIndicator(
+                                label = nfcStatusLabel,
+                                contentDescription = nfcStatusLabel,
                                 modifier = Modifier.padding(top = 2.dp),
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Sensors,
-                                    contentDescription = "NFC reading",
-                                    tint = SuccessGreen,
-                                    modifier = Modifier.size(14.dp),
-                                )
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text(
-                                    text = "NFC",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = SuccessGreen,
-                                )
-                            }
+                                color = nfcStatusColor,
+                            )
                         }
                     }
 

@@ -27,6 +27,7 @@ import github.aeonbtc.ibiswallet.data.model.WalletImportConfig
 import github.aeonbtc.ibiswallet.data.model.WalletResult
 import github.aeonbtc.ibiswallet.data.model.WalletState
 import github.aeonbtc.ibiswallet.data.repository.WalletRepository
+import github.aeonbtc.ibiswallet.service.ConnectivityKeepAlivePolicy
 import github.aeonbtc.ibiswallet.tor.TorManager
 import github.aeonbtc.ibiswallet.tor.TorState
 import github.aeonbtc.ibiswallet.tor.TorStatus
@@ -51,6 +52,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
@@ -65,6 +67,7 @@ import java.util.Locale
  * ViewModel for managing wallet state across the app
  */
 class WalletViewModel(application: Application) : AndroidViewModel(application) {
+    private val appContext = getApplication<Application>()
     private val repository = WalletRepository(application)
     private val secureStorage = SecureStorage.getInstance(application)
     private val torManager = TorManager.getInstance(application)
@@ -102,6 +105,8 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
 
     // Heartbeat loop job - pings server every ~60s to detect dead connections fast
     private var heartbeatJob: Job? = null
+
+    @Volatile private var isAppInBackground = false
 
     // Foreground-only BTC/fiat price refresh
     private var btcPriceRefreshJob: Job? = null
@@ -246,10 +251,13 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
         AppLifecycleCoordinator(
             scope = viewModelScope,
             onBackgrounded = {
+                isAppInBackground = true
                 stopBtcPriceRefreshLoop()
+                stopHeartbeat()
                 _uiState.value.isConnected
             },
             onForegrounded = { wasConnectedBeforeBackground, _ ->
+                isAppInBackground = false
                 if (repository.getPriceSource() != SecureStorage.PRICE_SOURCE_OFF) {
                     fetchBtcPrice(force = true)
                     startBtcPriceRefreshLoop()
@@ -356,17 +364,43 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
         }
 
         viewModelScope.launch {
+            combine(
+                _uiState.map { it.isConnected },
+                _feeSourceState,
+                _priceSourceState,
+                _serversState.map { it.activeServerId },
+            ) { isConnected, feeSource, priceSource, activeServerId ->
+                listOf(isConnected.toString(), feeSource, priceSource, activeServerId.orEmpty())
+            }
+                .distinctUntilChanged()
+                .collect {
+                    syncForegroundConnectivityPolicy()
+                }
+        }
+
+        viewModelScope.launch {
             repository.connectionEvents.collect { event ->
                 when (event) {
                     WalletRepository.ConnectionEvent.ConnectionLost -> {
                         if (!_uiState.value.isConnected) return@collect
+                        if (isAppInBackground) {
+                            if (BuildConfig.DEBUG) {
+                                android.util.Log.d(
+                                    "WalletViewModel",
+                                    "Ignoring background subscription loss; foreground resume will verify the base connection",
+                                )
+                            }
+                            return@collect
+                        }
 
                         // Subscription socket died, but the bridge/direct sockets
                         // may still be alive (and mid-sync). Verify before teardown.
                         val alive =
-                            withTimeoutOrNull(HEARTBEAT_PING_TIMEOUT_MS) {
-                                withContext(Dispatchers.IO) { repository.pingServer() }
-                            } ?: false
+                            probeServerConnection(
+                                timeoutMs = HEARTBEAT_PING_TIMEOUT_MS,
+                                socketTimeoutMs = HEARTBEAT_PING_SOCKET_TIMEOUT_MS,
+                                lockTimeoutMs = HEARTBEAT_PING_LOCK_TIMEOUT_MS,
+                            )
 
                         if (alive) {
                             if (BuildConfig.DEBUG) {
@@ -458,24 +492,43 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
     /**
      * Verify the server is still alive after returning from background while
      * isConnected is still true (heartbeat may not have caught a drop yet).
-     * If dead, triggers full handleConnectionLost flow. If alive, restarts
-     * heartbeat and re-subscribes (subscription socket likely died in background).
+     * If dead, reconnect immediately. If alive, restart the foreground heartbeat
+     * and re-subscribe (the subscription socket likely died in background).
      */
     private suspend fun verifyConnectionOnForeground() {
         if (connectionJob?.isActive == true) return
 
         val alive =
-            withTimeoutOrNull(HEARTBEAT_PING_TIMEOUT_MS) {
-                withContext(Dispatchers.IO) { repository.pingServer() }
-            } ?: false
+            probeServerConnection(
+                timeoutMs = FOREGROUND_RESUME_PING_TIMEOUT_MS,
+                socketTimeoutMs = FOREGROUND_RESUME_PING_SOCKET_TIMEOUT_MS,
+                lockTimeoutMs = FOREGROUND_RESUME_PING_LOCK_TIMEOUT_MS,
+                allowReconnect = false,
+            )
 
         if (!alive) {
-            handleConnectionLost()
+            reconnectOnForeground()
         } else {
             startHeartbeat()
             launchSubscriptions(reason = "foreground_resume")
         }
     }
+
+    private suspend fun probeServerConnection(
+        timeoutMs: Long,
+        socketTimeoutMs: Int,
+        lockTimeoutMs: Long,
+        allowReconnect: Boolean = true,
+    ): Boolean =
+        withTimeoutOrNull(timeoutMs) {
+            withContext(Dispatchers.IO) {
+                repository.pingServer(
+                    socketTimeoutMs = socketTimeoutMs,
+                    lockTimeoutMs = lockTimeoutMs,
+                    allowReconnect = allowReconnect,
+                )
+            }
+        } ?: false
 
     /**
      * Silent reconnect after returning from background with a dead connection.
@@ -486,6 +539,8 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
         if (connectionJob?.isActive == true) return
         val config = repository.getElectrumConfig() ?: return
 
+        stopReconnectRetry()
+        stopHeartbeat()
         _uiState.value = _uiState.value.copy(isConnecting = true, isConnected = false)
 
         val needsTor = config.isOnionAddress()
@@ -541,10 +596,21 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
             when (val result = repository.importWallet(config)) {
                 is WalletResult.Success -> {
                     _uiState.value = _uiState.value.copy(isLoading = false)
+                    _initialSyncComplete.value = false
                     _events.emit(WalletEvent.WalletImported)
-                    // Auto-trigger full sync for the newly imported wallet
+
                     if (_uiState.value.isConnected) {
-                        sync()
+                        if (repository.isWatchAddressWallet()) {
+                            when (val syncResult = repository.syncWatchAddress(repository.getActiveWalletId() ?: return@launch)) {
+                                is WalletResult.Success -> _events.emit(WalletEvent.SyncCompleted)
+                                is WalletResult.Error -> _events.emit(WalletEvent.Error(syncResult.message))
+                            }
+                            _initialSyncComplete.value = true
+                        } else {
+                            launchSubscriptions(reason = "wallet import")
+                        }
+                    } else {
+                        _initialSyncComplete.value = true
                     }
                 }
                 is WalletResult.Error -> {
@@ -604,7 +670,7 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
                     // (but keep Tor alive if fee/price source is .onion)
                     val serverRequiresTor = config.useTor || config.isOnionAddress()
                     val otherNeedsTor = isFeeSourceOnion() || isPriceSourceOnion()
-                    val shouldKeepTorRunning = serverRequiresTor || otherNeedsTor
+                    val shouldKeepTorRunning = shouldKeepTorRunningForBitcoin(serverRequiresTor || otherNeedsTor)
                     disconnectForServerSwitch(shouldKeepTorRunning)
                     if (serverRequiresTor) {
                         repository.setTorEnabled(true)
@@ -612,7 +678,7 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
                         // Switching to clearnet — Electrum won't use Tor proxy
                         repository.setTorEnabled(false)
                         // Only stop the Tor service if nothing else needs it
-                        if (!otherNeedsTor) {
+                        if (!shouldKeepTorRunningForBitcoin(otherNeedsTor)) {
                             torManager.stop()
                         }
                     }
@@ -803,6 +869,7 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
      * (2 consecutive failures) instead of ~10min (background sync alone).
      */
     private fun startHeartbeat() {
+        if (isAppInBackground) return
         if (heartbeatJob?.isActive == true) return
         heartbeatJob?.cancel()
         var consecutiveFailures = 0
@@ -858,6 +925,7 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
      */
     private suspend fun handleConnectionLost() {
         if (repository.isUserDisconnected()) return
+        if (isAppInBackground) return
         if (_uiState.value.isConnecting || connectionJob?.isActive == true) return
         if (!_uiState.value.isConnected) return
         if (walletState.value.isSyncing || walletState.value.isFullSyncing || fullSyncJob?.isActive == true) return
@@ -1951,7 +2019,7 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
                     // (but keep Tor alive if fee/price source is .onion)
                     val serverRequiresTor = serverConfig?.let { it.useTor || it.isOnionAddress() } == true
                     val otherNeedsTor = isFeeSourceOnion() || isPriceSourceOnion()
-                    val shouldKeepTorRunning = serverRequiresTor || otherNeedsTor
+                    val shouldKeepTorRunning = shouldKeepTorRunningForBitcoin(serverRequiresTor || otherNeedsTor)
                     disconnectForServerSwitch(shouldKeepTorRunning)
                     if (serverRequiresTor) {
                         repository.setTorEnabled(true)
@@ -1959,7 +2027,7 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
                         // Switching to clearnet — Electrum won't use Tor proxy
                         repository.setTorEnabled(false)
                         // Only stop the Tor service if nothing else needs it
-                        if (!otherNeedsTor) {
+                        if (!shouldKeepTorRunningForBitcoin(otherNeedsTor)) {
                             torManager.stop()
                         }
                     }
@@ -2458,6 +2526,7 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
                             put("nfcEnabled", repository.isNfcEnabled())
                             put("privacyMode", repository.getPrivacyMode())
                             put("walletNotificationsEnabled", repository.isWalletNotificationsEnabled())
+                            put("foregroundConnectivityEnabled", repository.isForegroundConnectivityEnabled())
                             put("mempoolServer", repository.getMempoolServer())
                             repository.getCustomMempoolUrl()?.let { put("mempoolCustomUrl", it) }
                             put("feeSource", repository.getFeeSource())
@@ -2466,6 +2535,7 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
                             put("priceCurrency", repository.getPriceCurrency())
                             put("lockTiming", repository.getLockTiming().name)
                             put("disableScreenshots", repository.getDisableScreenshots())
+                            put("randomizePinPad", repository.getRandomizePinPad())
                             put("autoWipeThreshold", repository.getAutoWipeThreshold().name)
                             put("layer2Enabled", repository.isLayer2Enabled())
                             put("liquidTorEnabled", repository.isLiquidTorEnabled())
@@ -2779,6 +2849,9 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
         if (settings.has("nfcEnabled")) repository.setNfcEnabled(settings.getBoolean("nfcEnabled"))
         if (settings.has("privacyMode")) repository.setPrivacyMode(settings.getBoolean("privacyMode"))
         if (settings.has("walletNotificationsEnabled")) repository.setWalletNotificationsEnabled(settings.getBoolean("walletNotificationsEnabled"))
+        if (settings.has("foregroundConnectivityEnabled")) {
+            repository.setForegroundConnectivityEnabled(settings.getBoolean("foregroundConnectivityEnabled"))
+        }
         settings.optString("mempoolServer", "").takeIf { it.isNotBlank() }
             ?.let { repository.setMempoolServer(it) }
         settings.optString("mempoolCustomUrl", "").takeIf { it.isNotBlank() }
@@ -2796,6 +2869,9 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
         }
         if (settings.has("disableScreenshots")) {
             repository.setDisableScreenshots(settings.getBoolean("disableScreenshots"))
+        }
+        if (settings.has("randomizePinPad")) {
+            repository.setRandomizePinPad(settings.getBoolean("randomizePinPad"))
         }
         settings.optString("autoWipeThreshold", "").takeIf { it.isNotBlank() }?.let { name ->
             try { repository.setAutoWipeThreshold(SecureStorage.AutoWipeThreshold.valueOf(name)) } catch (_: Exception) {}
@@ -3233,7 +3309,9 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
      * Stop the Tor service
      */
     fun stopTor() {
-        torManager.stop()
+        if (!shouldKeepTorRunning()) {
+            torManager.stop()
+        }
     }
 
     /**
@@ -3279,6 +3357,12 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
         lifecycleCoordinator.dispose()
         stopBtcPriceRefreshLoop()
         btcPriceFetchJob?.cancel()
+        ConnectivityKeepAlivePolicy.updateBitcoinState(
+            context = appContext,
+            connected = false,
+            electrumUsesTor = false,
+            externalTorRequired = false,
+        )
         // Run on IO to avoid blocking the main thread with socket closes
         CoroutineScope(Dispatchers.IO).launch {
             repository.disconnect()
@@ -3413,6 +3497,7 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
      */
     fun setCustomFeeSourceUrl(url: String) {
         repository.setCustomFeeSourceUrl(url)
+        syncForegroundConnectivityPolicy()
     }
 
     // ==================== Spend Unconfirmed ====================
@@ -3463,6 +3548,19 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
         repository.setWalletNotificationsEnabled(enabled)
     }
 
+    fun isForegroundConnectivityEnabled(): Boolean = repository.isForegroundConnectivityEnabled()
+
+    fun setForegroundConnectivityEnabled(enabled: Boolean) {
+        repository.setForegroundConnectivityEnabled(enabled)
+        syncForegroundConnectivityPolicy()
+        if (shouldKeepTorRunning()) {
+            torManager.start()
+        } else {
+            torManager.stop()
+        }
+        _settingsRefreshVersion.value += 1
+    }
+
     // ==================== Fee Estimation Settings ====================
 
     /**
@@ -3471,6 +3569,7 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
     fun setFeeSource(source: String) {
         repository.setFeeSource(source)
         _feeSourceState.value = source
+        syncForegroundConnectivityPolicy()
 
         if (source == SecureStorage.FEE_SOURCE_OFF) {
             _feeEstimationState.value = FeeEstimationResult.Disabled
@@ -3561,6 +3660,7 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
     fun setPriceSource(source: String) {
         repository.setPriceSource(source)
         _priceSourceState.value = source
+        syncForegroundConnectivityPolicy()
 
         val sanitizedCurrency = BtcPriceService.sanitizeFiatCurrency(source, repository.getPriceCurrency())
         repository.setPriceCurrency(sanitizedCurrency)
@@ -3615,16 +3715,13 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
             startBtcPriceRefreshLoop()
         }
 
-        val shouldKeepTorRunning =
-            repository.isTorEnabled() ||
-                isFeeSourceOnion() ||
-                isPriceSourceOnion()
-        if (shouldKeepTorRunning) {
+        if (shouldKeepTorRunning()) {
             startTor()
         } else {
             stopTor()
         }
 
+        syncForegroundConnectivityPolicy()
         _settingsRefreshVersion.value += 1
     }
 
@@ -3771,6 +3868,12 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
      */
     fun setDisableScreenshots(disabled: Boolean) {
         repository.setDisableScreenshots(disabled)
+    }
+
+    fun getRandomizePinPad(): Boolean = repository.getRandomizePinPad()
+
+    fun setRandomizePinPad(enabled: Boolean) {
+        repository.setRandomizePinPad(enabled)
     }
 
     // ==================== Duress PIN / Decoy Wallet ====================
@@ -3999,6 +4102,38 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
 
     fun isWifPrivateKey(input: String): Boolean = repository.isWifPrivateKey(input)
 
+    private fun syncForegroundConnectivityPolicy() {
+        ConnectivityKeepAlivePolicy.updateForegroundConnectivityEnabled(
+            context = appContext,
+            enabled = repository.isForegroundConnectivityEnabled(),
+        )
+        ConnectivityKeepAlivePolicy.updateBitcoinState(
+            context = appContext,
+            connected = _uiState.value.isConnected,
+            electrumUsesTor = isBitcoinElectrumTorRequired(),
+            externalTorRequired = isFeeSourceOnion() || isPriceSourceOnion(),
+        )
+    }
+
+    private fun isBitcoinElectrumTorRequired(): Boolean {
+        return _uiState.value.isConnected &&
+            (
+                repository.getElectrumConfig()?.let { config ->
+                    config.useTor || config.isOnionAddress()
+                } == true
+            )
+    }
+
+    private fun shouldKeepTorRunningForBitcoin(localTorRequirement: Boolean): Boolean {
+        syncForegroundConnectivityPolicy()
+        return localTorRequirement || ConnectivityKeepAlivePolicy.hasTorRequirementOutsideBitcoin()
+    }
+
+    fun shouldKeepTorRunning(): Boolean {
+        syncForegroundConnectivityPolicy()
+        return repository.isTorEnabled() || ConnectivityKeepAlivePolicy.hasAnyTorRequirement()
+    }
+
     companion object {
         private const val CONNECTION_TIMEOUT_CLEARNET_MS = 15_000L
         private const val CONNECTION_TIMEOUT_TOR_MS = 30_000L
@@ -4006,8 +4141,13 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
         private const val TOR_POST_BOOTSTRAP_DELAY_MS = 2_500L
         private const val PBKDF2_ITERATIONS = 600_000
         private const val HEARTBEAT_INTERVAL_MS = 60_000L
+        private const val HEARTBEAT_PING_SOCKET_TIMEOUT_MS = 8_000
+        private const val HEARTBEAT_PING_LOCK_TIMEOUT_MS = 3_000L
         private const val HEARTBEAT_PING_TIMEOUT_MS = 10_000L
         private const val HEARTBEAT_MAX_FAILURES = 3
+        private const val FOREGROUND_RESUME_PING_SOCKET_TIMEOUT_MS = 2_500
+        private const val FOREGROUND_RESUME_PING_LOCK_TIMEOUT_MS = 750L
+        private const val FOREGROUND_RESUME_PING_TIMEOUT_MS = 3_500L
         private const val PRICE_REFRESH_INTERVAL_MS = 300_000L
         private const val PRICE_FETCH_DEDUP_WINDOW_MS = 60_000L
         private const val RECONNECT_BASE_DELAY_MS = 5_000L

@@ -1,6 +1,8 @@
 package github.aeonbtc.ibiswallet.ui.components
 
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
@@ -15,7 +17,11 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -24,7 +30,9 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import github.aeonbtc.ibiswallet.ui.theme.BitcoinOrange
 import github.aeonbtc.ibiswallet.ui.theme.DarkSurface
+import github.aeonbtc.ibiswallet.ui.theme.TextSecondary
 
 @Composable
 fun ScrollableDialogSurface(
@@ -129,6 +137,102 @@ fun ScrollableAlertDialog(
                 Spacer(modifier = Modifier.height(16.dp))
             }
             text()
+        }
+    }
+}
+
+@Composable
+fun IbisConfirmDialog(
+    onDismissRequest: () -> Unit,
+    title: String,
+    confirmText: String,
+    onConfirm: () -> Unit,
+    modifier: Modifier = Modifier,
+    properties: DialogProperties = DialogProperties(),
+    containerColor: Color = DarkSurface,
+    shape: Shape = RoundedCornerShape(12.dp),
+    message: String? = null,
+    dismissText: String? = "Cancel",
+    onDismissAction: (() -> Unit)? = onDismissRequest,
+    confirmEnabled: Boolean = true,
+    confirmColor: Color = BitcoinOrange,
+    icon: (@Composable () -> Unit)? = null,
+    body: (@Composable ColumnScope.() -> Unit)? = null,
+) {
+    ScrollableDialogSurface(
+        onDismissRequest = onDismissRequest,
+        modifier = modifier,
+        properties = properties,
+        containerColor = containerColor,
+        shape = shape,
+        actions = {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (dismissText != null && onDismissAction != null) {
+                    IbisButton(
+                        onClick = onDismissAction,
+                        modifier = Modifier.widthIn(min = 84.dp),
+                        activeColor = TextSecondary,
+                    ) {
+                        Text(
+                            text = dismissText,
+                            style = MaterialTheme.typography.titleMedium,
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.widthIn(min = 12.dp))
+                }
+
+                Button(
+                    onClick = onConfirm,
+                    enabled = confirmEnabled,
+                    modifier = Modifier.widthIn(min = 84.dp),
+                    shape = RoundedCornerShape(8.dp),
+                    colors =
+                        ButtonDefaults.buttonColors(
+                            containerColor = confirmColor,
+                            disabledContainerColor = confirmColor.copy(alpha = 0.3f),
+                        ),
+                ) {
+                    Text(
+                        text = confirmText,
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                }
+            }
+        },
+    ) {
+        if (icon != null) {
+            icon()
+            Spacer(modifier = Modifier.height(16.dp))
+        }
+
+        Text(
+            text = title,
+            style = MaterialTheme.typography.titleLarge,
+            color = MaterialTheme.colorScheme.onBackground,
+        )
+
+        if (message != null || body != null) {
+            Spacer(modifier = Modifier.height(16.dp))
+        }
+
+        if (message != null) {
+            Text(
+                text = message,
+                style = MaterialTheme.typography.bodyLarge,
+                color = TextSecondary,
+            )
+        }
+
+        if (body != null) {
+            if (message != null) {
+                Spacer(modifier = Modifier.height(12.dp))
+            }
+            body()
         }
     }
 }

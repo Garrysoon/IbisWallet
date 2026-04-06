@@ -4,13 +4,13 @@ package github.aeonbtc.ibiswallet.ui
 
 import android.Manifest
 import android.content.Intent
-import android.content.pm.PackageManager
-import android.os.Build
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -20,8 +20,6 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.spring
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.awaitHorizontalTouchSlopOrCancellation
@@ -79,17 +77,16 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.input.pointer.positionChange
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.input.pointer.util.VelocityTracker
-import kotlin.math.abs
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
@@ -162,6 +159,7 @@ import github.aeonbtc.ibiswallet.ui.theme.TorPurple
 import github.aeonbtc.ibiswallet.util.Bip329LabelCounts
 import github.aeonbtc.ibiswallet.util.Bip329LabelScope
 import github.aeonbtc.ibiswallet.util.WalletNotificationHelper
+import github.aeonbtc.ibiswallet.util.WalletNotificationPolicy
 import github.aeonbtc.ibiswallet.util.getNfcAvailability
 import github.aeonbtc.ibiswallet.util.resolveLayer2SendDraft
 import github.aeonbtc.ibiswallet.util.resolveSendRoute
@@ -174,6 +172,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.math.abs
 
 private enum class WalletAuthPurpose {
     OPEN_WALLET,
@@ -222,6 +221,19 @@ fun IbisWalletApp(
     var walletNotificationsEnabled by remember(walletSettingsRefreshVersion) {
         mutableStateOf(viewModel.isWalletNotificationsEnabled())
     }
+    var foregroundConnectivityEnabled by remember(walletSettingsRefreshVersion) {
+        mutableStateOf(viewModel.isForegroundConnectivityEnabled())
+    }
+    val notificationPermissionGranted = WalletNotificationHelper.hasNotificationPermission(context)
+    val systemNotificationsEnabled = WalletNotificationHelper.areNotificationsEnabledInSystem(context)
+    val walletNotificationDeliveryState =
+        WalletNotificationPolicy.resolveDeliveryState(
+            appEnabled = walletNotificationsEnabled,
+            permissionGranted = notificationPermissionGranted,
+            systemNotificationsEnabled = systemNotificationsEnabled,
+        )
+    val walletNotificationsAndroidBlocked = stringResource(R.string.wallet_notifications_android_blocked)
+    val walletNotificationsPermissionDenied = stringResource(R.string.wallet_notifications_permission_denied)
     val initialSyncComplete by viewModel.initialSyncComplete.collectAsStateWithLifecycle()
     val initialLiquidSyncComplete by liquidViewModel.initialLiquidSyncComplete.collectAsStateWithLifecycle()
 
@@ -321,25 +333,32 @@ fun IbisWalletApp(
             if (granted) {
                 viewModel.setWalletNotificationsEnabled(true)
                 walletNotificationsEnabled = true
+                if (!WalletNotificationHelper.areNotificationsEnabledInSystem(context)) {
+                    scope.launch {
+                        snackbarHostState.showSnackbar(
+                            walletNotificationsAndroidBlocked,
+                        )
+                    }
+                }
             } else {
                 viewModel.setWalletNotificationsEnabled(false)
                 walletNotificationsEnabled = false
                 scope.launch {
-                    snackbarHostState.showSnackbar("Android notification permission denied")
+                    snackbarHostState.showSnackbar(
+                        walletNotificationsPermissionDenied,
+                    )
                 }
             }
         }
 
-    fun canRequestNotificationsNow(): Boolean =
-        Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
-            ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.POST_NOTIFICATIONS,
-            ) == PackageManager.PERMISSION_GRANTED
-
     fun updateWalletNotificationsEnabled(enabled: Boolean) {
         viewModel.setWalletNotificationsEnabled(enabled)
         walletNotificationsEnabled = enabled
+    }
+
+    fun updateForegroundConnectivityEnabled(enabled: Boolean) {
+        viewModel.setForegroundConnectivityEnabled(enabled)
+        foregroundConnectivityEnabled = enabled
     }
 
     fun postWalletNotification(
@@ -688,7 +707,7 @@ fun IbisWalletApp(
         if (request.securityMethod == SecureStorage.SecurityMethod.PIN) {
             LockScreen(
                 securityMethod = SecureStorage.SecurityMethod.PIN,
-                storedPinLength = secureStorage.getStoredPinLength(),
+                randomizePinPad = secureStorage.getRandomizePinPad(),
                 isBiometricAvailable = false,
                 onBiometricRequest = {},
                 onPinEntered = { pin ->
@@ -894,21 +913,28 @@ fun IbisWalletApp(
         if (!initialSyncComplete) return@LaunchedEffect
         val walletId = walletState.activeWallet?.id ?: return@LaunchedEffect
         val currentTransactions = walletState.transactions
-        if (currentTransactions.isEmpty()) return@LaunchedEffect
 
         val persistedTxids = secureStorage.getNotifiedTxids(walletId)
         val currentTxids = currentTransactions.map { it.txid }.toSet()
+        val trackingUpdate =
+            WalletNotificationPolicy.updateTrackedTransactions(
+                currentTxids = currentTxids,
+                trackedTxids = persistedTxids,
+                baselineEstablished = secureStorage.hasNotifiedTxidsBaseline(walletId),
+            )
+
+        secureStorage.saveNotifiedTxids(walletId, trackingUpdate.trackedTxids)
+        secureStorage.setNotifiedTxidsBaseline(walletId, trackingUpdate.baselineEstablished)
+
+        if (!walletNotificationsEnabled || trackingUpdate.notifyTxids.isEmpty()) {
+            return@LaunchedEffect
+        }
 
         val newIncomingTransactions =
             currentTransactions.filter { tx ->
-                tx.amountSats > 0 && tx.txid !in persistedTxids
+                tx.amountSats > 0 && tx.txid in trackingUpdate.notifyTxids
             }
-
-        secureStorage.saveNotifiedTxids(walletId, persistedTxids + currentTxids)
-
-        if (!walletNotificationsEnabled || newIncomingTransactions.isEmpty()) {
-            return@LaunchedEffect
-        }
+        if (newIncomingTransactions.isEmpty()) return@LaunchedEffect
 
         newIncomingTransactions.forEach { tx ->
             val amountText =
@@ -934,24 +960,31 @@ fun IbisWalletApp(
         if (!initialLiquidSyncComplete) return@LaunchedEffect
         val walletId = loadedLiquidWalletId ?: return@LaunchedEffect
         val currentTransactions = liquidState.transactions
-        if (currentTransactions.isEmpty()) return@LaunchedEffect
 
         val persistedTxids = secureStorage.getNotifiedLiquidTxids(walletId)
         val currentTxids = currentTransactions.map { it.txid }.toSet()
+        val trackingUpdate =
+            WalletNotificationPolicy.updateTrackedTransactions(
+                currentTxids = currentTxids,
+                trackedTxids = persistedTxids,
+                baselineEstablished = secureStorage.hasNotifiedLiquidTxidsBaseline(walletId),
+            )
+
+        secureStorage.saveNotifiedLiquidTxids(walletId, trackingUpdate.trackedTxids)
+        secureStorage.setNotifiedLiquidTxidsBaseline(walletId, trackingUpdate.baselineEstablished)
+
+        if (!walletNotificationsEnabled || trackingUpdate.notifyTxids.isEmpty()) {
+            return@LaunchedEffect
+        }
 
         val newIncomingTransactions =
             currentTransactions.filter { tx ->
                 tx.balanceSatoshi > 0 &&
                     tx.type == github.aeonbtc.ibiswallet.data.model.LiquidTxType.RECEIVE &&
                     tx.source == LiquidTxSource.NATIVE &&
-                    tx.txid !in persistedTxids
+                    tx.txid in trackingUpdate.notifyTxids
             }
-
-        secureStorage.saveNotifiedLiquidTxids(walletId, persistedTxids + currentTxids)
-
-        if (!walletNotificationsEnabled || newIncomingTransactions.isEmpty()) {
-            return@LaunchedEffect
-        }
+        if (newIncomingTransactions.isEmpty()) return@LaunchedEffect
 
         newIncomingTransactions.forEach { tx ->
             val amountText =
@@ -1727,7 +1760,7 @@ fun IbisWalletApp(
                                     isSwapEnabled = swapEnabledForWallet,
                                     isLayer1Enabled = isLayer1EnabledForWallet,
                                     onSwap = { navController.navigate(Screen.Swap.route) },
-                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
                                 )
                                 Box(modifier = Modifier.weight(1f)) {
                                     if (activeLayer == WalletLayer.LAYER2) {
@@ -2666,17 +2699,9 @@ fun IbisWalletApp(
                         val nfcAvailability = context.getNfcAvailability(nfcEnabled)
 
                         SettingsScreen(
-                            currentDenomination = if (isLiquidAvailable && activeLayer == WalletLayer.LAYER2) {
-                                layer2Denomination
-                            } else {
-                                layer1Denomination
-                            },
+                            currentDenomination = layer1Denomination,
                             onDenominationChange = { newDenomination ->
-                                if (isLiquidAvailable && activeLayer == WalletLayer.LAYER2) {
-                                    liquidViewModel.setDenomination(newDenomination)
-                                } else {
-                                    viewModel.setDenomination(newDenomination)
-                                }
+                                viewModel.setDenomination(newDenomination)
                             },
                             spendUnconfirmed = spendUnconfirmed,
                             onSpendUnconfirmedChange = { enabled ->
@@ -2684,16 +2709,26 @@ fun IbisWalletApp(
                                 spendUnconfirmed = enabled
                             },
                             walletNotificationsEnabled = walletNotificationsEnabled,
+                            walletNotificationDeliveryState = walletNotificationDeliveryState,
                             onWalletNotificationsEnabledChange = { enabled ->
                                 if (!enabled) {
                                     updateWalletNotificationsEnabled(false)
-                                } else if (canRequestNotificationsNow()) {
-                                    updateWalletNotificationsEnabled(true)
-                                } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                } else if (!notificationPermissionGranted) {
                                     postNotificationsPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                                 } else {
                                     updateWalletNotificationsEnabled(true)
+                                    if (!systemNotificationsEnabled) {
+                                        scope.launch {
+                                            snackbarHostState.showSnackbar(
+                                                walletNotificationsAndroidBlocked,
+                                            )
+                                        }
+                                    }
                                 }
+                            },
+                            foregroundConnectivityEnabled = foregroundConnectivityEnabled,
+                            onForegroundConnectivityEnabledChange = { enabled ->
+                                updateForegroundConnectivityEnabled(enabled)
                             },
                             nfcEnabled = nfcEnabled,
                             onNfcEnabledChange = { enabled ->
@@ -2711,9 +2746,7 @@ fun IbisWalletApp(
                                 if (isNowOnion && !viewModel.isTorReady()) {
                                     viewModel.startTor()
                                 }
-                                // If switching away from .onion fee source, stop Tor
-                                // if neither Electrum nor price source need it
-                                if (wasOnion && !isNowOnion && !viewModel.isTorEnabled() && !viewModel.isPriceSourceOnion()) {
+                                if (wasOnion && !isNowOnion) {
                                     viewModel.stopTor()
                                 }
                             },
@@ -2731,7 +2764,7 @@ fun IbisWalletApp(
                                 if (isNewUrlOnion && !viewModel.isTorReady()) {
                                     // Start Tor for .onion fee source
                                     viewModel.startTor()
-                                } else if (wasOnion && !isNewUrlOnion && !viewModel.isTorEnabled() && !viewModel.isPriceSourceOnion()) {
+                                } else if (wasOnion && !isNewUrlOnion) {
                                     // Switched from .onion to clearnet — stop Tor if nothing else needs it
                                     viewModel.stopTor()
                                 }
@@ -2743,7 +2776,7 @@ fun IbisWalletApp(
                                 val isNowOnion = viewModel.isPriceSourceOnion()
                                 if (isNowOnion && !viewModel.isTorReady()) {
                                     viewModel.startTor()
-                                } else if (wasOnion && !isNowOnion && !viewModel.isTorEnabled() && !viewModel.isFeeSourceOnion()) {
+                                } else if (wasOnion && !isNowOnion) {
                                     viewModel.stopTor()
                                 }
                             },
@@ -2797,6 +2830,10 @@ fun IbisWalletApp(
                         Layer2OptionsScreen(
                             layer2Enabled = isLayer2Enabled,
                             onLayer2EnabledChange = { liquidViewModel.setLayer2Enabled(it) },
+                            currentDenomination = layer2Denomination,
+                            onDenominationChange = { newDenomination ->
+                                liquidViewModel.setDenomination(newDenomination)
+                            },
                             currentBoltzApiSource = boltzApiSource,
                             onBoltzApiSourceChange = { newSource ->
                                 liquidViewModel.setBoltzApiSource(newSource)
@@ -2844,6 +2881,7 @@ fun IbisWalletApp(
                         var securityMethod by remember { mutableStateOf(viewModel.getSecurityMethod()) }
                         var lockTiming by remember { mutableStateOf(viewModel.getLockTiming()) }
                         var screenshotsDisabled by remember { mutableStateOf(viewModel.getDisableScreenshots()) }
+                        var randomizePinPad by remember { mutableStateOf(viewModel.getRandomizePinPad()) }
                         var duressEnabled by remember { mutableStateOf(viewModel.isDuressEnabled()) }
                         var autoWipeThreshold by remember { mutableStateOf(viewModel.getAutoWipeThreshold()) }
                         var cloakModeEnabled by remember { mutableStateOf(viewModel.isCloakModeEnabled()) }
@@ -2861,6 +2899,7 @@ fun IbisWalletApp(
                             currentLockTiming = lockTiming,
                             isBiometricAvailable = isBiometricAvailable,
                             screenshotsDisabled = screenshotsDisabled,
+                            randomizePinPad = randomizePinPad,
                             isDuressEnabled = duressEnabled,
                             isDuressMode = isDuressMode,
                             hasWallet = walletState.wallets.isNotEmpty(),
@@ -2910,6 +2949,10 @@ fun IbisWalletApp(
                                         android.view.WindowManager.LayoutParams.FLAG_SECURE,
                                     )
                                 }
+                            },
+                            onRandomizePinPadChange = { enabled ->
+                                viewModel.setRandomizePinPad(enabled)
+                                randomizePinPad = enabled
                             },
                             onSetupDuress = { pin, config ->
                                 viewModel.setupDuress(
@@ -3375,6 +3418,10 @@ fun IbisWalletApp(
                                     sideSwapEnabled = sideSwapApiSource != SecureStorage.SIDESWAP_API_DISABLED,
                                     btcBalanceSats = walletState.balanceSats.toLong(),
                                     lbtcBalanceSats = liquidState.balanceSats,
+                                    btcTransactions = walletState.transactions,
+                                    btcBlockHeight = walletState.blockHeight,
+                                    liquidTransactions = liquidState.transactions,
+                                    liquidBlockHeight = liquidBlockHeight,
                                     btcUtxos = bitcoinSwapUtxos,
                                     liquidUtxos = liquidUtxos,
                                     spendUnconfirmed = viewModel.getSpendUnconfirmed(),

@@ -125,7 +125,9 @@ fun LiquidTransactionItem(
             Spacer(modifier = Modifier.width(12.dp))
 
             Column(modifier = Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
                     Text(
                         text = defaultTransactionTitle(tx, isReceive),
                         style = MaterialTheme.typography.titleMedium.copy(fontSize = 17.sp, lineHeight = 25.sp),
@@ -133,8 +135,8 @@ fun LiquidTransactionItem(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    Spacer(modifier = Modifier.width(6.dp))
                     if (showNetworkBadge) {
+                        Spacer(modifier = Modifier.width(3.dp))
                         Box(
                             modifier =
                                 Modifier

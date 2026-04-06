@@ -632,9 +632,10 @@ class CachingElectrumProxy(
 
     /**
      * Ensure the direct query connection is alive and handshake complete.
-     * Creates a new connection if needed. Must be called while holding [directLock].
+     * Creates a new connection if needed unless [allowReconnect] is false.
+     * Must be called while holding [directLock].
      */
-    private fun ensureDirectConnectionLocked(): Boolean {
+    private fun ensureDirectConnectionLocked(allowReconnect: Boolean = true): Boolean {
         val writer = directWriter
         val reader = directReader
         if (writer != null && reader != null) {
@@ -646,6 +647,8 @@ class CachingElectrumProxy(
                 return true
             }
         }
+
+        if (!allowReconnect) return false
 
         // Create a new direct connection
         closeDirectConnectionLocked()
@@ -842,19 +845,23 @@ class CachingElectrumProxy(
      * Uses tryLock so that if another operation (sync, verbose tx fetch)
      * is actively using the direct socket, ping returns true immediately —
      * lock contention proves the connection is alive. A tighter socket read
-     * timeout (PING_SOCKET_TIMEOUT_MS) ensures readLine() completes and
+     * timeout ensures readLine() completes and
      * releases the lock before the heartbeat coroutine timeout fires,
      * preventing cascading failures from stale lock holds.
      */
-    fun ping(): Boolean {
+    fun ping(
+        socketTimeoutMs: Int = PING_SOCKET_TIMEOUT_MS,
+        lockTimeoutMs: Long = PING_LOCK_TIMEOUT_MS,
+        allowReconnect: Boolean = true,
+    ): Boolean {
         // If we can't acquire the lock, someone else is actively using the
         // direct socket — the connection is alive by definition.
-        if (!directLock.tryLock(PING_LOCK_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+        if (!directLock.tryLock(lockTimeoutMs, TimeUnit.MILLISECONDS)) {
             if (BuildConfig.DEBUG) Log.d(TAG, "${roleTag("direct")} Ping skipped because socket is busy; treating as alive")
             return true
         }
         try {
-            if (!ensureDirectConnectionLocked()) return false
+            if (!ensureDirectConnectionLocked(allowReconnect = allowReconnect)) return false
             val writer = directWriter ?: return false
             val reader = directReader ?: return false
             val socket = directSocket ?: return false
@@ -863,7 +870,7 @@ class CachingElectrumProxy(
             // well within the heartbeat's coroutine timeout, then restore.
             val originalTimeout = socket.soTimeout
             try {
-                socket.soTimeout = PING_SOCKET_TIMEOUT_MS
+                socket.soTimeout = socketTimeoutMs
                 val response =
                     sendDirectRequestLocked(
                         writer,

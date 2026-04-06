@@ -20,6 +20,7 @@ import androidx.compose.ui.unit.sp
 import github.aeonbtc.ibiswallet.data.local.SecureStorage
 import github.aeonbtc.ibiswallet.ui.theme.*
 import kotlinx.coroutines.delay
+import java.security.SecureRandom
 
 private const val MIN_PIN_LENGTH = 4
 private const val MAX_PIN_LENGTH = 12
@@ -30,14 +31,14 @@ fun LockScreen(
     onPinEntered: suspend (String) -> Boolean,
     onBiometricRequest: () -> Unit,
     isBiometricAvailable: Boolean = false,
-    storedPinLength: Int? = null,
+    randomizePinPad: Boolean = false,
     isDuressWithBiometric: Boolean = false,
 ) {
     var pin by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
     var attempts by remember { mutableIntStateOf(0) }
     var pendingValidation by remember { mutableStateOf(false) }
-    val pinMaxLength = storedPinLength ?: MAX_PIN_LENGTH
+    val pinMaxLength = MAX_PIN_LENGTH
 
     // Auto-trigger biometric on first composition if biometric is the security method
     // Skip auto-trigger in duress+biometric mode (the C button is the hidden trigger)
@@ -179,10 +180,6 @@ fun LockScreen(
                         pin = newPin
                         error = null
 
-                        // Auto-submit when PIN reaches the stored length
-                        if (storedPinLength != null && newPin.length == storedPinLength) {
-                            pendingValidation = true
-                        }
                     }
                 },
                 onBackspaceClick = {
@@ -191,9 +188,8 @@ fun LockScreen(
                         error = null
                     }
                 },
-                // Show Unlock button only when stored PIN length is unknown (fallback)
                 onConfirmClick =
-                    if (storedPinLength == null && pin.length >= MIN_PIN_LENGTH && !pendingValidation) {
+                    if (pin.length >= MIN_PIN_LENGTH && !pendingValidation) {
                         { pendingValidation = true }
                     } else {
                         null
@@ -215,7 +211,7 @@ fun LockScreen(
                     } else {
                         null
                     },
-                showConfirmButton = storedPinLength == null,
+                randomizeNumbers = randomizePinPad,
             )
         }
     }
@@ -228,25 +224,19 @@ private fun NumberPad(
     onConfirmClick: (() -> Unit)? = null,
     onBiometricClick: (() -> Unit)? = null,
     onClearWithBiometricClick: (() -> Unit)? = null,
-    showConfirmButton: Boolean = true,
+    randomizeNumbers: Boolean = false,
 ) {
-    val numbers =
-        listOf(
-            listOf("1", "2", "3"),
-            listOf("4", "5", "6"),
-            listOf("7", "8", "9"),
-            listOf("", "0", ""),
-        )
+    val numbers = remember(randomizeNumbers) { buildNumberPadRows(randomizeNumbers) }
 
-    val keypadButtonSize = 64.dp
+    val keypadButtonSize = 72.dp
 
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
         numbers.forEachIndexed { rowIndex, row ->
             Row(
-                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                horizontalArrangement = Arrangement.spacedBy(18.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 row.forEachIndexed { colIndex, number ->
@@ -270,7 +260,7 @@ private fun NumberPad(
                                     Text(
                                         text = "C",
                                         style = MaterialTheme.typography.headlineMedium,
-                                        fontSize = 24.sp,
+                                        fontSize = 28.sp,
                                     )
                                 }
                             } else if (onBiometricClick != null) {
@@ -286,7 +276,7 @@ private fun NumberPad(
                                         imageVector = Icons.Default.Fingerprint,
                                         contentDescription = "Biometric",
                                         tint = BitcoinOrange,
-                                        modifier = Modifier.size(28.dp),
+                                        modifier = Modifier.size(30.dp),
                                     )
                                 }
                             } else {
@@ -307,7 +297,7 @@ private fun NumberPad(
                                     imageVector = Icons.AutoMirrored.Filled.Backspace,
                                     contentDescription = "Backspace",
                                     tint = TextSecondary,
-                                    modifier = Modifier.size(24.dp),
+                                    modifier = Modifier.size(26.dp),
                                 )
                             }
                         }
@@ -327,7 +317,7 @@ private fun NumberPad(
                                 Text(
                                     text = number,
                                     style = MaterialTheme.typography.headlineMedium,
-                                    fontSize = 24.sp,
+                                    fontSize = 28.sp,
                                 )
                             }
                         }
@@ -340,32 +330,58 @@ private fun NumberPad(
             }
         }
 
-        // Confirm button row below the number pad (hidden when auto-submit is active)
-        if (showConfirmButton) {
-            Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(8.dp))
 
-            Button(
-                onClick = { onConfirmClick?.invoke() },
-                enabled = onConfirmClick != null,
-                modifier =
-                    Modifier
-                        .fillMaxWidth()
-                        .widthIn(max = 240.dp)
-                        .heightIn(min = 48.dp),
-                shape = RoundedCornerShape(8.dp),
-                colors =
-                    ButtonDefaults.buttonColors(
-                        containerColor = BitcoinOrange,
-                        contentColor = DarkBackground,
-                        disabledContainerColor = BitcoinOrange.copy(alpha = 0.3f),
-                        disabledContentColor = DarkBackground.copy(alpha = 0.5f),
-                    ),
-            ) {
-                Text(
-                    text = "Unlock",
-                    style = MaterialTheme.typography.titleMedium,
-                )
-            }
+        Button(
+            onClick = { onConfirmClick?.invoke() },
+            enabled = onConfirmClick != null,
+            modifier =
+                Modifier
+                    .fillMaxWidth()
+                    .widthIn(max = 240.dp)
+                    .heightIn(min = 48.dp),
+            shape = RoundedCornerShape(8.dp),
+            colors =
+                ButtonDefaults.buttonColors(
+                    containerColor = BitcoinOrange,
+                    contentColor = DarkBackground,
+                    disabledContainerColor = BitcoinOrange.copy(alpha = 0.3f),
+                    disabledContentColor = DarkBackground.copy(alpha = 0.5f),
+                ),
+        ) {
+            Text(
+                text = "Unlock",
+                style = MaterialTheme.typography.titleMedium,
+            )
         }
     }
+}
+
+private fun buildNumberPadRows(randomizeNumbers: Boolean): List<List<String>> {
+    if (!randomizeNumbers) {
+        return listOf(
+            listOf("1", "2", "3"),
+            listOf("4", "5", "6"),
+            listOf("7", "8", "9"),
+            listOf("", "0", ""),
+        )
+    }
+
+    val digits =
+        mutableListOf("0", "1", "2", "3", "4", "5", "6", "7", "8", "9").apply {
+            val random = SecureRandom()
+            for (index in lastIndex downTo 1) {
+                val swapIndex = random.nextInt(index + 1)
+                val temp = this[index]
+                this[index] = this[swapIndex]
+                this[swapIndex] = temp
+            }
+        }
+
+    return listOf(
+        listOf(digits[0], digits[1], digits[2]),
+        listOf(digits[3], digits[4], digits[5]),
+        listOf(digits[6], digits[7], digits[8]),
+        listOf("", digits[9], ""),
+    )
 }

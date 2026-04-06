@@ -68,9 +68,9 @@ fun LayerSwitcher(
     ) {
         Row(
             modifier = Modifier
-                .clip(RoundedCornerShape(22.dp))
+                .clip(RoundedCornerShape(24.dp))
                 .background(DarkSurfaceVariant)
-                .padding(1.dp),
+                .padding(2.dp),
             horizontalArrangement = Arrangement.spacedBy(2.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -122,7 +122,7 @@ private fun SwapPill(
     enabled: Boolean,
     onClick: () -> Unit,
 ) {
-    val shape = RoundedCornerShape(14.dp)
+    val shape = RoundedCornerShape(16.dp)
     val bgColor by animateColorAsState(
         targetValue =
             when {
@@ -152,12 +152,12 @@ private fun SwapPill(
     )
     Row(
         modifier = Modifier
-            .heightIn(min = 28.dp)
+            .heightIn(min = 32.dp)
             .clip(shape)
             .background(bgColor)
             .border(width = 1.dp, color = borderColor, shape = shape)
             .clickable(enabled = enabled, onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 4.dp),
+            .padding(horizontal = 14.dp, vertical = 5.dp),
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -165,7 +165,7 @@ private fun SwapPill(
             imageVector = Icons.AutoMirrored.Filled.ArrowBack,
             contentDescription = null,
             tint = if (enabled || isSelected) LiquidTeal else LiquidTeal.copy(alpha = 0.35f),
-            modifier = Modifier.size(12.dp),
+            modifier = Modifier.size(13.dp),
         )
         Spacer(modifier = Modifier.width(3.dp))
         Text(
@@ -179,7 +179,7 @@ private fun SwapPill(
             imageVector = Icons.AutoMirrored.Filled.ArrowForward,
             contentDescription = null,
             tint = if (enabled || isSelected) BitcoinOrange else BitcoinOrange.copy(alpha = 0.35f),
-            modifier = Modifier.size(12.dp),
+            modifier = Modifier.size(13.dp),
         )
     }
 }
@@ -208,12 +208,12 @@ private fun LayerPill(
 
     Box(
         modifier = Modifier
-            .heightIn(min = 32.dp)
-            .widthIn(min = 84.dp)
-            .clip(RoundedCornerShape(18.dp))
+            .heightIn(min = 36.dp)
+            .widthIn(min = 92.dp)
+            .clip(RoundedCornerShape(20.dp))
             .background(bgColor)
             .clickable(enabled = enabled, onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 4.dp),
+            .padding(horizontal = 18.dp, vertical = 6.dp),
         contentAlignment = Alignment.Center,
     ) {
         Text(

@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -60,6 +61,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -77,6 +79,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -85,6 +88,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.net.toUri
 import github.aeonbtc.ibiswallet.MainActivity
+import github.aeonbtc.ibiswallet.R
 import github.aeonbtc.ibiswallet.data.local.SecureStorage
 import github.aeonbtc.ibiswallet.data.model.LiquidAsset
 import github.aeonbtc.ibiswallet.data.model.LiquidAssetBalance
@@ -98,6 +102,8 @@ import github.aeonbtc.ibiswallet.data.model.SwapDirection
 import github.aeonbtc.ibiswallet.data.model.SwapService
 import github.aeonbtc.ibiswallet.ui.components.IbisButton
 import github.aeonbtc.ibiswallet.ui.components.LiquidTransactionItem
+import github.aeonbtc.ibiswallet.ui.components.NfcStatusIndicator
+import github.aeonbtc.ibiswallet.ui.components.rememberBringIntoViewRequesterOnExpand
 import github.aeonbtc.ibiswallet.ui.components.QrScannerDialog
 import github.aeonbtc.ibiswallet.ui.components.formatFeeRate
 import github.aeonbtc.ibiswallet.ui.theme.AccentBlue
@@ -111,11 +117,14 @@ import github.aeonbtc.ibiswallet.ui.theme.DarkSurface
 import github.aeonbtc.ibiswallet.ui.theme.DarkSurfaceVariant
 import github.aeonbtc.ibiswallet.ui.theme.LightningYellow
 import github.aeonbtc.ibiswallet.ui.theme.LiquidTeal
+import github.aeonbtc.ibiswallet.ui.theme.SuccessGreen
 import github.aeonbtc.ibiswallet.ui.theme.TextSecondary
 import github.aeonbtc.ibiswallet.util.SecureClipboard
 import github.aeonbtc.ibiswallet.util.generateQrBitmap
 import github.aeonbtc.ibiswallet.util.getNfcAvailability
 import github.aeonbtc.ibiswallet.util.matchesTimestampSearch
+import github.aeonbtc.ibiswallet.nfc.NfcReaderUiState
+import github.aeonbtc.ibiswallet.nfc.NfcRuntimeStatus
 import kotlin.math.pow
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -159,15 +168,19 @@ fun LiquidBalanceScreen(
             showUsdtTransactions = false
         }
     }
+    val mainActivity = context as? MainActivity
+    val nfcReaderOwner = remember { Any() }
     val nfcAvailable = context.getNfcAvailability().canRead
-    DisposableEffect(nfcAvailable) {
-        if (nfcAvailable) {
-            (context as? MainActivity)?.enableNfcReaderMode()
+    DisposableEffect(mainActivity, nfcAvailable) {
+        if (mainActivity != null && nfcAvailable) {
+            mainActivity.requestNfcReaderMode(nfcReaderOwner)
         }
         onDispose {
-            (context as? MainActivity)?.disableNfcReaderMode()
+            mainActivity?.releaseNfcReaderMode(nfcReaderOwner)
         }
     }
+    val isNfcReaderActive = nfcAvailable && mainActivity?.isNfcReaderModeActive == true
+    val nfcReaderState by NfcRuntimeStatus.readerState.collectAsState()
 
     selectedLiquidTransaction?.let { tx ->
         LiquidTransactionDetailDialog(
@@ -362,6 +375,32 @@ fun LiquidBalanceScreen(
                                 modifier = Modifier.size(24.dp),
                             )
                         }
+
+                        if (isNfcReaderActive) {
+                            val nfcStatusLabel =
+                                when (nfcReaderState) {
+                                    NfcReaderUiState.Inactive,
+                                    NfcReaderUiState.Ready,
+                                    -> stringResource(R.string.nfc_status_ready)
+                                    NfcReaderUiState.Detecting -> stringResource(R.string.nfc_status_detecting)
+                                    NfcReaderUiState.Received -> stringResource(R.string.nfc_status_received)
+                                }
+                            val nfcStatusColor =
+                                if (nfcReaderState == NfcReaderUiState.Detecting) {
+                                    BitcoinOrange
+                                } else {
+                                    SuccessGreen
+                                }
+                            NfcStatusIndicator(
+                                label = nfcStatusLabel,
+                                contentDescription = nfcStatusLabel,
+                                modifier =
+                                    Modifier
+                                        .align(Alignment.BottomCenter)
+                                        .padding(bottom = 2.dp),
+                                color = nfcStatusColor,
+                            )
+                        }
                     }
                 }
             }
@@ -393,11 +432,11 @@ fun LiquidBalanceScreen(
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
                         LiquidTransactionFilterButton(
-                            icon = Icons.Default.SwapHoriz,
-                            contentDescription = "Filter swaps",
-                            tint = BitcoinOrange,
-                            isSelected = showSwapTransactions,
-                            onClick = { showSwapTransactions = !showSwapTransactions },
+                            icon = Icons.Default.WaterDrop,
+                            contentDescription = "Filter Liquid transactions",
+                            tint = LiquidTeal,
+                            isSelected = showLiquidTransactions,
+                            onClick = { showLiquidTransactions = !showLiquidTransactions },
                         )
                         LiquidTransactionFilterButton(
                             icon = Icons.Default.Bolt,
@@ -407,11 +446,11 @@ fun LiquidBalanceScreen(
                             onClick = { showLightningTransactions = !showLightningTransactions },
                         )
                         LiquidTransactionFilterButton(
-                            icon = Icons.Default.WaterDrop,
-                            contentDescription = "Filter Liquid transactions",
-                            tint = LiquidTeal,
-                            isSelected = showLiquidTransactions,
-                            onClick = { showLiquidTransactions = !showLiquidTransactions },
+                            icon = Icons.Default.SwapHoriz,
+                            contentDescription = "Filter swaps",
+                            tint = BitcoinOrange,
+                            isSelected = showSwapTransactions,
+                            onClick = { showSwapTransactions = !showSwapTransactions },
                         )
                         if (hasUsdtTransactions) {
                             LiquidTransactionTextFilterButton(
@@ -859,6 +898,9 @@ private fun LiquidTransactionDetailDialog(
     var copiedSwapField by remember { mutableStateOf<String?>(null) }
     var swapDetailsExpanded by remember { mutableStateOf(false) }
     var lightningAdvancedExpanded by remember { mutableStateOf(false) }
+    val swapDetailsBringIntoViewRequester = rememberBringIntoViewRequesterOnExpand(swapDetailsExpanded, "liquid_balance_swap_details")
+    val lightningAdvancedBringIntoViewRequester =
+        rememberBringIntoViewRequesterOnExpand(lightningAdvancedExpanded, "liquid_balance_lightning_advanced")
     var isEditingLabel by remember { mutableStateOf(false) }
     var labelText by remember(effectiveLabel) { mutableStateOf(effectiveLabel.orEmpty()) }
     var showTorBrowserError by remember { mutableStateOf(false) }
@@ -1644,36 +1686,38 @@ private fun LiquidTransactionDetailDialog(
                             }
 
                             if (lightningAdvancedExpanded) {
-                                Spacer(modifier = Modifier.height(8.dp))
-                                if (details.depositAddress.isNotBlank()) {
+                                Column(modifier = Modifier.bringIntoViewRequester(lightningAdvancedBringIntoViewRequester)) {
                                     Spacer(modifier = Modifier.height(8.dp))
-                                    SwapDetailCopyRow(
-                                        label = if (isReceive) "Claim Address" else "Lockup Address",
-                                        value = details.depositAddress,
-                                        copyLabel = if (isReceive) "Claim Address" else "Lockup Address",
-                                        copied = copiedSwapField == "lightning_deposit_address",
-                                        onCopy = {
-                                            SecureClipboard.copyAndScheduleClear(
-                                                context,
-                                                if (isReceive) "Claim Address" else "Lockup Address",
-                                                details.depositAddress,
-                                            )
-                                            copiedSwapField = "lightning_deposit_address"
-                                        },
-                                    )
-                                }
-                                details.refundAddress?.let { refundAddress ->
-                                    Spacer(modifier = Modifier.height(10.dp))
-                                    SwapDetailCopyRow(
-                                        label = "Refund Address",
-                                        value = refundAddress,
-                                        copyLabel = "Refund Address",
-                                        copied = copiedSwapField == "lightning_refund_address",
-                                        onCopy = {
-                                            SecureClipboard.copyAndScheduleClear(context, "Refund Address", refundAddress)
-                                            copiedSwapField = "lightning_refund_address"
-                                        },
-                                    )
+                                    if (details.depositAddress.isNotBlank()) {
+                                        Spacer(modifier = Modifier.height(8.dp))
+                                        SwapDetailCopyRow(
+                                            label = if (isReceive) "Claim Address" else "Lockup Address",
+                                            value = details.depositAddress,
+                                            copyLabel = if (isReceive) "Claim Address" else "Lockup Address",
+                                            copied = copiedSwapField == "lightning_deposit_address",
+                                            onCopy = {
+                                                SecureClipboard.copyAndScheduleClear(
+                                                    context,
+                                                    if (isReceive) "Claim Address" else "Lockup Address",
+                                                    details.depositAddress,
+                                                )
+                                                copiedSwapField = "lightning_deposit_address"
+                                            },
+                                        )
+                                    }
+                                    details.refundAddress?.let { refundAddress ->
+                                        Spacer(modifier = Modifier.height(10.dp))
+                                        SwapDetailCopyRow(
+                                            label = "Refund Address",
+                                            value = refundAddress,
+                                            copyLabel = "Refund Address",
+                                            copied = copiedSwapField == "lightning_refund_address",
+                                            onCopy = {
+                                                SecureClipboard.copyAndScheduleClear(context, "Refund Address", refundAddress)
+                                                copiedSwapField = "lightning_refund_address"
+                                            },
+                                        )
+                                    }
                                 }
                                 details.invoice
                                     ?.takeIf { it.isNotBlank() && it != lightningPrimaryValue }
@@ -1896,78 +1940,80 @@ private fun LiquidTransactionDetailDialog(
                             }
 
                             if (swapDetailsExpanded) {
-                                Spacer(modifier = Modifier.height(8.dp))
-                                SwapDetailBadge(
-                                    text = swapProviderLabel(swapDetails.service),
-                                    accentColor = swapProviderColor(swapDetails.service),
-                                )
-                                Spacer(modifier = Modifier.height(8.dp))
-                                SwapDetailDirectionBadge(
-                                    direction = swapDetails.direction,
-                                )
-                                Spacer(modifier = Modifier.height(8.dp))
-                                SwapDetailCopyRow(
-                                    label = if (swapDetails.service == SwapService.BOLTZ) "Boltz Swap ID" else "SideSwap Order ID",
-                                    value = swapDetails.swapId,
-                                    copyLabel = "Swap ID",
-                                    copied = copiedSwapField == "swap_id",
-                                    onCopy = {
-                                        SecureClipboard.copyAndScheduleClear(context, "Swap ID", swapDetails.swapId)
-                                        copiedSwapField = "swap_id"
-                                    },
-                                )
-                                Spacer(modifier = Modifier.height(10.dp))
-                                SwapDetailCopyRow(
-                                    label = swapDepositLabel(swapDetails),
-                                    value = swapDetails.depositAddress,
-                                    copyLabel = "Swap Deposit Address",
-                                    amountText = swapPrimaryAmountText(swapDetails, useSats, privacyMode),
-                                    amountColor = swapPrimaryAmountColor(swapDetails.direction),
-                                    copied = copiedSwapField == "deposit_address",
-                                    onCopy = {
-                                        SecureClipboard.copyAndScheduleClear(
-                                            context,
-                                            "Swap Deposit Address",
-                                            swapDetails.depositAddress,
+                                Column(modifier = Modifier.bringIntoViewRequester(swapDetailsBringIntoViewRequester)) {
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    SwapDetailBadge(
+                                        text = swapProviderLabel(swapDetails.service),
+                                        accentColor = swapProviderColor(swapDetails.service),
+                                    )
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    SwapDetailDirectionBadge(
+                                        direction = swapDetails.direction,
+                                    )
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    SwapDetailCopyRow(
+                                        label = if (swapDetails.service == SwapService.BOLTZ) "Boltz Swap ID" else "SideSwap Order ID",
+                                        value = swapDetails.swapId,
+                                        copyLabel = "Swap ID",
+                                        copied = copiedSwapField == "swap_id",
+                                        onCopy = {
+                                            SecureClipboard.copyAndScheduleClear(context, "Swap ID", swapDetails.swapId)
+                                            copiedSwapField = "swap_id"
+                                        },
+                                    )
+                                    Spacer(modifier = Modifier.height(10.dp))
+                                    SwapDetailCopyRow(
+                                        label = swapDepositLabel(swapDetails),
+                                        value = swapDetails.depositAddress,
+                                        copyLabel = "Swap Deposit Address",
+                                        amountText = swapPrimaryAmountText(swapDetails, useSats, privacyMode),
+                                        amountColor = swapPrimaryAmountColor(swapDetails.direction),
+                                        copied = copiedSwapField == "deposit_address",
+                                        onCopy = {
+                                            SecureClipboard.copyAndScheduleClear(
+                                                context,
+                                                "Swap Deposit Address",
+                                                swapDetails.depositAddress,
+                                            )
+                                            copiedSwapField = "deposit_address"
+                                        },
+                                    )
+                                    swapDetails.receiveAddress?.let { receiveAddress ->
+                                        Spacer(modifier = Modifier.height(10.dp))
+                                        SwapDetailCopyRow(
+                                            label = swapReceiveLabel(swapDetails),
+                                            value = receiveAddress,
+                                            copyLabel = "Swap Destination Address",
+                                            amountText = swapExpectedReceiveText(swapDetails, useSats, privacyMode),
+                                            amountColor = swapExpectedReceiveColor(swapDetails.direction),
+                                            copied = copiedSwapField == "receive_address",
+                                            onCopy = {
+                                                SecureClipboard.copyAndScheduleClear(
+                                                    context,
+                                                    "Swap Destination Address",
+                                                    receiveAddress,
+                                                )
+                                                copiedSwapField = "receive_address"
+                                            },
                                         )
-                                        copiedSwapField = "deposit_address"
-                                    },
-                                )
-                                swapDetails.receiveAddress?.let { receiveAddress ->
-                                    Spacer(modifier = Modifier.height(10.dp))
-                                    SwapDetailCopyRow(
-                                        label = swapReceiveLabel(swapDetails),
-                                        value = receiveAddress,
-                                        copyLabel = "Swap Destination Address",
-                                        amountText = swapExpectedReceiveText(swapDetails, useSats, privacyMode),
-                                        amountColor = swapExpectedReceiveColor(swapDetails.direction),
-                                        copied = copiedSwapField == "receive_address",
-                                        onCopy = {
-                                            SecureClipboard.copyAndScheduleClear(
-                                                context,
-                                                "Swap Destination Address",
-                                                receiveAddress,
-                                            )
-                                            copiedSwapField = "receive_address"
-                                        },
-                                    )
-                                }
-                                swapDetails.refundAddress?.let { refundAddress ->
-                                    Spacer(modifier = Modifier.height(10.dp))
-                                    SwapDetailCopyRow(
-                                        label = "Refund Address",
-                                        value = refundAddress,
-                                        copyLabel = "Refund Address",
-                                        copied = copiedSwapField == "refund_address",
-                                        onCopy = {
-                                            SecureClipboard.copyAndScheduleClear(
-                                                context,
-                                                "Refund Address",
-                                                refundAddress,
-                                            )
-                                            copiedSwapField = "refund_address"
-                                        },
-                                    )
+                                    }
+                                    swapDetails.refundAddress?.let { refundAddress ->
+                                        Spacer(modifier = Modifier.height(10.dp))
+                                        SwapDetailCopyRow(
+                                            label = "Refund Address",
+                                            value = refundAddress,
+                                            copyLabel = "Refund Address",
+                                            copied = copiedSwapField == "refund_address",
+                                            onCopy = {
+                                                SecureClipboard.copyAndScheduleClear(
+                                                    context,
+                                                    "Refund Address",
+                                                    refundAddress,
+                                                )
+                                                copiedSwapField = "refund_address"
+                                            },
+                                        )
+                                    }
                                 }
                             }
                         }

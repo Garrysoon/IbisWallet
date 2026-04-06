@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.nfc.NdefMessage
 import android.nfc.NdefRecord
 import android.nfc.NfcAdapter
+import android.nfc.cardemulation.CardEmulation
 import android.nfc.Tag
 import android.nfc.tech.Ndef
 import android.nfc.tech.IsoDep
@@ -33,6 +34,9 @@ import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.ViewModelProvider
 import github.aeonbtc.ibiswallet.data.local.SecureStorage
+import github.aeonbtc.ibiswallet.nfc.NdefHostApduService
+import github.aeonbtc.ibiswallet.nfc.NfcReaderModeRequestRegistry
+import github.aeonbtc.ibiswallet.nfc.NfcRuntimeStatus
 import github.aeonbtc.ibiswallet.ui.IbisWalletApp
 import github.aeonbtc.ibiswallet.ui.screens.CalculatorScreen
 import github.aeonbtc.ibiswallet.ui.screens.LockScreen
@@ -93,8 +97,12 @@ class MainActivity : FragmentActivity() {
     // NFC peer-to-peer negotiation, which prevents two phones from communicating
     // when one uses HCE (broadcasting) and the other reads.
     private var nfcAdapter: NfcAdapter? = null
-    private var nfcReaderRequested = false
-    private var nfcReaderActive = false
+    private val nfcReaderRequests = NfcReaderModeRequestRegistry()
+    private val nfcHceRequests = NfcReaderModeRequestRegistry()
+    var isNfcReaderModeActive by mutableStateOf(false)
+        private set
+    var isPreferredHceServiceActive by mutableStateOf(false)
+        private set
 
     /**
      * NFC ReaderCallback — invoked on a background thread when a tag is detected.
@@ -102,7 +110,9 @@ class MainActivity : FragmentActivity() {
      * and posts it to the ViewModel on the main thread.
      */
     private val nfcReaderCallback = NfcAdapter.ReaderCallback { tag: Tag ->
+        NfcRuntimeStatus.markReaderTagDetected()
         val sendInput = readSendInputFromTag(tag) ?: return@ReaderCallback
+        NfcRuntimeStatus.markReaderPayloadReceived()
         runOnUiThread {
             walletViewModel.setPendingSendInput(sendInput)
         }
@@ -129,6 +139,7 @@ class MainActivity : FragmentActivity() {
         val isoDep = IsoDep.get(tag) ?: return null
 
         return try {
+            isoDep.timeout = maxOf(isoDep.timeout, 5_000)
             isoDep.connect()
 
             val selectAidResponse = transceiveSelectAid(isoDep)
@@ -244,40 +255,64 @@ class MainActivity : FragmentActivity() {
     private fun ByteArray.toHexString(): String = joinToString("") { "%02X".format(it) }
 
     /**
-     * Enable NFC reader mode so this activity can read NFC tags and HCE peers.
-     * Disables P2P negotiation so two phones (one broadcasting via HCE, one reading)
-     * can communicate. Called when Send/Balance screen becomes visible.
+     * Request NFC reader mode for a visible screen. Reader mode remains enabled until
+     * all screen owners release their request, so one screen disposing cannot disable
+     * another screen that still needs NFC.
      */
-    fun enableNfcReaderMode() {
-        nfcReaderRequested = true
+    fun requestNfcReaderMode(owner: Any) {
+        nfcReaderRequests.request(owner)
         activateNfcReaderMode()
     }
 
     /**
-     * Disable NFC reader mode. Called when Send/Balance screen is no longer visible.
+     * Release a previously registered NFC reader mode request.
      */
-    fun disableNfcReaderMode() {
-        nfcReaderRequested = false
-        deactivateNfcReaderMode()
+    fun releaseNfcReaderMode(owner: Any) {
+        nfcReaderRequests.release(owner)
+        if (!nfcReaderRequests.hasActiveRequests()) {
+            deactivateNfcReaderMode()
+        }
+    }
+
+    /**
+     * Prefer the Ibis HCE service while a receive screen is visible so Android routes
+     * incoming NFC taps to this app instead of any competing HCE service.
+     */
+    fun requestPreferredHceService(owner: Any) {
+        nfcHceRequests.request(owner)
+        activatePreferredHceService()
+    }
+
+    /**
+     * Release a previously registered HCE preference request.
+     */
+    fun releasePreferredHceService(owner: Any) {
+        nfcHceRequests.release(owner)
+        if (!nfcHceRequests.hasActiveRequests()) {
+            deactivatePreferredHceService()
+        }
     }
 
     private fun activateNfcReaderMode() {
-        if (nfcReaderActive) return
+        if (isNfcReaderModeActive || !nfcReaderRequests.hasActiveRequests()) return
 
         val nfcAvailability = getNfcAvailability(secureStorage.isNfcEnabled())
         if (!nfcAvailability.hasHardware || !nfcAvailability.isAppEnabled) {
-            nfcReaderActive = false
+            isNfcReaderModeActive = false
+            NfcRuntimeStatus.setReaderInactive()
             return
         }
         if (!nfcAvailability.isSystemEnabled) {
-            nfcReaderActive = false
+            isNfcReaderModeActive = false
+            NfcRuntimeStatus.setReaderInactive()
             Log.w(TAG, "NFC reader mode unavailable because system NFC is disabled")
             return
         }
 
         val adapter = nfcAdapter
         if (adapter == null) {
-            nfcReaderActive = false
+            isNfcReaderModeActive = false
+            NfcRuntimeStatus.setReaderInactive()
             Log.w(TAG, "NFC reader mode unavailable because the adapter could not be acquired")
             return
         }
@@ -289,19 +324,70 @@ class MainActivity : FragmentActivity() {
             NfcAdapter.FLAG_READER_NO_PLATFORM_SOUNDS
         try {
             adapter.enableReaderMode(this, nfcReaderCallback, flags, null)
-            nfcReaderActive = true
+            isNfcReaderModeActive = true
+            NfcRuntimeStatus.setReaderReady()
         } catch (e: Exception) {
-            nfcReaderActive = false
+            isNfcReaderModeActive = false
+            NfcRuntimeStatus.setReaderInactive()
             Log.w(TAG, "Failed to enable NFC reader mode", e)
         }
     }
 
     private fun deactivateNfcReaderMode() {
-        if (!nfcReaderActive) return
+        if (!isNfcReaderModeActive) return
         try {
             nfcAdapter?.disableReaderMode(this)
         } catch (_: Exception) { }
-        nfcReaderActive = false
+        isNfcReaderModeActive = false
+        NfcRuntimeStatus.setReaderInactive()
+    }
+
+    private fun activatePreferredHceService() {
+        if (isPreferredHceServiceActive || !nfcHceRequests.hasActiveRequests()) return
+
+        val adapter = nfcAdapter
+        if (adapter == null) {
+            isPreferredHceServiceActive = false
+            Log.w(TAG, "HCE preference unavailable because the NFC adapter could not be acquired")
+            return
+        }
+
+        val cardEmulation =
+            runCatching { CardEmulation.getInstance(adapter) }
+                .getOrNull()
+        if (cardEmulation == null) {
+            isPreferredHceServiceActive = false
+            Log.w(TAG, "HCE preference unavailable because CardEmulation is not supported")
+            return
+        }
+
+        val didSetPreferred =
+            runCatching {
+                cardEmulation.setPreferredService(
+                    this,
+                    ComponentName(this, NdefHostApduService::class.java),
+                )
+            }.getOrElse { error ->
+                Log.w(TAG, "Failed to prefer Ibis HCE service", error)
+                false
+            }
+
+        isPreferredHceServiceActive = didSetPreferred
+        if (!didSetPreferred) {
+            Log.w(TAG, "Android refused to prefer the Ibis HCE service")
+        }
+    }
+
+    private fun deactivatePreferredHceService() {
+        val adapter = nfcAdapter
+        if (adapter != null) {
+            runCatching {
+                CardEmulation.getInstance(adapter).unsetPreferredService(this)
+            }.onFailure { error ->
+                Log.w(TAG, "Failed to clear preferred Ibis HCE service", error)
+            }
+        }
+        isPreferredHceServiceActive = false
     }
 
     /**
@@ -488,12 +574,7 @@ class MainActivity : FragmentActivity() {
                                 showBiometricPrompt(isDuressWithBiometric)
                             },
                             isBiometricAvailable = isBiometricAvailable,
-                            storedPinLength =
-                                if (isDuressWithBiometric) {
-                                    secureStorage.getDuressPinLength()
-                                } else {
-                                    secureStorage.getStoredPinLength()
-                                },
+                            randomizePinPad = secureStorage.getRandomizePinPad(),
                             isDuressWithBiometric = isDuressWithBiometric,
                         )
                     }
@@ -505,10 +586,13 @@ class MainActivity : FragmentActivity() {
     override fun onResume() {
         super.onResume()
 
-        // Re-enable NFC reader mode if the Send/Balance screen requested it
-        // (Android requires disabling in onPause and re-enabling in onResume)
-        if (nfcReaderRequested) {
+        // Re-enable NFC reader mode if a visible screen still owns a request
+        // (Android requires disabling in onPause and re-enabling in onResume).
+        if (nfcReaderRequests.hasActiveRequests()) {
             activateNfcReaderMode()
+        }
+        if (nfcHceRequests.hasActiveRequests()) {
+            activatePreferredHceService()
         }
 
         val securityMethod = secureStorage.getSecurityMethod()
@@ -559,6 +643,7 @@ class MainActivity : FragmentActivity() {
     override fun onPause() {
         super.onPause()
         deactivateNfcReaderMode()
+        deactivatePreferredHceService()
     }
 
     override fun onStop() {

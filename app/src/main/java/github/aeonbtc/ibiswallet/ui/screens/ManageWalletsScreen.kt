@@ -95,6 +95,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.zIndex
+import github.aeonbtc.ibiswallet.ui.components.IbisConfirmDialog
 import github.aeonbtc.ibiswallet.ui.components.IbisButton
 import github.aeonbtc.ibiswallet.ui.components.ScrollableAlertDialog
 import github.aeonbtc.ibiswallet.ui.components.SquareToggle
@@ -193,18 +194,25 @@ fun ManageWalletsScreen(
     if (walletToDelete != null) {
         val isWatchOnly = walletToDelete?.isWatchOnly == true
         var confirmChecked by remember { mutableStateOf(false) }
-        ScrollableAlertDialog(
+        IbisConfirmDialog(
             onDismissRequest = {
                 walletToDelete = null
                 confirmChecked = false
             },
-            title = {
-                Text(
-                    if (isWatchOnly) "Remove Watch-Only Wallet" else "Delete Wallet",
-                    color = MaterialTheme.colorScheme.onBackground,
-                )
+            title = if (isWatchOnly) "Remove Watch-Only Wallet" else "Delete Wallet",
+            confirmText = if (isWatchOnly) "Remove" else "Delete",
+            confirmColor = if (isWatchOnly) BitcoinOrange else ErrorRed,
+            confirmEnabled = confirmChecked,
+            onConfirm = {
+                walletToDelete?.let { onDeleteWallet(it) }
+                walletToDelete = null
+                confirmChecked = false
             },
-            text = {
+            onDismissAction = {
+                walletToDelete = null
+                confirmChecked = false
+            },
+            body = {
                 Column {
                     Text(
                         if (isWatchOnly) {
@@ -247,35 +255,6 @@ fun ManageWalletsScreen(
                     }
                 }
             },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        walletToDelete?.let { onDeleteWallet(it) }
-                        walletToDelete = null
-                        confirmChecked = false
-                    },
-                    enabled = confirmChecked,
-                ) {
-                    Text(
-                        if (isWatchOnly) "Remove" else "Delete",
-                        color =
-                            if (confirmChecked) {
-                                if (isWatchOnly) BitcoinOrange else ErrorRed
-                            } else {
-                                TextSecondary.copy(alpha = 0.4f)
-                            },
-                    )
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = {
-                    walletToDelete = null
-                    confirmChecked = false
-                }) {
-                    Text("Cancel", color = TextSecondary)
-                }
-            },
-            containerColor = DarkSurface,
         )
     }
 
@@ -539,36 +518,15 @@ fun ManageWalletsScreen(
 
     // Full Sync confirmation dialog
     if (walletToSync != null) {
-        ScrollableAlertDialog(
+        IbisConfirmDialog(
             onDismissRequest = { walletToSync = null },
-            title = {
-                Text(
-                    "Full Sync",
-                    color = MaterialTheme.colorScheme.onBackground,
-                )
+            title = "Full Sync",
+            message = "This will rescan all addresses for transactions. Use this if missing transactions or after backup restore.",
+            confirmText = "Full Sync",
+            onConfirm = {
+                walletToSync?.let { onFullSync(it) }
+                walletToSync = null
             },
-            text = {
-                Text(
-                    "This will rescan all addresses for transactions. Use this if missing transactions or after backup restore.",
-                    color = TextSecondary,
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        walletToSync?.let { onFullSync(it) }
-                        walletToSync = null
-                    },
-                ) {
-                    Text("Full Sync", color = BitcoinOrange)
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { walletToSync = null }) {
-                    Text("Cancel", color = TextSecondary)
-                }
-            },
-            containerColor = DarkSurface,
         )
     }
 

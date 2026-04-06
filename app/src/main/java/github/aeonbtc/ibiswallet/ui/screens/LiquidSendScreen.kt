@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -37,7 +38,6 @@ import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
-import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -54,6 +54,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -71,6 +72,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalInspectionMode
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -82,6 +84,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.net.toUri
 import github.aeonbtc.ibiswallet.MainActivity
+import github.aeonbtc.ibiswallet.R
 import github.aeonbtc.ibiswallet.data.local.SecureStorage
 import github.aeonbtc.ibiswallet.data.model.LightningPaymentExecutionPlan
 import github.aeonbtc.ibiswallet.data.model.LiquidAsset
@@ -96,9 +99,11 @@ import github.aeonbtc.ibiswallet.data.model.Recipient
 import github.aeonbtc.ibiswallet.data.model.UtxoInfo
 import github.aeonbtc.ibiswallet.ui.components.AmountLabel
 import github.aeonbtc.ibiswallet.ui.components.IbisButton
+import github.aeonbtc.ibiswallet.ui.components.NfcStatusIndicator
 import github.aeonbtc.ibiswallet.ui.components.QrScannerDialog
 import github.aeonbtc.ibiswallet.ui.components.ScrollableDialogSurface
 import github.aeonbtc.ibiswallet.ui.components.formatFeeRate
+import github.aeonbtc.ibiswallet.ui.components.rememberBringIntoViewRequesterOnExpand
 import github.aeonbtc.ibiswallet.ui.theme.AccentRed
 import github.aeonbtc.ibiswallet.ui.theme.AccentTeal
 import github.aeonbtc.ibiswallet.ui.theme.BitcoinOrange
@@ -120,6 +125,8 @@ import github.aeonbtc.ibiswallet.util.getNfcAvailability
 import github.aeonbtc.ibiswallet.util.layer2RecipientValidationError
 import github.aeonbtc.ibiswallet.util.parseSendRecipient
 import github.aeonbtc.ibiswallet.viewmodel.SendScreenDraft
+import github.aeonbtc.ibiswallet.nfc.NfcReaderUiState
+import github.aeonbtc.ibiswallet.nfc.NfcRuntimeStatus
 import kotlinx.coroutines.delay
 import java.util.Locale
 import kotlin.math.abs
@@ -588,16 +595,20 @@ fun LiquidSendScreen(
     }
 
     val context = LocalContext.current
+    val mainActivity = context as? MainActivity
+    val nfcReaderOwner = remember { Any() }
     val isPreview = LocalInspectionMode.current
     val nfcAvailable = !isPreview && context.getNfcAvailability().canRead
-    DisposableEffect(nfcAvailable) {
-        if (nfcAvailable) {
-            (context as? MainActivity)?.enableNfcReaderMode()
+    DisposableEffect(mainActivity, nfcAvailable) {
+        if (mainActivity != null && nfcAvailable) {
+            mainActivity.requestNfcReaderMode(nfcReaderOwner)
         }
         onDispose {
-            (context as? MainActivity)?.disableNfcReaderMode()
+            mainActivity?.releaseNfcReaderMode(nfcReaderOwner)
         }
     }
+    val isNfcReaderActive = nfcAvailable && mainActivity?.isNfcReaderModeActive == true
+    val nfcReaderState by NfcRuntimeStatus.readerState.collectAsState()
 
     if (showCoinControl) {
         LiquidCoinControlDialog(
@@ -870,24 +881,27 @@ fun LiquidSendScreen(
                                 color = TextPrimary,
                             )
                         }
-                        if (nfcAvailable) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
+                        if (isNfcReaderActive) {
+                            val nfcStatusLabel =
+                                when (nfcReaderState) {
+                                    NfcReaderUiState.Inactive,
+                                    NfcReaderUiState.Ready,
+                                    -> stringResource(R.string.nfc_status_receive_ready)
+                                    NfcReaderUiState.Detecting -> stringResource(R.string.nfc_status_detecting)
+                                    NfcReaderUiState.Received -> stringResource(R.string.nfc_status_received)
+                                }
+                            val nfcStatusColor =
+                                if (nfcReaderState == NfcReaderUiState.Detecting) {
+                                    BitcoinOrange
+                                } else {
+                                    SuccessGreen
+                                }
+                            NfcStatusIndicator(
+                                label = nfcStatusLabel,
+                                contentDescription = nfcStatusLabel,
                                 modifier = Modifier.padding(top = 2.dp),
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Sensors,
-                                    contentDescription = "NFC reading",
-                                    tint = SuccessGreen,
-                                    modifier = Modifier.size(14.dp),
-                                )
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text(
-                                    text = "NFC",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = SuccessGreen,
-                                )
-                            }
+                                color = nfcStatusColor,
+                            )
                         }
                     }
 
@@ -3548,6 +3562,7 @@ private fun PendingPaymentsCard(
 ) {
     val expandedItems = remember { mutableStateMapOf<String, Boolean>() }
     var showRescueKeyDialog by rememberSaveable { mutableStateOf(false) }
+    val cardBringIntoViewRequester = rememberBringIntoViewRequesterOnExpand(expanded, "pending_payments_card")
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -3586,10 +3601,16 @@ private fun PendingPaymentsCard(
                 enter = expandVertically(),
                 exit = shrinkVertically(),
             ) {
-                Column(modifier = Modifier.padding(top = 12.dp)) {
+                Column(
+                    modifier = Modifier
+                        .padding(top = 12.dp)
+                        .bringIntoViewRequester(cardBringIntoViewRequester),
+                ) {
                     if (pendingSubmarineSwap != null) {
                         val swapKey = "ln_${pendingSubmarineSwap.swapId}"
                         val swapExpanded = expandedItems[swapKey] ?: (pendingCount == 1)
+                        val swapBringIntoViewRequester =
+                            rememberBringIntoViewRequesterOnExpand(swapExpanded, "pending_lightning_$swapKey")
                         PendingItemHeader(
                             badgeLabel = "Lightning",
                             badgeColor = LightningYellow,
@@ -3603,13 +3624,15 @@ private fun PendingPaymentsCard(
                             enter = expandVertically(),
                             exit = shrinkVertically(),
                         ) {
-                            PendingLightningPaymentDetails(
-                                session = pendingSubmarineSwap,
-                                boltzRescueMnemonic = boltzRescueMnemonic,
-                                privacyMode = privacyMode,
-                                useSats = useSats,
-                                onShowRescueKey = { showRescueKeyDialog = true },
-                            )
+                            Column(modifier = Modifier.bringIntoViewRequester(swapBringIntoViewRequester)) {
+                                PendingLightningPaymentDetails(
+                                    session = pendingSubmarineSwap,
+                                    boltzRescueMnemonic = boltzRescueMnemonic,
+                                    privacyMode = privacyMode,
+                                    useSats = useSats,
+                                    onShowRescueKey = { showRescueKeyDialog = true },
+                                )
+                            }
                         }
                         if (pendingLiquidTxs.isNotEmpty()) {
                             Spacer(modifier = Modifier.height(8.dp))
@@ -3621,6 +3644,8 @@ private fun PendingPaymentsCard(
                     pendingLiquidTxs.forEachIndexed { index, tx ->
                         val txKey = "lbtc_${tx.txid}"
                         val txExpanded = expandedItems[txKey] ?: (pendingCount == 1)
+                        val txBringIntoViewRequester =
+                            rememberBringIntoViewRequesterOnExpand(txExpanded, "pending_liquid_$txKey")
                         PendingItemHeader(
                             badgeLabel = "Liquid",
                             badgeColor = LiquidTeal,
@@ -3633,11 +3658,13 @@ private fun PendingPaymentsCard(
                             enter = expandVertically(),
                             exit = shrinkVertically(),
                         ) {
-                            PendingLiquidTxDetails(
-                                tx = tx,
-                                privacyMode = privacyMode,
-                                useSats = useSats,
-                            )
+                            Column(modifier = Modifier.bringIntoViewRequester(txBringIntoViewRequester)) {
+                                PendingLiquidTxDetails(
+                                    tx = tx,
+                                    privacyMode = privacyMode,
+                                    useSats = useSats,
+                                )
+                            }
                         }
                         if (index < pendingLiquidTxs.lastIndex) {
                             Spacer(modifier = Modifier.height(8.dp))
@@ -3730,15 +3757,6 @@ private fun PendingLightningPaymentDetails(
     onShowRescueKey: () -> Unit,
 ) {
     Column(modifier = Modifier.padding(start = 4.dp, top = 4.dp)) {
-        if (session.status.isNotBlank()) {
-            Text(
-                text = session.status,
-                style = MaterialTheme.typography.bodySmall,
-                color = TextSecondary,
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-        }
-
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -3748,7 +3766,7 @@ private fun PendingLightningPaymentDetails(
                 Text(
                     text = if (privacyMode) LIQUID_HIDDEN_AMOUNT
                     else formatLiquidAmount(session.lockupAmountSats, useSats),
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = MaterialTheme.typography.titleMedium,
                     color = BitcoinOrange,
                 )
             }
@@ -3758,32 +3776,57 @@ private fun PendingLightningPaymentDetails(
                     Text(
                         text = if (privacyMode) LIQUID_HIDDEN_AMOUNT
                         else formatLiquidAmount(session.paymentAmountSats, useSats),
-                        style = MaterialTheme.typography.bodyMedium,
+                        style = MaterialTheme.typography.titleMedium,
                         color = LiquidTeal,
                     )
                 }
             }
         }
 
-        if (session.swapFeeSats > 0 && !privacyMode) {
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = "Swap fee: ${formatLiquidAmount(session.swapFeeSats, useSats)}",
-                style = MaterialTheme.typography.labelSmall,
-                color = TextSecondary,
-            )
+        if (session.status.isNotBlank() || (session.swapFeeSats > 0 && !privacyMode) || boltzRescueMnemonic != null) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.Bottom,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    if (session.status.isNotBlank()) {
+                        Text(
+                            text = session.status,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = TextSecondary,
+                        )
+                    }
+                    if (session.swapFeeSats > 0 && !privacyMode) {
+                        Text(
+                            text = "Swap fee: ${formatLiquidAmount(session.swapFeeSats, useSats)}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = TextSecondary,
+                        )
+                    }
+                }
+                if (boltzRescueMnemonic != null) {
+                    Spacer(modifier = Modifier.width(8.dp))
+                    OutlinedButton(
+                        onClick = onShowRescueKey,
+                        modifier = Modifier.height(32.dp),
+                        shape = RoundedCornerShape(8.dp),
+                        border = BorderStroke(1.dp, BorderColor),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                    ) {
+                        Text(
+                            text = "Rescue Key",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = TextPrimary,
+                        )
+                    }
+                }
+            }
         }
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        if (boltzRescueMnemonic != null) {
-            PendingDetailRowWithAction(
-                value = session.swapId,
-                onActionClick = onShowRescueKey,
-            )
-        } else {
-            PendingDetailRow(label = "Boltz Swap ID", value = session.swapId)
-        }
+        PendingDetailRow(label = "Boltz Swap ID", value = session.swapId)
 
         PendingDetailRow(label = "Lockup Address", value = session.lockupAddress)
         PendingDetailRow(label = "Refund Address", value = session.refundAddress)
@@ -3852,123 +3895,44 @@ private fun PendingDetailRow(
             .fillMaxWidth()
             .padding(vertical = 4.dp),
     ) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.bodyMedium,
-            color = TextSecondary,
-        )
-        Spacer(modifier = Modifier.height(4.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(
-                text = truncatePendingValue(value),
-                style = MaterialTheme.typography.bodyMedium,
-                color = TextPrimary,
-                modifier = Modifier.weight(1f),
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-            IconButton(
-                onClick = {
-                    SecureClipboard.copyAndScheduleClear(context, "Boltz Swap ID", value)
-                    showCopied = true
-                },
-                modifier = Modifier.size(36.dp),
-            ) {
-                Icon(
-                    imageVector = Icons.Default.ContentCopy,
-                    contentDescription = "Copy Boltz Swap ID",
-                    tint = LiquidTeal,
-                    modifier = Modifier.size(18.dp),
-                )
-            }
-        }
-        if (showCopied) {
-            Text(
-                text = "Copied to clipboard!",
-                style = MaterialTheme.typography.labelSmall,
-                color = LiquidTeal,
-            )
-        }
-    }
-}
-
-@Composable
-private fun PendingDetailRowWithAction(
-    value: String,
-    onActionClick: () -> Unit,
-) {
-    val context = LocalContext.current
-    var showCopied by remember { mutableStateOf(false) }
-
-    LaunchedEffect(showCopied, value) {
-        if (!showCopied) return@LaunchedEffect
-        delay(1_500)
-        showCopied = false
-    }
-
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp),
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Text(
-                text = "Boltz Swap ID",
-                style = MaterialTheme.typography.bodyMedium,
-                color = TextSecondary,
-                modifier = Modifier.weight(1f),
-            )
-            OutlinedButton(
-                onClick = onActionClick,
-                modifier = Modifier.height(32.dp),
-                shape = RoundedCornerShape(8.dp),
-                border = BorderStroke(1.dp, BorderColor),
-                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
-            ) {
+            Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = "Rescue Key",
-                    style = MaterialTheme.typography.labelMedium,
+                    text = label,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = TextSecondary,
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = truncatePendingValue(value),
+                    style = MaterialTheme.typography.bodyMedium,
                     color = TextPrimary,
                 )
             }
-        }
-        Spacer(modifier = Modifier.height(4.dp))
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                text = truncatePendingValue(value),
-                style = MaterialTheme.typography.bodyMedium,
-                color = TextPrimary,
-                modifier = Modifier.weight(1f),
-            )
             Spacer(modifier = Modifier.width(8.dp))
             IconButton(
                 onClick = {
-                    SecureClipboard.copyAndScheduleClear(context, "Boltz Swap ID", value)
+                    SecureClipboard.copyAndScheduleClear(context, label, value)
                     showCopied = true
                 },
                 modifier = Modifier.size(36.dp),
             ) {
                 Icon(
                     imageVector = Icons.Default.ContentCopy,
-                    contentDescription = "Copy Boltz Swap ID",
+                    contentDescription = "Copy $label",
                     tint = LiquidTeal,
                     modifier = Modifier.size(18.dp),
                 )
             }
         }
         if (showCopied) {
+            Spacer(modifier = Modifier.height(4.dp))
             Text(
                 text = "Copied to clipboard!",
-                style = MaterialTheme.typography.labelSmall,
+                style = MaterialTheme.typography.bodySmall,
                 color = LiquidTeal,
             )
         }
@@ -4015,7 +3979,7 @@ private fun RescueMnemonicDialog(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
-                        text = "If swap fails, open Boltz rescue link and paste this 12-word key.",
+                        text = "If swap fails, open Boltz rescue link and paste this 12-word seed.",
                         style = MaterialTheme.typography.bodySmall,
                         color = TextSecondary,
                         modifier = Modifier.weight(1f),

@@ -29,14 +29,17 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import github.aeonbtc.ibiswallet.R
 import github.aeonbtc.ibiswallet.data.BtcPriceService
 import github.aeonbtc.ibiswallet.data.local.SecureStorage
 import github.aeonbtc.ibiswallet.tor.TorStatus
 import github.aeonbtc.ibiswallet.ui.components.SquareToggle
 import github.aeonbtc.ibiswallet.ui.theme.*
+import github.aeonbtc.ibiswallet.util.WalletNotificationDeliveryState
 import kotlinx.coroutines.delay
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -47,7 +50,11 @@ fun SettingsScreen(
     spendUnconfirmed: Boolean = true,
     onSpendUnconfirmedChange: (Boolean) -> Unit = {},
     walletNotificationsEnabled: Boolean = false,
+    walletNotificationDeliveryState: WalletNotificationDeliveryState =
+        WalletNotificationDeliveryState.APP_DISABLED,
     onWalletNotificationsEnabledChange: (Boolean) -> Unit = {},
+    foregroundConnectivityEnabled: Boolean = false,
+    onForegroundConnectivityEnabledChange: (Boolean) -> Unit = {},
     nfcEnabled: Boolean = true,
     onNfcEnabledChange: (Boolean) -> Unit = {},
     hasNfcHardware: Boolean = false,
@@ -104,7 +111,7 @@ fun SettingsScreen(
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // ── Card 1: Appearance & Display ──
+        // ── Card 1: General ──
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(12.dp),
@@ -117,7 +124,7 @@ fun SettingsScreen(
                         .padding(16.dp),
             ) {
                 Text(
-                    text = "Display",
+                    text = "General",
                     style = MaterialTheme.typography.titleMedium,
                     color = BitcoinOrange,
                 )
@@ -173,59 +180,12 @@ fun SettingsScreen(
                                 },
                             )
                         },
-                        checkedColor = TextSecondary,
-                        uncheckedColor = TextSecondary.copy(alpha = 0.3f),
-                        uncheckedBorderColor = TextSecondary,
-                        uncheckedThumbColor = TextSecondary,
+                        checkedColor = BitcoinOrange,
+                        uncheckedColor = BitcoinOrange.copy(alpha = 0.18f),
+                        uncheckedBorderColor = BitcoinOrange,
+                        uncheckedThumbColor = BitcoinOrange,
                     )
                 }
-
-                Spacer(modifier = Modifier.height(12.dp))
-
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = Icons.Default.SwapHoriz,
-                        contentDescription = null,
-                        tint = BitcoinOrange,
-                        modifier = Modifier.size(20.dp),
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "Swipe Navigation",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = TextSecondary,
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(4.dp))
-
-                SwipeModeDropdown(
-                    currentMode = currentSwipeMode,
-                    onModeSelected = onSwipeModeChange,
-                    isLiquidAvailable = isLiquidAvailable,
-                )
-            }
-        }
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        // ── Card 2: Transaction Settings ──
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(12.dp),
-            colors = CardDefaults.cardColors(containerColor = DarkCard),
-        ) {
-            Column(
-                modifier =
-                    Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
-            ) {
-                Text(
-                    text = "Transactions",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = BitcoinOrange,
-                )
 
                 Spacer(modifier = Modifier.height(12.dp))
 
@@ -233,8 +193,8 @@ fun SettingsScreen(
                     when {
                         !hasNfcHardware -> "Not available on this device"
                         !isSystemNfcEnabled -> "Turn on NFC in Android settings"
-                        !supportsNfcBroadcast -> "Enable NFC reading (broadcast unsupported)"
-                        else -> "Enable NFC reading and broadcast"
+                        !supportsNfcBroadcast -> "Enable NFC read only"
+                        else -> "Enable NFC read + share"
                     }
 
                 Row(
@@ -270,6 +230,23 @@ fun SettingsScreen(
 
                 Spacer(modifier = Modifier.height(12.dp))
 
+                val walletNotificationsSubtitle =
+                    when (walletNotificationDeliveryState) {
+                        WalletNotificationDeliveryState.PERMISSION_REQUIRED ->
+                            stringResource(R.string.wallet_notifications_subtitle_permission_required)
+                        WalletNotificationDeliveryState.SYSTEM_DISABLED ->
+                            stringResource(R.string.wallet_notifications_subtitle_android_blocked)
+                        else ->
+                            stringResource(R.string.wallet_notifications_subtitle_default)
+                    }
+                val walletNotificationsSubtitleColor =
+                    when (walletNotificationDeliveryState) {
+                        WalletNotificationDeliveryState.PERMISSION_REQUIRED,
+                        WalletNotificationDeliveryState.SYSTEM_DISABLED,
+                        -> ErrorRed
+                        else -> TextSecondary
+                    }
+
                 Row(
                     modifier =
                         Modifier
@@ -291,13 +268,47 @@ fun SettingsScreen(
                         )
                         Spacer(modifier = Modifier.width(12.dp))
                         ToggleOptionText(
-                            title = "Push Notifications",
-                            subtitle = "Notifications for wallet activity",
+                            title = stringResource(R.string.wallet_notifications_title),
+                            subtitle = walletNotificationsSubtitle,
+                            subtitleColor = walletNotificationsSubtitleColor,
                         )
                     }
                     SquareToggle(
                         checked = walletNotificationsEnabled,
                         onCheckedChange = onWalletNotificationsEnabledChange,
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Row(
+                    modifier =
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable { onForegroundConnectivityEnabledChange(!foregroundConnectivityEnabled) },
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Language,
+                            contentDescription = null,
+                            tint = BitcoinOrange,
+                            modifier = Modifier.size(24.dp),
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        ToggleOptionText(
+                            title = stringResource(R.string.foreground_connectivity_title),
+                            subtitle = stringResource(R.string.foreground_connectivity_subtitle),
+                        )
+                    }
+                    SquareToggle(
+                        checked = foregroundConnectivityEnabled,
+                        onCheckedChange = onForegroundConnectivityEnabledChange,
                     )
                 }
 
@@ -345,6 +356,31 @@ fun SettingsScreen(
                         onCheckedChange = if (hasNfcHardware) onNfcEnabledChange else { _ -> },
                     )
                 }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.SwapHoriz,
+                        contentDescription = null,
+                        tint = BitcoinOrange,
+                        modifier = Modifier.size(20.dp),
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Swipe Navigation",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = TextSecondary,
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(4.dp))
+
+                SwipeModeDropdown(
+                    currentMode = currentSwipeMode,
+                    onModeSelected = onSwipeModeChange,
+                    isLiquidAvailable = isLiquidAvailable,
+                )
             }
         }
 
@@ -614,6 +650,8 @@ fun SettingsScreen(
 fun Layer2OptionsScreen(
     layer2Enabled: Boolean = false,
     onLayer2EnabledChange: (Boolean) -> Unit = {},
+    currentDenomination: String = SecureStorage.DENOMINATION_BTC,
+    onDenominationChange: (String) -> Unit = {},
     currentBoltzApiSource: String = SecureStorage.BOLTZ_API_DISABLED,
     onBoltzApiSourceChange: (String) -> Unit = {},
     currentSideSwapApiSource: String = SecureStorage.SIDESWAP_API_DISABLED,
@@ -660,6 +698,14 @@ fun Layer2OptionsScreen(
         Layer2OptionsCard(
             layer2Enabled = layer2Enabled,
             onLayer2EnabledChange = onLayer2EnabledChange,
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Layer2DisplayCard(
+            layer2Enabled = layer2Enabled,
+            currentDenomination = currentDenomination,
+            onDenominationChange = onDenominationChange,
         )
 
         if (layer2Enabled) {
@@ -742,6 +788,98 @@ private fun Layer2OptionsCard(
                     checked = false,
                     onCheckedChange = { /* disabled */ },
                     enabled = false,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun Layer2DisplayCard(
+    layer2Enabled: Boolean,
+    currentDenomination: String,
+    onDenominationChange: (String) -> Unit,
+) {
+    val isSats = currentDenomination == SecureStorage.DENOMINATION_SATS
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = DarkCard),
+    ) {
+        Column(
+            modifier =
+                Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+        ) {
+            Text(
+                text = "General",
+                style = MaterialTheme.typography.titleMedium,
+                color = BitcoinOrange,
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Row(
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .then(
+                            if (layer2Enabled) {
+                                Modifier.clickable {
+                                    onDenominationChange(
+                                        if (!isSats) {
+                                            SecureStorage.DENOMINATION_SATS
+                                        } else {
+                                            SecureStorage.DENOMINATION_BTC
+                                        },
+                                    )
+                                }
+                            } else {
+                                Modifier
+                            },
+                        ),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.CurrencyBitcoin,
+                        contentDescription = null,
+                        tint = BitcoinOrange,
+                        modifier = Modifier.size(24.dp),
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    ToggleOptionText(
+                        title = if (isSats) "Sats" else "BTC",
+                        subtitle = if (isSats) {
+                            "Layer 2 amounts shown in satoshis"
+                        } else {
+                            "Layer 2 amounts shown in bitcoin"
+                        },
+                    )
+                }
+                SquareToggle(
+                    checked = isSats,
+                    onCheckedChange = { useSats ->
+                        onDenominationChange(
+                            if (useSats) {
+                                SecureStorage.DENOMINATION_SATS
+                            } else {
+                                SecureStorage.DENOMINATION_BTC
+                            },
+                        )
+                    },
+                    enabled = layer2Enabled,
+                    checkedColor = BitcoinOrange,
+                    uncheckedColor = BitcoinOrange.copy(alpha = 0.18f),
+                    uncheckedBorderColor = BitcoinOrange,
+                    uncheckedThumbColor = BitcoinOrange,
                 )
             }
         }
