@@ -71,5 +71,6 @@ Open source. See [LICENSE](LICENSE) for details.
 
 ## Disclaimer
 
-This wallet is proudly vibe-coded and audited by the current top frontier AI models.
-Yes, that is a flex and it is likely more secure and better engineered than most wallets out there.
+This wallet is vibe-coded and audited by today's top frontier AI models.
+
+Yes this is a flex, and it's likely more secure and better engineered than most wallets out there.
