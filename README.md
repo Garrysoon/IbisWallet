@@ -23,6 +23,7 @@ Designed for experienced users - no hand-holding, no training wheels.
 - **Batch Sending** - Send to multiple recipients in a single transaction
 - **BIP329 Labels** - Industry-standard wallet labels for transactions and addresses
 - **Transaction Search** - Search transaction history by date, amount, address, or label
+- **Built with** [BDK](https://bitcoindevkit.org/)
 
 ### Layer 2 — Liquid Network (Ark coming soon)
 - **Modular Integration** - Enable or disable Liquid for each wallet
@@ -34,6 +35,7 @@ Designed for experienced users - no hand-holding, no training wheels.
 - **Chain Swaps** - BTC ↔ L-BTC atomic swaps via Boltz or SideSwap
 - **Coin Control** - Select specific UTXOs for swaps and Lightning payments
 - **BIP329 Labels** - Label support for Liquid transactions
+- **Built with** [LWK](https://github.com/Blockstream/lwk)
 
 ### Privacy & Security
 - **Built-in Tor** - Native Tor integration, no need for Orbot or external proxies
@@ -51,7 +53,7 @@ Designed for experienced users - no hand-holding, no training wheels.
 ### Backup & Restore
 - **Full App Backup** - Backup and restore the entire app state including wallets, settings, and labels
 - **Encrypted Backups** - Back up wallets with AES-256 encryption 
-- **Built with** [BDK](https://bitcoindevkit.org/) and [LWK](https://github.com/Blockstream/lwk)
+
 ## Building
 
 Requires Android Studio with JDK 17.
@@ -71,6 +73,6 @@ Open source. See [LICENSE](LICENSE) for details.
 
 ## Disclaimer
 
-This wallet is vibe-coded and audited by today's top frontier AI models.
+This wallet is mostly vibe-coded and audited by today's top frontier AI models.
 
-Yes this is a flex, and it's likely more secure and better engineered than most wallets out there.
+Yes this is a flex, it's also likely more secure and better engineered than most wallets out there.
