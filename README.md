@@ -41,9 +41,9 @@ Designed for experienced users - no hand-holding, no training wheels.
 - **Built-in Tor** - Native Tor integration, no need for Orbot or external proxies
 - **PIN & Biometrics** - With configurable lock timing
 - **Privacy Toggle** - Hide all wallet amounts and balances
-- **Individual Wallet Lock** - Lock specific wallets independently
-- **Duress PIN** - Configure a secondary PIN that opens a decoy wallet
-- **Auto-Wipe** - Set a threshold for failed unlock that automatically and irreversibly wipes all app data
+- **Wallet Locks** - Lock specific wallets independently
+- **Duress PIN** - Configure a duress PIN that opens a decoy wallet
+- **Auto-Wipe** - Set a threshold for failed unlocks that automatically and irreversibly wipes all app data
 - **Cloak Mode** - Disguise Ibis as a calculator app
 
 ### Connectivity & Servers
