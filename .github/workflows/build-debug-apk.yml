@@ -31,11 +31,14 @@ jobs:
       
     - name: Clean and build
       run: |
-        # Full clean - remove all build artifacts
+        # Aggressive clean - remove ALL build artifacts and caches
         rm -rf app/build
-        rm -rf ~/.gradle/caches/build-cache-*
-        # Build with no daemon and no cache
-        ./gradlew --no-daemon --no-build-cache :app:assembleDebug --stacktrace
+        rm -rf .gradle
+        rm -rf ~/.gradle
+        # Ensure fresh manifest processing
+        export ANDROID_DAILY_OVERRIDE=$(date +%s)
+        # Build with completely fresh state
+        ./gradlew --no-daemon --no-build-cache --rerun-tasks :app:assembleDebug --stacktrace
       
     - name: Upload Debug APK
       uses: actions/upload-artifact@v4
