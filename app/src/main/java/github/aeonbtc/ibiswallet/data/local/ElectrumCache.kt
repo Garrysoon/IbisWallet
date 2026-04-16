@@ -795,17 +795,25 @@ class ElectrumCache(context: Context) : SQLiteOpenHelper(
                         isSelfTransfer = cursor.getInt(cursor.getColumnIndexOrThrow(COL_IS_SELF_TRANSFER)) == 1,
                         cachedAt = cursor.getLong(cursor.getColumnIndexOrThrow(COL_CACHED_AT)),
                     )
-                    // Convert WalletTxDetails to TransactionDetails - this is simplified
-                    // The actual conversion depends on how TransactionDetails is structured
+                    // Convert WalletTxDetails to TransactionDetails
+                    val confirmationTime = if (details.confirmationHeight > 0) {
+                        ConfirmationTime(
+                            height = details.confirmationHeight.toULong(),
+                            timestamp = details.confirmationTimestamp
+                        )
+                    } else null
                     result[txid] = TransactionDetails(
                         txid = txid,
                         isConfirmed = true,
-                        confirmationHeight = details.confirmationHeight.toULong(),
-                        confirmationTimestamp = details.confirmationTimestamp,
-                        amountSats = details.amountSats.toULong(),
-                        feeSats = details.fee?.toULong(),
-                        address = details.address ?: "",
-                        direction = if (details.amountSats > 0) TransactionDirection.INCOMING else TransactionDirection.OUTGOING,
+                        confirmationTime = confirmationTime,
+                        timestamp = details.confirmationTimestamp,
+                        amountSats = details.amountSats, // Already Long
+                        fee = details.fee?.toULong(),
+                        weight = null, // Not in cache
+                        address = details.address,
+                        addressAmount = details.addressAmount?.toULong(),
+                        changeAddress = details.changeAddress,
+                        changeAmount = details.changeAmount?.toULong(),
                         isSelfTransfer = details.isSelfTransfer,
                     )
                 }
@@ -829,15 +837,15 @@ class ElectrumCache(context: Context) : SQLiteOpenHelper(
                 walletId = walletId,
                 descriptorKey = descriptorKey,
                 txid = tx.txid,
-                amountSats = tx.amountSats.toLong(),
-                fee = tx.feeSats?.toLong(),
-                weight = null, // Not available in TransactionDetails
-                confirmationHeight = tx.confirmationHeight?.toInt() ?: 0,
-                confirmationTimestamp = tx.confirmationTimestamp ?: 0,
+                amountSats = tx.amountSats, // Already Long
+                fee = tx.fee?.toLong(),
+                weight = tx.weight?.toInt(),
+                confirmationHeight = tx.confirmationTime?.height?.toInt() ?: 0,
+                confirmationTimestamp = tx.confirmationTime?.timestamp ?: 0,
                 address = tx.address,
-                addressAmount = null,
-                changeAddress = null,
-                changeAmount = null,
+                addressAmount = tx.addressAmount?.toLong(),
+                changeAddress = tx.changeAddress,
+                changeAmount = tx.changeAmount?.toLong(),
                 isSelfTransfer = tx.isSelfTransfer,
                 cachedAt = System.currentTimeMillis(),
             )
