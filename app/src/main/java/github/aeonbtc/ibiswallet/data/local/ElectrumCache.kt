@@ -798,8 +798,8 @@ class ElectrumCache(context: Context) : SQLiteOpenHelper(
                     // Convert WalletTxDetails to TransactionDetails
                     val confirmationTime = if (details.confirmationHeight > 0) {
                         ConfirmationTime(
-                            height = details.confirmationHeight.toULong(),
-                            timestamp = details.confirmationTimestamp
+                            height = details.confirmationHeight.toUInt(),
+                            timestamp = details.confirmationTimestamp.toULong()
                         )
                     } else null
                     result[txid] = TransactionDetails(
@@ -841,7 +841,7 @@ class ElectrumCache(context: Context) : SQLiteOpenHelper(
                 fee = tx.fee?.toLong(),
                 weight = tx.weight?.toInt(),
                 confirmationHeight = tx.confirmationTime?.height?.toInt() ?: 0,
-                confirmationTimestamp = tx.confirmationTime?.timestamp ?: 0,
+                confirmationTimestamp = tx.confirmationTime?.timestamp?.toLong() ?: 0,
                 address = tx.address,
                 addressAmount = tx.addressAmount?.toLong(),
                 changeAddress = tx.changeAddress,
