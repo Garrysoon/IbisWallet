@@ -25,4 +25,7 @@
     <string name="nfc_status_received">NFC Received</string>
     <string name="nfc_status_share_ready">NFC Share</string>
     <string name="nfc_status_sharing">NFC Sharing</string>
+    <!-- FIX: Permission strings for AndroidManifest.xml AAPT compatibility -->
+    <string name="permission_access_wallet_label">Access Ibis Wallet</string>
+    <string name="permission_access_wallet_description">Allows access to Ibis Wallet activities and services</string>
 </resources>

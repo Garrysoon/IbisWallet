@@ -3,10 +3,11 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <!-- SECURITY FIX: Custom permission to protect exported components from unauthorized access by malicious apps -->
+    <!-- FIX: Use @string references instead of inline text for AAPT compatibility -->
     <permission
         android:name="${applicationId}.permission.ACCESS_WALLET"
-        android:label="Access Ibis Wallet"
-        android:description="Allows access to Ibis Wallet activities and services"
+        android:label="@string/permission_access_wallet_label"
+        android:description="@string/permission_access_wallet_description"
         android:protectionLevel="normal" />
 
     <uses-permission android:name="android.permission.INTERNET" />
