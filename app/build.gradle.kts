@@ -144,10 +144,6 @@ dependencies {
     // HTTP Client
     implementation(libs.okhttp)
 
-    // SECURITY FIX: SQLCipher for encrypted database storage
-    // This encrypts the Electrum cache SQLite database at rest
-    implementation("net.zetetic:android-database-sqlcipher:4.5.4")
-
     // BC-UR (Uniform Resources) for animated QR codes (PSBT exchange with hardware wallets)
     implementation(libs.hummingbird)
 

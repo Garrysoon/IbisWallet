@@ -24,7 +24,7 @@
     <uses-feature android:name="android.hardware.nfc.hce" android:required="false" />
 
     <application
-        android:name=".IbisApplication"
+        android:name="android.app.Application"
         android:allowBackup="false"
         android:networkSecurityConfig="@xml/network_security_config"
         android:dataExtractionRules="@xml/data_extraction_rules"
