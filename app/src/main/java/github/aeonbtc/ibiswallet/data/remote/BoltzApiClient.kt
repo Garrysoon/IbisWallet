@@ -7,6 +7,7 @@ import github.aeonbtc.ibiswallet.data.boltz.boltzElapsedMs
 import github.aeonbtc.ibiswallet.data.boltz.boltzTraceStart
 import github.aeonbtc.ibiswallet.data.boltz.logBoltzTrace
 import github.aeonbtc.ibiswallet.data.model.BoltzFees
+import github.aeonbtc.ibiswallet.util.CertificatePinningConfig
 import github.aeonbtc.ibiswallet.data.model.BoltzLimits
 import github.aeonbtc.ibiswallet.data.model.BoltzPairInfo
 import github.aeonbtc.ibiswallet.data.model.BoltzSubmarineResponse
@@ -88,12 +89,15 @@ class BoltzApiClient(
     private val requestCounter = AtomicLong(0L)
 
     private fun httpClient(): OkHttpClient {
+        val builder = baseHttpClient.newBuilder()
+            // SECURITY FIX: Add certificate pinning to prevent MITM attacks
+            .certificatePinner(CertificatePinningConfig.createBoltzPinner())
         return if (useTor()) {
-            baseHttpClient.newBuilder()
+            builder
                 .proxy(Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", torSocksPort)))
                 .build()
         } else {
-            baseHttpClient
+            builder.build()
         }
     }
 
@@ -102,9 +106,12 @@ class BoltzApiClient(
      * pingInterval keeps the connection alive through mobile NATs/carriers
      * that drop idle TCP sockets. readTimeout is extended because swap
      * status updates can be minutes apart.
+     * SECURITY FIX: Includes certificate pinning for WebSocket connections.
      */
     private fun wsClient(): OkHttpClient {
         val builder = baseHttpClient.newBuilder()
+            // SECURITY FIX: Add certificate pinning to prevent MITM attacks on WebSocket
+            .certificatePinner(CertificatePinningConfig.createBoltzPinner())
             .pingInterval(30, TimeUnit.SECONDS)
             .readTimeout(0, TimeUnit.SECONDS)
         if (useTor()) {

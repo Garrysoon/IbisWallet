@@ -1,6 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
-    <!-- Cleartext permitted: Ibis only connects to user-configured servers
-         (Electrum, mempool instances). No arbitrary web content is loaded. -->
-    <base-config cleartextTrafficPermitted="true" />
+    <!-- SECURITY FIX: cleartext traffic is now disabled by default.
+         Only .onion domains (Tor hidden services) are allowed to use cleartext
+         because Tor provides transport-level encryption.
+         All clearnet connections MUST use SSL/TLS. -->
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system"/>
+        </trust-anchors>
+    </base-config>
+
+    <!-- Domain-specific exception for Tor hidden services (.onion addresses).
+         Tor provides transport-level authentication and encryption via:
+         - The .onion address itself is a public key commitment
+         - End-to-end encryption within Tor circuits
+         - Self-authenticating hidden service descriptors -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">.onion</domain>
+    </domain-config>
 </network-security-config>

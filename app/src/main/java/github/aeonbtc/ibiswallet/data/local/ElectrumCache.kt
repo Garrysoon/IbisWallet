@@ -2,13 +2,13 @@ package github.aeonbtc.ibiswallet.data.local
 
 import android.content.ContentValues
 import android.content.Context
-import android.database.sqlite.SQLiteDatabase
-import android.database.sqlite.SQLiteOpenHelper
 import android.util.Log
 import androidx.core.database.sqlite.transaction
 import github.aeonbtc.ibiswallet.BuildConfig
 import github.aeonbtc.ibiswallet.data.model.ConfirmationTime
 import github.aeonbtc.ibiswallet.data.model.TransactionDetails
+import net.sqlcipher.database.SQLiteDatabase
+import net.sqlcipher.database.SQLiteOpenHelper
 import java.io.File
 
 /**
@@ -28,18 +28,49 @@ import java.io.File
  * The cache is shared across all wallets — transaction data is wallet-agnostic.
  * Database file: `<databases>/electrum_cache.db`
  */
-class ElectrumCache(context: Context) : SQLiteOpenHelper(
+/**
+ * SECURITY FIX: SQLCipher encrypted database for Electrum cache.
+ * All transaction metadata and cached responses are encrypted at rest.
+ */
+class ElectrumCache(
+    context: Context,
+    passphrase: String = getDefaultPassphrase(context),
+) : SQLiteOpenHelper(
     context,
     DATABASE_NAME,
+    passphrase,
     null,
     DATABASE_VERSION,
+    0, // flags
+    null, // cursor factory
+    false, // enableWriteAheadLogging - explicitly disabled for SQLCipher compatibility
 ) {
     private val appContext = context.applicationContext
 
     companion object {
+        init {
+            // SECURITY FIX: Load SQLCipher native libraries
+            SQLiteDatabase.loadLibs(github.aeonbtc.ibiswallet.IbisApplication.context)
+        }
+
         private const val TAG = "ElectrumCache"
         private const val DATABASE_NAME = "electrum_cache.db"
-        private const val DATABASE_VERSION = 4
+        private const val DATABASE_VERSION = 5 // SECURITY FIX: Increment version for SQLCipher migration
+
+        /**
+         * SECURITY FIX: Generates a device-specific passphrase for database encryption.
+         * This uses Android ID combined with a static key to create a unique encryption key.
+         * Note: This provides basic encryption at rest. For higher security, consider
+         * using a key from Android Keystore via SecureStorage.
+         */
+        private fun getDefaultPassphrase(context: Context): String {
+            val androidId = android.provider.Settings.Secure.getString(
+                context.contentResolver,
+                android.provider.Settings.Secure.ANDROID_ID
+            ) ?: "default_fallback_key"
+            // Combine Android ID with app-specific salt for deterministic passphrase
+            return "ibis_cache_${androidId}_v1"
+        }
         private const val SQLITE_IN_CHUNK_SIZE = 900
         private const val SQLITE_DELETE_CHUNK_SIZE = 500
 
@@ -204,6 +235,18 @@ class ElectrumCache(context: Context) : SQLiteOpenHelper(
                 )
                 """.trimIndent(),
             )
+        }
+        // SECURITY FIX: Version 5 introduces SQLCipher encryption
+        // Previous unencrypted database is cleared and re-encrypted on upgrade
+        if (oldVersion < 5) {
+            // Clear old unencrypted data - will be re-downloaded and cached encrypted
+            db.execSQL("DROP TABLE IF EXISTS $TABLE_TX_RAW")
+            db.execSQL("DROP TABLE IF EXISTS $TABLE_TX_VERBOSE")
+            db.execSQL("DROP TABLE IF EXISTS $TABLE_SCRIPT_HASH_STATUSES")
+            db.execSQL("DROP TABLE IF EXISTS $TABLE_WALLET_TX_DETAILS")
+            db.execSQL("DROP TABLE IF EXISTS $TABLE_SCRIPT_HASH_HISTORY")
+            // Recreate tables in encrypted format
+            onCreate(db)
         }
     }
 

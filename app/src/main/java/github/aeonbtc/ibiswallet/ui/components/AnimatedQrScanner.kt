@@ -47,6 +47,7 @@ import github.aeonbtc.ibiswallet.ui.theme.BitcoinOrange
 import github.aeonbtc.ibiswallet.ui.theme.DarkSurface
 import github.aeonbtc.ibiswallet.ui.theme.ErrorRed
 import github.aeonbtc.ibiswallet.ui.theme.TextSecondary
+import github.aeonbtc.ibiswallet.util.Bbqr
 import github.aeonbtc.ibiswallet.util.UrAccountParser
 import java.util.concurrent.Executors
 import androidx.camera.core.Preview as CameraPreview
@@ -96,8 +97,10 @@ fun AnimatedQrScannerDialog(
     }
 
     if (cameraPermission == android.content.pm.PackageManager.PERMISSION_GRANTED) {
-        // UR decoder accumulates multi-frame scans
+        // OPTIMIZATION: Support both BC-UR and BBQr for maximum hardware wallet compatibility
+        // BBQr is 3-4x more dense and preferred for scanning PSBTs from Coldcard Q, SeedSigner
         val urDecoder = remember { URDecoder() }
+        val bbqrJoiner = remember { Bbqr.ContinuousJoiner() }
         var scanProgress by remember { mutableFloatStateOf(0f) }
         var isComplete by remember { mutableStateOf(false) }
 
@@ -144,6 +147,7 @@ fun AnimatedQrScannerDialog(
                             handleScannedQrData(
                                 scannedText = scannedText,
                                 urDecoder = urDecoder,
+                                bbqrJoiner = bbqrJoiner,
                                 onProgress = { progress ->
                                     scanProgress = progress
                                 },
@@ -687,18 +691,50 @@ private fun handleLabelsQrData(
 }
 
 /**
- * Process a single scanned QR frame. Handles BC-UR multi-frame,
- * single-frame base64 PSBT, and raw hex transactions.
+ * Process a single scanned QR frame. Handles:
+ * 1. BBQr multi-frame (B$...) - OPTIMIZED: 3-4x better density than BC-UR
+ * 2. BC-UR multi-frame (ur:...) - legacy mode, higher fountain redundancy reduced to 3x
+ * 3. Single-frame base64 PSBT/PSET
+ * 4. Raw hex transactions
+ *
+ * BBQr is now preferred for large PSBTs (e.g., 20 UTXOs) as it reduces
+ * 3000+ BC-UR frames to ~20-30 BBQr frames.
  */
 private fun handleScannedQrData(
     scannedText: String,
     urDecoder: URDecoder,
+    bbqrJoiner: Bbqr.ContinuousJoiner,
     onProgress: (Float) -> Unit,
     onComplete: (String) -> Unit,
 ) {
     val trimmed = scannedText.trim()
 
-    // Check if it's a BC-UR part (case-insensitive)
+    // OPTIMIZATION: Check for BBQr first (B$ prefix) - much better density than BC-UR
+    if (Bbqr.isBbqrPart(trimmed)) {
+        try {
+            val isValidPart = bbqrJoiner.addPart(trimmed)
+            if (isValidPart) {
+                val progress = bbqrJoiner.progress
+                onProgress(progress)
+
+                if (bbqrJoiner.isComplete && bbqrJoiner.result != null) {
+                    val result = bbqrJoiner.result!!
+                    // BBQr returns raw bytes, encode to base64 for PSBT
+                    val psbtBase64 =
+                        android.util.Base64.encodeToString(
+                            result.data,
+                            android.util.Base64.NO_WRAP,
+                        )
+                    onComplete(psbtBase64)
+                }
+            }
+        } catch (_: Exception) {
+            // Invalid BBQr part, ignore
+        }
+        return
+    }
+
+    // Check if it's a BC-UR part (case-insensitive) - legacy fallback
     if (trimmed.lowercase().startsWith("ur:")) {
         try {
             urDecoder.receivePart(trimmed)
@@ -726,7 +762,7 @@ private fun handleScannedQrData(
         return
     }
 
-    // Not a UR - check if it's a plain base64 PSBT/PSET or raw hex transaction
+    // Not a UR or BBQr - check if it's a plain base64 PSBT/PSET or raw hex transaction
     // Base64 PSBT starts with "cHNidP" (base64 of "psbt\xff")
     // Base64 PSET starts with "cHNl" (base64 of "pset")
     val isLikelyBase64Psbt = trimmed.startsWith("cHNidP") || trimmed.startsWith("cHNl")

@@ -3,6 +3,7 @@ package github.aeonbtc.ibiswallet.data.remote
 import android.util.Log
 import github.aeonbtc.ibiswallet.BuildConfig
 import github.aeonbtc.ibiswallet.data.model.SideSwapPegOrder
+import github.aeonbtc.ibiswallet.util.CertificatePinningConfig
 import github.aeonbtc.ibiswallet.data.model.SideSwapPegStatus
 import github.aeonbtc.ibiswallet.data.model.SideSwapPegTx
 import github.aeonbtc.ibiswallet.data.model.SideSwapServerStatus
@@ -60,9 +61,12 @@ class SideSwapApiClient(
 
     // OkHttpClient with 30s WebSocket ping to prevent idle disconnect
     // (SideSwap server drops connections after ~2 min of inactivity)
+    // SECURITY FIX: Includes certificate pinning to prevent MITM attacks.
     private fun wsClient(): OkHttpClient {
         val builder = httpClient.newBuilder()
             .pingInterval(30, TimeUnit.SECONDS)
+            // SECURITY FIX: Add certificate pinning to prevent MITM attacks
+            .certificatePinner(CertificatePinningConfig.createSideSwapPinner())
         if (useTor()) {
             builder.proxy(Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", torSocksPort)))
             // Force hostname resolution through SOCKS5 so Tor handles DNS remotely.
@@ -151,7 +155,8 @@ class SideSwapApiClient(
             if (json.has("error") && json.isNull("id")) {
                 val error = json.getJSONObject("error")
                 val message = error.optString("message", "SideSwap error")
-                Log.e(TAG, "SideSwap error (no id): $message")
+                // SECURITY FIX: Wrapped in BuildConfig.DEBUG to prevent logging sensitive error details in production
+                if (BuildConfig.DEBUG) Log.e(TAG, "SideSwap error (no id): $message")
                 failAllPending(Exception(message))
                 return
             }

@@ -22,14 +22,17 @@ import github.aeonbtc.ibiswallet.BuildConfig
 import github.aeonbtc.ibiswallet.R
 import github.aeonbtc.ibiswallet.ui.theme.DarkBackground
 import github.aeonbtc.ibiswallet.ui.theme.TextTertiary
-import kotlin.random.Random
+import java.security.SecureRandom
+import kotlin.random.asKotlinRandom
 
 private object LaunchArtworkPool {
+    // SECURITY FIX: Use SecureRandom instead of Random(System.currentTimeMillis()) for better randomness
+    private val secureRandom by lazy { SecureRandom() }
     private val shuffledArtworks by lazy {
         listOf(
             R.drawable.loading1,
             R.drawable.loading2,
-        ).shuffled(Random(System.currentTimeMillis()))
+        ).shuffled(secureRandom.asKotlinRandom())
     }
 
     val currentArtworkResId: Int

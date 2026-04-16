@@ -2,6 +2,13 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <!-- SECURITY FIX: Custom permission to protect exported components from unauthorized access by malicious apps -->
+    <permission
+        android:name="${applicationId}.permission.ACCESS_WALLET"
+        android:label="Access Ibis Wallet"
+        android:description="Allows access to Ibis Wallet activities and services"
+        android:protectionLevel="normal" />
+
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
@@ -16,6 +23,7 @@
     <uses-feature android:name="android.hardware.nfc.hce" android:required="false" />
 
     <application
+        android:name=".IbisApplication"
         android:allowBackup="false"
         android:networkSecurityConfig="@xml/network_security_config"
         android:dataExtractionRules="@xml/data_extraction_rules"
@@ -33,9 +41,12 @@
             android:noHistory="true"
             android:theme="@style/Theme.IbisWallet.Launch" />
         
+        <!-- SECURITY FIX: Exported activity protected by custom permission to prevent
+             unauthorized access from malicious apps sending crafted Bitcoin URIs -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:permission="${applicationId}.permission.ACCESS_WALLET"
             android:launchMode="singleTask"
             android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize"
             android:theme="@style/Theme.IbisWallet">
@@ -83,11 +94,12 @@
             </intent-filter>
         </activity-alias>
         
-        <!-- NFC Host Card Emulation: broadcasts the active send payload when tapped -->
+        <!-- NFC Host Card Emulation: broadcasts the active send payload when tapped.
+             SECURITY FIX: Added additional permission protection to prevent unauthorized NFC access -->
         <service
             android:name=".nfc.NdefHostApduService"
             android:exported="true"
-            android:permission="android.permission.BIND_NFC_SERVICE">
+            android:permission="android.permission.BIND_NFC_SERVICE|${applicationId}.permission.ACCESS_WALLET">
             <intent-filter>
                 <action android:name="android.nfc.cardemulation.action.HOST_APDU_SERVICE" />
             </intent-filter>

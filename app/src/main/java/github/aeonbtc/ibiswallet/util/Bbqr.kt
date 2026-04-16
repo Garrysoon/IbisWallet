@@ -17,6 +17,8 @@ object Bbqr {
 
     /** BBQr file type codes per spec */
     const val FILE_TYPE_JSON = 'J'
+    /** PSBT file type for Bitcoin transactions (BBQr spec compatible) */
+    const val FILE_TYPE_PSBT = 'P'
 
     /** Encoding mode codes per spec */
     const val ENCODING_HEX = 'H'

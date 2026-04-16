@@ -54,7 +54,16 @@ class CertificateFirstUseException(
  * 2. Catching CertificateMismatchException and showing a warning
  * 3. Storing the approved fingerprint via SecureStorage
  */
-@Suppress("CustomX509TrustManager")
+/**
+ * SECURITY NOTE: This is a custom X509TrustManager implementing TOFU (Trust-On-First-Use).
+ * This is INTENTIONAL and SECURE because:
+ * 1. We don't trust all certificates - we only trust the FIRST certificate seen for a server
+ * 2. Once a certificate is approved by the user, it's stored and must match for all future connections
+ * 3. .onion addresses bypass SSL validation because Tor provides transport-level authentication
+ * 4. Certificate changes trigger explicit user warnings (CertificateMismatchException)
+ * 
+ * This is the same approach used by SSH and other security-conscious applications.
+ */
 class TofuTrustManager(
     private val host: String,
     private val port: Int,
@@ -65,12 +74,13 @@ class TofuTrustManager(
     var presentedCertInfo: CertificateInfo? = null
         private set
 
-    @Suppress("TrustAllX509TrustManager")
     override fun checkClientTrusted(
         chain: Array<out X509Certificate>,
         authType: String,
     ) {
-        // Not used - we're only a client
+        // Client authentication is not used - this is a client-only implementation.
+        // If called, we reject all client certificates as we don't expect any.
+        throw CertificateException("Client certificate authentication is not supported")
     }
 
     override fun checkServerTrusted(
