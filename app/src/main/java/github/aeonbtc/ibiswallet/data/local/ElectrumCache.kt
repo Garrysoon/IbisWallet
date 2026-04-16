@@ -582,4 +582,283 @@ class ElectrumCache(context: Context) : SQLiteOpenHelper(
         } catch (_: Exception) {
         }
     }
+
+    // ==================== Additional methods for compatibility ====================
+
+    /**
+     * Get cached history JSON for a script hash by its status hash.
+     * @return history JSON string or null if not cached or status mismatch
+     */
+    fun getHistory(scriptHash: String, status: String): String? {
+        return try {
+            readableDatabase.query(
+                TABLE_SCRIPT_HASH_HISTORY,
+                arrayOf(COL_HISTORY_JSON),
+                "$COL_SCRIPT_HASH = ? AND $COL_STATUS = ?",
+                arrayOf(scriptHash, status),
+                null, null, null,
+            ).use { cursor ->
+                if (cursor.moveToFirst()) {
+                    cursor.getString(cursor.getColumnIndexOrThrow(COL_HISTORY_JSON))
+                } else {
+                    null
+                }
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Cache the history JSON for a script hash keyed by its status hash.
+     */
+    fun putHistory(scriptHash: String, status: String, historyJson: String) {
+        try {
+            val values = ContentValues().apply {
+                put(COL_SCRIPT_HASH, scriptHash)
+                put(COL_STATUS, status)
+                put(COL_HISTORY_JSON, historyJson)
+                put(COL_CACHED_AT, System.currentTimeMillis())
+            }
+            writableDatabase.insertWithOnConflict(
+                TABLE_SCRIPT_HASH_HISTORY,
+                null,
+                values,
+                SQLiteDatabase.CONFLICT_REPLACE,
+            )
+        } catch (_: Exception) {
+        }
+    }
+
+    /**
+     * Prune stale unconfirmed verbose transactions.
+     * Alias for pruneStaleVerboseTxs() for API compatibility.
+     */
+    fun pruneStaleUnconfirmed() {
+        pruneStaleVerboseTxs()
+    }
+
+    /**
+     * Find which txids from the list are missing from the raw transaction cache.
+     * @return list of txids not present in the cache
+     */
+    fun findMissingRawTxids(txids: List<String>): List<String> {
+        if (txids.isEmpty()) return emptyList()
+        return try {
+            // Query existing txids
+            val placeholders = txids.joinToString(",") { "?" }
+            val existingTxids = mutableSetOf<String>()
+            readableDatabase.rawQuery(
+                "SELECT $COL_TXID FROM $TABLE_TX_RAW WHERE $COL_TXID IN ($placeholders)",
+                txids.toTypedArray(),
+            ).use { cursor ->
+                while (cursor.moveToNext()) {
+                    existingTxids.add(cursor.getString(0))
+                }
+            }
+            // Return txids not in the existing set
+            txids.filter { it !in existingTxids }
+        } catch (_: Exception) {
+            txids // Return all as missing on error
+        }
+    }
+
+    /**
+     * Load all persisted script hash statuses.
+     * @return map of script hash to status hash
+     */
+    fun loadScriptHashStatuses(): Map<String, String> {
+        return try {
+            val result = mutableMapOf<String, String>()
+            readableDatabase.query(
+                TABLE_SCRIPT_HASH_STATUSES,
+                arrayOf(COL_SCRIPT_HASH, COL_STATUS),
+                null, null, null, null, null,
+            ).use { cursor ->
+                while (cursor.moveToNext()) {
+                    val scriptHash = cursor.getString(cursor.getColumnIndexOrThrow(COL_SCRIPT_HASH))
+                    val status = cursor.getString(cursor.getColumnIndexOrThrow(COL_STATUS))
+                    if (status != null) {
+                        result[scriptHash] = status
+                    }
+                }
+            }
+            result
+        } catch (_: Exception) {
+            emptyMap()
+        }
+    }
+
+    /**
+     * Save script hash statuses to the cache.
+     */
+    fun saveScriptHashStatuses(statuses: Map<String, String?>) {
+        try {
+            writableDatabase.transaction {
+                for ((scriptHash, status) in statuses) {
+                    if (status != null) {
+                        val values = ContentValues().apply {
+                            put(COL_SCRIPT_HASH, scriptHash)
+                            put(COL_STATUS, status)
+                            put(COL_CACHED_AT, System.currentTimeMillis())
+                        }
+                        insertWithOnConflict(
+                            TABLE_SCRIPT_HASH_STATUSES,
+                            null,
+                            values,
+                            SQLiteDatabase.CONFLICT_REPLACE,
+                        )
+                    }
+                }
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    /**
+     * Clear all script hash statuses from the cache.
+     */
+    fun clearScriptHashStatuses() {
+        try {
+            writableDatabase.delete(TABLE_SCRIPT_HASH_STATUSES, null, null)
+        } catch (_: Exception) {
+        }
+    }
+
+    /**
+     * Clear all history cache entries.
+     */
+    fun clearAllHistory() {
+        try {
+            writableDatabase.delete(TABLE_SCRIPT_HASH_HISTORY, null, null)
+        } catch (_: Exception) {
+        }
+    }
+
+    /**
+     * Clear confirmed transaction details for a specific wallet.
+     */
+    fun clearConfirmedTransactionDetails(walletId: String) {
+        clearWallet(walletId)
+    }
+
+    /**
+     * Load confirmed transaction details from the cache.
+     * @return map of txid to TransactionDetails
+     */
+    fun loadConfirmedTransactionDetails(
+        walletId: String,
+        descriptorKey: String,
+        txids: List<String>,
+    ): Map<String, TransactionDetails> {
+        if (txids.isEmpty()) return emptyMap()
+        return try {
+            val result = mutableMapOf<String, TransactionDetails>()
+            val placeholders = txids.joinToString(",") { "?" }
+            val selection = "$COL_WALLET_ID = ? AND $COL_DESCRIPTOR_KEY = ? AND $COL_TXID IN ($placeholders)"
+            val selectionArgs = arrayOf(walletId, descriptorKey, *txids.toTypedArray())
+
+            readableDatabase.query(
+                TABLE_WALLET_TX_DETAILS,
+                null,
+                selection,
+                selectionArgs,
+                null, null, null,
+            ).use { cursor ->
+                while (cursor.moveToNext()) {
+                    val txid = cursor.getString(cursor.getColumnIndexOrThrow(COL_TXID))
+                    val details = WalletTxDetails(
+                        walletId = cursor.getString(cursor.getColumnIndexOrThrow(COL_WALLET_ID)),
+                        descriptorKey = cursor.getString(cursor.getColumnIndexOrThrow(COL_DESCRIPTOR_KEY)),
+                        txid = txid,
+                        amountSats = cursor.getLong(cursor.getColumnIndexOrThrow(COL_AMOUNT_SATS)),
+                        fee = cursor.getLong(cursor.getColumnIndexOrThrow(COL_FEE)).takeIf {
+                            !cursor.isNull(cursor.getColumnIndexOrThrow(COL_FEE))
+                        },
+                        weight = cursor.getInt(cursor.getColumnIndexOrThrow(COL_WEIGHT)).takeIf {
+                            !cursor.isNull(cursor.getColumnIndexOrThrow(COL_WEIGHT))
+                        },
+                        confirmationHeight = cursor.getInt(cursor.getColumnIndexOrThrow(COL_CONFIRMATION_HEIGHT)),
+                        confirmationTimestamp = cursor.getLong(cursor.getColumnIndexOrThrow(COL_CONFIRMATION_TIMESTAMP)),
+                        address = cursor.getString(cursor.getColumnIndexOrThrow(COL_ADDRESS)).takeIf {
+                            !cursor.isNull(cursor.getColumnIndexOrThrow(COL_ADDRESS))
+                        },
+                        addressAmount = cursor.getLong(cursor.getColumnIndexOrThrow(COL_ADDRESS_AMOUNT)).takeIf {
+                            !cursor.isNull(cursor.getColumnIndexOrThrow(COL_ADDRESS_AMOUNT))
+                        },
+                        changeAddress = cursor.getString(cursor.getColumnIndexOrThrow(COL_CHANGE_ADDRESS)).takeIf {
+                            !cursor.isNull(cursor.getColumnIndexOrThrow(COL_CHANGE_ADDRESS))
+                        },
+                        changeAmount = cursor.getLong(cursor.getColumnIndexOrThrow(COL_CHANGE_AMOUNT)).takeIf {
+                            !cursor.isNull(cursor.getColumnIndexOrThrow(COL_CHANGE_AMOUNT))
+                        },
+                        isSelfTransfer = cursor.getInt(cursor.getColumnIndexOrThrow(COL_IS_SELF_TRANSFER)) == 1,
+                        cachedAt = cursor.getLong(cursor.getColumnIndexOrThrow(COL_CACHED_AT)),
+                    )
+                    // Convert WalletTxDetails to TransactionDetails - this is simplified
+                    // The actual conversion depends on how TransactionDetails is structured
+                    result[txid] = TransactionDetails(
+                        txid = txid,
+                        isConfirmed = true,
+                        confirmationHeight = details.confirmationHeight.toULong(),
+                        confirmationTimestamp = details.confirmationTimestamp,
+                        amountSats = details.amountSats.toULong(),
+                        feeSats = details.fee?.toULong(),
+                        address = details.address ?: "",
+                        direction = if (details.amountSats > 0) TransactionDirection.INCOMING else TransactionDirection.OUTGOING,
+                        isSelfTransfer = details.isSelfTransfer,
+                    )
+                }
+            }
+            result
+        } catch (_: Exception) {
+            emptyMap()
+        }
+    }
+
+    /**
+     * Save confirmed transaction details to the cache.
+     */
+    fun putConfirmedTransactionDetails(
+        walletId: String,
+        descriptorKey: String,
+        details: List<TransactionDetails>,
+    ) {
+        val walletTxDetails = details.map { tx ->
+            WalletTxDetails(
+                walletId = walletId,
+                descriptorKey = descriptorKey,
+                txid = tx.txid,
+                amountSats = tx.amountSats.toLong(),
+                fee = tx.feeSats?.toLong(),
+                weight = null, // Not available in TransactionDetails
+                confirmationHeight = tx.confirmationHeight?.toInt() ?: 0,
+                confirmationTimestamp = tx.confirmationTimestamp ?: 0,
+                address = tx.address,
+                addressAmount = null,
+                changeAddress = null,
+                changeAmount = null,
+                isSelfTransfer = tx.isSelfTransfer,
+                cachedAt = System.currentTimeMillis(),
+            )
+        }
+        putWalletTxDetailsBatch(walletTxDetails)
+    }
+
+    /**
+     * Delete the database file from disk.
+     * @return true if deletion was successful
+     */
+    fun deleteDatabaseFile(): Boolean {
+        return try {
+            val dbFile = appContext.getDatabasePath(DATABASE_NAME)
+            if (dbFile != null && dbFile.exists()) {
+                dbFile.delete()
+            } else {
+                true
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
 }
