@@ -35,7 +35,7 @@ jobs:
         rm -rf app/build
         rm -rf ~/.gradle/caches/build-cache-*
         # Build with no daemon and no cache
-        ./gradlew --no-daemon --build-cache=false :app:assembleDebug --stacktrace
+        ./gradlew --no-daemon --no-build-cache :app:assembleDebug --stacktrace
       
     - name: Upload Debug APK
       uses: actions/upload-artifact@v4
