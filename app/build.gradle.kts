@@ -153,7 +153,8 @@ dependencies {
     implementation(libs.lightning.kmp.core.jvm)
 
     // Silent Payments (BIP 352) - secp256k1 operations
-    implementation("org.kotlincrypto.curves:secp256k1-kmp:0.13.0")
+    // Using fr.acinq.secp256k1 which is a stable Kotlin Multiplatform secp256k1 library
+    implementation("fr.acinq.secp256k1:secp256k1-kmp:0.15.0")
 
     // Testing
     testImplementation(libs.kotest.runner.junit5)
