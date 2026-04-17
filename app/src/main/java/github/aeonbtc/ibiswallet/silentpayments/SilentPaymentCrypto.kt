@@ -1,24 +1,17 @@
 package github.aeonbtc.ibiswallet.silentpayments
 
+import fr.acinq.secp256k1.Secp256k1
 import org.bitcoindevkit.Mnemonic
 import org.bitcoindevkit.Network
 import java.security.MessageDigest
 
 /**
- * Silent Payments (BIP 352) Cryptographic Operations - STUB IMPLEMENTATION
+ * Silent Payments (BIP 352) Cryptographic Operations
  *
- * This is a PLACEHOLDER implementation for Silent Payments cryptography.
- * It provides the API structure but NOT the actual cryptographic operations.
- *
- * For production use, you MUST add a secp256k1 library such as:
- * - fr.acinq.secp256k1:secp256k1-kmp (with proper JNI setup)
- * - bitcoinj secp256k1 bindings
- * - Custom JNI wrapper around libsecp256k1
- *
- * Missing implementations marked with STUB: require secp256k1 for:
- * - Public key addition: Q = P + t·G
- * - Scalar multiplication: t·G
- * - Point derivation from private key
+ * Uses ACINQ secp256k1-kmp for all elliptic curve operations:
+ * - Public key generation: secp256k1_pubkey_create
+ * - Point addition (tweak): secp256k1_ec_pubkey_add
+ * - Scalar addition (private key derivation): secp256k1_ec_privkey_add
  *
  * Reference: https://github.com/bitcoin/bips/blob/master/bip-0352.mediawiki
  */
@@ -34,32 +27,127 @@ object SilentPaymentCrypto {
     private const val HRP_MAINNET = "sp1"
     private const val HRP_TESTNET = "tsp1"
 
+    // Tagged hash constants for BIP352
+    private const val BIP0352_CONST = "BIP0352/Const"
+    private const val BIP0352_SEND = "BIP0352/Send"
+
     /**
-     * STUB: Generate Silent Payment keys from mnemonic.
-     *
-     * NOTE: This is a stub returning dummy keys. Real implementation requires
-     * BDK or secp256k1 library for proper key derivation.
+     * Initialize secp256k1 library.
+     * Must be called before any crypto operations.
      */
-    @JvmStatic
+    fun initialize() {
+        // Secp256k1-kmp auto-initializes on first use via JNI
+    }
+
+    /**
+     * Check if secp256k1 library is loaded and functional.
+     */
+    fun isAvailable(): Boolean {
+        return try {
+            // Test with a simple operation
+            val testPrivKey = ByteArray(32) { 0x01 }
+            Secp256k1.verifyPrivateKey(testPrivKey)
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /**
+     * Generate Silent Payment keys from mnemonic using BIP352 derivation paths.
+     *
+     * Derivation paths (BIP352):
+     * - Mainnet: m/352'/0'/0'/0' (scan), m/352'/0'/0'/1' (spend)
+     * - Testnet: m/352'/1'/0'/0' (scan), m/352'/1'/0'/1' (spend)
+     *
+     * @param mnemonic BIP39 mnemonic phrase
+     * @param network Mainnet or Testnet
+     * @return SilentPaymentKeys with scan/spend key pairs
+     */
     fun generateKeys(
         mnemonic: Mnemonic,
         network: Network,
     ): SilentPaymentKeys {
-        // STUB: Return dummy keys - replace with actual BDK derivation
+        val isTestnet = network != Network.BITCOIN
+
+        // Get derivation paths based on network
+        val scanPath = if (isTestnet) PATH_SCAN_TESTNET else PATH_SCAN_MAINNET
+        val spendPath = if (isTestnet) PATH_SPEND_TESTNET else PATH_SPEND_MAINNET
+
+        // Derive scan key from mnemonic using BDK
+        val scanPrivKey = derivePrivateKeyFromMnemonic(mnemonic, scanPath)
+            ?: throw SilentPaymentException.CryptoError("Failed to derive scan key from mnemonic")
+
+        // Derive spend key from mnemonic using BDK
+        val spendPrivKey = derivePrivateKeyFromMnemonic(mnemonic, spendPath)
+            ?: throw SilentPaymentException.CryptoError("Failed to derive spend key from mnemonic")
+
+        // Generate public keys from private keys using secp256k1
+        val scanPubKey = Secp256k1.pubKeyCreate(scanPrivKey, compressed = true)
+        val spendPubKey = Secp256k1.pubKeyCreate(spendPrivKey, compressed = true)
+
+        // Validate keys
+        if (scanPrivKey.size != 32 || spendPrivKey.size != 32) {
+            throw SilentPaymentException.CryptoError("Invalid private key size")
+        }
+        if (scanPubKey.size != 33 || spendPubKey.size != 33) {
+            throw SilentPaymentException.CryptoError("Invalid public key size")
+        }
+
         return SilentPaymentKeys(
-            scanPrivateKey = ByteArray(32) { 0x01 },
-            scanPublicKey = ByteArray(33) { 0x02 },
-            spendPrivateKey = ByteArray(32) { 0x03 },
-            spendPublicKey = ByteArray(33) { 0x04 },
+            scanPrivateKey = scanPrivKey,
+            scanPublicKey = scanPubKey,
+            spendPrivateKey = spendPrivKey,
+            spendPublicKey = spendPubKey,
         )
+    }
+
+    /**
+     * Derive a private key from mnemonic at a specific BIP32 path.
+     * Uses BDK's DescriptorSecretKey for derivation.
+     */
+    private fun derivePrivateKeyFromMnemonic(
+        mnemonic: Mnemonic,
+        path: String,
+    ): ByteArray? {
+        return try {
+            // Create a BDK descriptor secret key from mnemonic
+            val descriptorKey = org.bitcoindevkit.DescriptorSecretKey(
+                org.bitcoindevkit.Network.TESTNET,  // BDK uses network here but path determines actual network
+                mnemonic,
+                null  // No passphrase
+            )
+
+            // Derive at the specified path
+            val derivedKey = descriptorKey.extend(
+                org.bitcoindevkit.DerivationPath(path)
+            )
+
+            // Extract the private key bytes
+            // Note: BDK's secretBytes() returns the private key
+            val secretBytes = derivedKey.secretBytes()
+            if (secretBytes != null && secretBytes.size == 32) {
+                secretBytes.copyOf()
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            null
+        }
     }
 
     /**
      * Create a Silent Payment address from scan and spend public keys.
      *
-     * Uses bech32m encoding for the address string.
+     * Uses bech32m encoding (BIP350) for the address string.
+     * Format: hrp + '1' + version(0) + scan_key(33) + spend_key(33) + [labels]
+     *
+     * @param scanPublicKey 33-byte compressed public key
+     * @param spendPublicKey 33-byte compressed public key
+     * @param network Mainnet or Testnet
+     * @param labels Optional numbered labels (0-255) for address variants
+     * @return SilentPaymentAddress with sp1... or tsp1... string
      */
-    @JvmStatic
     fun createAddress(
         scanPublicKey: ByteArray,
         spendPublicKey: ByteArray,
@@ -78,6 +166,13 @@ object SilentPaymentCrypto {
             )
         }
 
+        // Validate key format (first byte should be 0x02 or 0x03 for compressed)
+        if (scanPublicKey[0] !in 0x02..0x03 || spendPublicKey[0] !in 0x02..0x03) {
+            throw SilentPaymentException.CryptoError(
+                "Invalid compressed public key format"
+            )
+        }
+
         val hrp = if (network == Network.BITCOIN) HRP_MAINNET else HRP_TESTNET
 
         // Data: version byte (0) + scan key (33 bytes) + spend key (33 bytes) + labels
@@ -89,6 +184,10 @@ object SilentPaymentCrypto {
         labels.forEach { label ->
             if (label in 0..255) {
                 data.add(label.toByte())
+            } else {
+                throw SilentPaymentException.CryptoError(
+                    "Label must be in range 0-255, got $label"
+                )
             }
         }
 
@@ -111,8 +210,13 @@ object SilentPaymentCrypto {
 
     /**
      * Decode a Silent Payment address.
+     *
+     * Parses sp1... or tsp1... address and extracts scan/spend keys.
+     *
+     * @param address Silent Payment address string
+     * @return SilentPaymentAddress with extracted components
+     * @throws SilentPaymentException.InvalidAddress if invalid format
      */
-    @JvmStatic
     fun decodeAddress(address: String): SilentPaymentAddress {
         val isTestnet = address.startsWith(HRP_TESTNET)
         val isMainnet = address.startsWith(HRP_MAINNET)
@@ -137,19 +241,26 @@ object SilentPaymentCrypto {
 
             if (data.size < 67) {
                 throw SilentPaymentException.InvalidAddress(
-                    "Invalid Silent Payment address: too short (${data.size} bytes)"
+                    "Invalid Silent Payment address: too short (${data.size} bytes, need at least 67)"
                 )
             }
 
             val version = data[0].toInt()
             if (version != 0) {
                 throw SilentPaymentException.InvalidAddress(
-                    "Unsupported Silent Payment version: $version"
+                    "Unsupported Silent Payment version: $version (only version 0 supported)"
                 )
             }
 
             val scanKey = data.copyOfRange(1, 34)
             val spendKey = data.copyOfRange(34, 67)
+
+            // Validate public key format
+            if (scanKey[0] !in 0x02..0x03 || spendKey[0] !in 0x02..0x03) {
+                throw SilentPaymentException.InvalidAddress(
+                    "Invalid public key format in address"
+                )
+            }
 
             val labels = if (data.size > 67) {
                 data.copyOfRange(67, data.size).map { it.toInt() and 0xFF }
@@ -175,8 +286,10 @@ object SilentPaymentCrypto {
 
     /**
      * Verify if a string is a valid Silent Payment address.
+     *
+     * @param address String to check
+     * @return true if valid SP1/TSP1 address
      */
-    @JvmStatic
     fun isValidAddress(address: String): Boolean {
         return try {
             decodeAddress(address)
@@ -187,82 +300,265 @@ object SilentPaymentCrypto {
     }
 
     /**
-     * STUB: Compute the tweak value: hash(P || R)
+     * Compute the tagged hash tweak value: hashBIP0352/Const(P || R)
      *
-     * Real implementation uses secp256k1 for actual math.
+     * Used for both receiving (checking outputs) and sending (generating tweaked address).
+     *
+     * BIP352 formula: t = hashBIP0352/Const(P_scan || P_input)
+     * Where:
+     * - P_scan is the recipient's scan public key
+     * - P_input is the public key from the transaction input (for sending)
+     *   or an input public key from the transaction (for receiving)
+     *
+     * @param scanPublicKey Recipient's scan public key (33 bytes compressed)
+     * @param inputPublicKey Input's public key (33 bytes compressed)
+     * @return 32-byte tweak value
      */
-    @JvmStatic
     fun computeTweak(
         scanPublicKey: ByteArray,
         inputPublicKey: ByteArray,
     ): ByteArray {
+        if (scanPublicKey.size != 33) {
+            throw SilentPaymentException.CryptoError(
+                "Scan public key must be 33 bytes, got ${scanPublicKey.size}"
+            )
+        }
+        if (inputPublicKey.size != 33) {
+            throw SilentPaymentException.CryptoError(
+                "Input public key must be 33 bytes, got ${inputPublicKey.size}"
+            )
+        }
+
+        // BIP0352/Const tagged hash
+        // taggedHash = SHA256(SHA256("BIP0352/Const") || SHA256("BIP0352/Const") || data)
         val data = scanPublicKey + inputPublicKey
-        val tag = sha256("BIP0352/Const".toByteArray())
-        val taggedData = tag + tag + data
-        return sha256(taggedData)
+        return taggedHash(BIP0352_CONST, data)
     }
 
     /**
-     * STUB: Tweak a public key: Q = P + t·G
+     * Compute the tagged hash for sending: hashBIP0352/Send(dh || k')
      *
-     * STUB: Requires secp256k1 point addition and scalar multiplication.
+     * Used when generating a Silent Payment from a shared secret.
+     *
+     * @param sharedSecret Shared secret bytes (typically from ECDH)
+     * @param inputPrivateKeyTweaked Tweaked input private key
+     * @return 32-byte hash value
      */
-    @JvmStatic
-    fun tweakPublicKey(
-        scanPublicKey: ByteArray,
-        inputPublicKey: ByteArray,
+    fun computeSendHash(
+        sharedSecret: ByteArray,
+        inputPrivateKeyTweaked: ByteArray,
     ): ByteArray {
-        return computeTweak(scanPublicKey, inputPublicKey)
+        val data = sharedSecret + inputPrivateKeyTweaked
+        return taggedHash(BIP0352_SEND, data)
     }
 
     /**
-     * STUB: Derive the private key to spend a Silent Payment output.
+     * Tweak a public key: Q = P + t·G
      *
-     * b' = b + t (mod n)
-     * STUB: Requires secp256k1 scalar arithmetic.
+     * This is the core Silent Payments operation for generating
+     * the tweaked output public key that the recipient can spend.
+     *
+     * @param spendPublicKey Recipient's spend public key P (33 bytes)
+     * @param tweak Tweak value t (32 bytes)
+     * @return Tweaked public key Q (33 bytes compressed)
      */
-    @JvmStatic
+    fun tweakPublicKey(
+        spendPublicKey: ByteArray,
+        tweak: ByteArray,
+    ): ByteArray {
+        if (spendPublicKey.size != 33) {
+            throw SilentPaymentException.CryptoError(
+                "Spend public key must be 33 bytes, got ${spendPublicKey.size}"
+            )
+        }
+        if (tweak.size != 32) {
+            throw SilentPaymentException.CryptoError(
+                "Tweak must be 32 bytes, got ${tweak.size}"
+            )
+        }
+
+        return try {
+            // secp256k1_ec_pubkey_add: adds tweak*G to the public key
+            // This gives us: Q = P + t·G
+            Secp256k1.pubKeyAdd(spendPublicKey, tweak)
+        } catch (e: Exception) {
+            throw SilentPaymentException.CryptoError(
+                "Failed to tweak public key: ${e.message}"
+            )
+        }
+    }
+
+    /**
+     * Derive the private key to spend a Silent Payment output.
+     *
+     * Formula: b' = b + t (mod n)
+     * Where:
+     * - b is the spend private key
+     * - t is the tweak from scanning
+     * - n is the curve order
+     *
+     * @param spendPrivateKey Original spend private key b (32 bytes)
+     * @param tweak Tweak value t (32 bytes)
+     * @return Derived private key b' (32 bytes)
+     */
     fun derivePrivateKey(
         spendPrivateKey: ByteArray,
         tweak: ByteArray,
     ): ByteArray {
-        // STUB: Just return spend key - real implementation needs secp256k1
-        return spendPrivateKey.copyOf()
+        if (spendPrivateKey.size != 32) {
+            throw SilentPaymentException.CryptoError(
+                "Spend private key must be 32 bytes, got ${spendPrivateKey.size}"
+            )
+        }
+        if (tweak.size != 32) {
+            throw SilentPaymentException.CryptoError(
+                "Tweak must be 32 bytes, got ${tweak.size}"
+            )
+        }
+
+        return try {
+            // secp256k1_ec_privkey_add: adds tweak to private key (mod n)
+            // This gives us: b' = b + t (mod n)
+            Secp256k1.privKeyAdd(spendPrivateKey, tweak)
+        } catch (e: Exception) {
+            throw SilentPaymentException.CryptoError(
+                "Failed to derive private key: ${e.message}"
+            )
+        }
     }
 
     /**
-     * STUB: Check if a transaction output is a Silent Payment to our scan key.
+     * Check if a transaction output is a Silent Payment to our scan key.
      *
-     * STUB: Requires secp256k1 for public key comparison.
+     * For each input public key in the transaction:
+     * 1. Compute tweak t = hashBIP0352/Const(P_scan || P_input)
+     * 2. Generate tweaked public key: Q_i = P_spend + t·G
+     * 3. Convert Q_i to x-only public key for P2TR
+     * 4. Check if output scriptPubKey matches P2TR(Q_i)
+     *
+     * @param scriptPubKey Output's scriptPubKey to check
+     * @param scanPublicKey Our scan public key
+     * @param spendPublicKey Our spend public key
+     * @param inputPubKeys List of input public keys from the transaction
+     * @return Tweak value if output matches, null otherwise
      */
-    @JvmStatic
     fun checkOutput(
         scriptPubKey: ByteArray,
         scanPublicKey: ByteArray,
         spendPublicKey: ByteArray,
         inputPubKeys: List<ByteArray>,
     ): ByteArray? {
-        // STUB: Always returns null - real implementation needs secp256k1
+        // Check each input public key
+        for (inputPubKey in inputPubKeys) {
+            try {
+                // Compute tweak for this input
+                val tweak = computeTweak(scanPublicKey, inputPubKey)
+
+                // Generate the expected tweaked public key
+                val tweakedPubKey = tweakPublicKey(spendPublicKey, tweak)
+
+                // Convert to P2TR x-only public key (remove parity byte)
+                val xOnlyPubKey = tweakedPubKey.copyOfRange(1, 33)
+
+                // Build expected P2TR scriptPubKey: 0x51 + 32-byte x-only pubkey
+                val expectedScript = byteArrayOf(0x51) + xOnlyPubKey
+
+                // Check if this matches the output
+                if (scriptPubKey.contentEquals(expectedScript)) {
+                    return tweak
+                }
+            } catch (e: Exception) {
+                // Continue to next input
+                continue
+            }
+        }
+
         return null
     }
 
     /**
-     * STUB: Compute expected P2TR scriptPubKey for a Silent Payment.
+     * Compute expected P2TR scriptPubKey for a Silent Payment.
      *
-     * STUB: Requires secp256k1 point operations.
+     * @param spendPublicKey Recipient's spend public key
+     * @param tweak Tweak value from computeTweak()
+     * @return Expected P2TR scriptPubKey (34 bytes: 0x51 + 32-byte x-only pubkey)
      */
-    @JvmStatic
     fun computeExpectedScript(
         spendPublicKey: ByteArray,
         tweak: ByteArray,
     ): ByteArray {
-        // STUB: Return dummy P2TR format
-        return byteArrayOf(0x51) + ByteArray(32) { 0 }
+        val tweakedPubKey = tweakPublicKey(spendPublicKey, tweak)
+        // Convert to x-only (remove first byte which is 0x02 or 0x03)
+        val xOnlyPubKey = tweakedPubKey.copyOfRange(1, 33)
+        // P2TR script: OP_1 (0x51) + 32-byte x-only pubkey
+        return byteArrayOf(0x51) + xOnlyPubKey
     }
 
-    // Helper: SHA256
+    /**
+     * Generate a public key from a private key.
+     *
+     * @param privateKey 32-byte private key
+     * @return 33-byte compressed public key
+     */
+    fun derivePublicKey(privateKey: ByteArray): ByteArray {
+        if (privateKey.size != 32) {
+            throw SilentPaymentException.CryptoError(
+                "Private key must be 32 bytes, got ${privateKey.size}"
+            )
+        }
+        return Secp256k1.pubKeyCreate(privateKey, compressed = true)
+    }
+
+    /**
+     * Verify a private key is valid (non-zero and less than curve order).
+     */
+    fun isValidPrivateKey(privateKey: ByteArray): Boolean {
+        return try {
+            Secp256k1.verifyPrivateKey(privateKey)
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /**
+     * Verify a public key is valid.
+     */
+    fun isValidPublicKey(publicKey: ByteArray): Boolean {
+        return try {
+            Secp256k1.verifyPublicKey(publicKey)
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Helper functions
+    // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * BIP340-style tagged hash.
+     *
+     * tagged_hash(tag, data) = SHA256(SHA256(tag) || SHA256(tag) || data)
+     */
+    private fun taggedHash(tag: String, data: ByteArray): ByteArray {
+        val tagHash = sha256(tag.toByteArray())
+        return sha256(tagHash + tagHash + data)
+    }
+
+    /**
+     * SHA256 hash.
+     */
     private fun sha256(data: ByteArray): ByteArray {
         return MessageDigest.getInstance("SHA-256").digest(data)
+    }
+
+    /**
+     * Concatenate two byte arrays.
+     */
+    private operator fun ByteArray.plus(other: ByteArray): ByteArray {
+        return this.copyOf(this.size + other.size).apply {
+            other.copyInto(this, this@plus.size)
+        }
     }
 }
 

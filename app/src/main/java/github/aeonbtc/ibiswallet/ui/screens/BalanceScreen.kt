@@ -456,6 +456,42 @@ fun BalanceScreen(
                                 )
                             }
 
+                            // Silent Payment balance (if any)
+                            if (walletState.silentPaymentBalanceSat > 0) {
+                                Spacer(modifier = Modifier.height(8.dp))
+                                HorizontalDivider(
+                                    modifier = Modifier.width(120.dp),
+                                    color = TextSecondary.copy(alpha = 0.3f),
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = "Silent Payment",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = TextSecondary.copy(alpha = 0.8f),
+                                )
+                                Text(
+                                    text =
+                                        if (privacyMode) {
+                                            HIDDEN_AMOUNT
+                                        } else if (useSats) {
+                                            "${formatAmount(walletState.silentPaymentBalanceSat.toULong(), true)} sats"
+                                        } else {
+                                            "\u20BF ${formatAmount(walletState.silentPaymentBalanceSat.toULong(), false)}"
+                                        },
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.9f),
+                                )
+                                if (btcPrice != null && btcPrice > 0) {
+                                    val spUsdValue = (walletState.silentPaymentBalanceSat.toDouble() / 100_000_000.0) * btcPrice
+                                    Text(
+                                        text = if (privacyMode) HIDDEN_AMOUNT else formatFiat(spUsdValue, fiatCurrency),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = TextSecondary.copy(alpha = 0.8f),
+                                    )
+                                }
+                            }
+
                         }
 
                         // Quick receive button — pinned to bottom left

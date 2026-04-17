@@ -93,6 +93,7 @@ import github.aeonbtc.ibiswallet.ui.theme.SuccessGreen
 import github.aeonbtc.ibiswallet.ui.theme.TextSecondary
 import github.aeonbtc.ibiswallet.ui.theme.WarningYellow
 import github.aeonbtc.ibiswallet.util.getNfcAvailability
+import github.aeonbtc.ibiswallet.silentpayments.SilentPaymentCrypto
 import github.aeonbtc.ibiswallet.viewmodel.SendScreenDraft
 import github.aeonbtc.ibiswallet.viewmodel.WalletUiState
 import github.aeonbtc.ibiswallet.nfc.NfcReaderUiState
@@ -2267,8 +2268,26 @@ private fun validateBitcoinAddress(address: String): String? {
         trimmed.lowercase().startsWith("bc1q") -> validateBech32Address(trimmed, false)
         // Taproot (starts with bc1p)
         trimmed.lowercase().startsWith("bc1p") -> validateBech32Address(trimmed, true)
+        // Silent Payment (starts with sp1 or tsp1)
+        trimmed.lowercase().startsWith("sp1") -> validateSilentPaymentAddress(trimmed)
         // Unknown format
         else -> "Invalid address format"
+    }
+}
+
+/**
+ * Validate Silent Payment address (BIP 352).
+ * Uses bech32m encoding with sp1 (mainnet) or tsp1 (testnet) prefix.
+ */
+private fun validateSilentPaymentAddress(address: String): String? {
+    return try {
+        if (SilentPaymentCrypto.isValidAddress(address)) {
+            null // Valid - no error
+        } else {
+            "Invalid Silent Payment address"
+        }
+    } catch (e: Exception) {
+        "Invalid Silent Payment address: ${e.message}"
     }
 }
 
