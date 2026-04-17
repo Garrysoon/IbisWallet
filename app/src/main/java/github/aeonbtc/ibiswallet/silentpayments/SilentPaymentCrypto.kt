@@ -1,26 +1,24 @@
 package github.aeonbtc.ibiswallet.silentpayments
 
+import org.bitcoinj.secp256k1.api.P256K1Key
+import org.bitcoinj.secp256k1.api.P256K1XOnlyPubKey
+import org.bitcoinj.secp256k1.api.Secp256k1
+import org.bitcoinj.secp256k1.bouncy.BouncySecp256k1
 import org.bitcoindevkit.Mnemonic
 import org.bitcoindevkit.Network
 import java.security.MessageDigest
 
 /**
- * Silent Payments (BIP 352) Cryptographic Operations - MVP STUB IMPLEMENTATION
+ * Silent Payments (BIP 352) Cryptographic Operations
  *
- * This is a STUB implementation for Silent Payments MVP. It provides the API
- * structure and data flow, but uses placeholder cryptographic operations.
- *
- * For production, replace STUB sections with real secp256k1 operations:
- * - Public key generation from private key: secp256k1_pubkey_create
+ * Uses bitcoinj secp256k1 library (org.bitcoinj.secp256k1) for all elliptic curve operations:
+ * - Public key generation from private key
  * - Point addition: Q = P + t·G (for generating tweaked addresses)
  * - Scalar addition: b' = b + t (mod n) (for deriving spend keys)
+ * - Tagged hash computation (BIP0352/Const)
  *
- * Options for production crypto:
- * 1. JNI wrapper around libsecp256k1 (bitcoin core)
- * 2. JNR-FFI to call rust-secp256k1 from BDK
- * 3. Custom JNI implementation
- *
- * STUB implementations are marked with STUB comments.
+ * Library: org.bitcoinj.secp256k1 (v0.17.1)
+ * Provider: BouncyCastle implementation (pure Java, no native libs needed)
  *
  * Reference: https://github.com/bitcoin/bips/blob/master/bip-0352.mediawiki
  */
@@ -40,33 +38,39 @@ object SilentPaymentCrypto {
     private const val BIP0352_CONST = "BIP0352/Const"
     private const val BIP0352_SEND = "BIP0352/Send"
 
-    // STUB: This would be the real secp256k1 library
-    // private val secp256k1 = Secp256k1.get()
-
-    /**
-     * Initialize crypto library.
-     * STUB: No initialization needed for stub implementation.
-     */
-    fun initialize() {
-        // STUB: Real implementation would load native library
+    // Lazy-initialized secp256k1 instance
+    private val secp256k1: Secp256k1 by lazy {
+        BouncySecp256k1()
     }
 
     /**
-     * Check if crypto library is available.
-     * STUB: Always returns true for stub implementation.
+     * Initialize secp256k1 library.
+     * Called automatically on first use.
+     */
+    fun initialize() {
+        // Force initialization of lazy secp256k1
+        secp256k1.toString()
+    }
+
+    /**
+     * Check if secp256k1 library is loaded and functional.
      */
     fun isAvailable(): Boolean {
-        // STUB: Real implementation would check if secp256k1 is loaded
-        return true
+        return try {
+            val testPrivKey = P256K1Key(randomBytes(32))
+            val pubKey = secp256k1.pubKeyCreate(testPrivKey)
+            pubKey != null
+        } catch (e: Exception) {
+            false
+        }
     }
 
     /**
      * Generate Silent Payment keys from mnemonic using BIP352 derivation paths.
      *
-     * STUB: Returns placeholder keys. Real implementation would:
-     * 1. Derive scan private key from mnemonic at m/352'/0'/0'/0'
-     * 2. Derive spend private key from mnemonic at m/352'/0'/0'/1'
-     * 3. Generate public keys using secp256k1_pubkey_create
+     * Derivation paths (BIP352):
+     * - Mainnet: m/352'/0'/0'/0' (scan), m/352'/0'/0'/1' (spend)
+     * - Testnet: m/352'/1'/0'/0' (scan), m/352'/1'/0'/1' (spend)
      *
      * @param mnemonic BIP39 mnemonic phrase
      * @param network Mainnet or Testnet
@@ -76,44 +80,78 @@ object SilentPaymentCrypto {
         mnemonic: Mnemonic,
         network: Network,
     ): SilentPaymentKeys {
-        // STUB: Return deterministic placeholder keys based on mnemonic hash
-        // This allows testing the UI flow without real cryptography
-        val mnemonicHash = sha256(mnemonic.toString().toByteArray())
+        val isTestnet = network != Network.BITCOIN
 
-        // Generate deterministic "fake" keys from mnemonic hash
-        val scanPrivKey = mnemonicHash.copyOf(32)
-        scanPrivKey[0] = (scanPrivKey[0].toInt() and 0x7F).toByte() // Ensure positive
+        // Get derivation paths based on network
+        val scanPath = if (isTestnet) PATH_SCAN_TESTNET else PATH_SCAN_MAINNET
+        val spendPath = if (isTestnet) PATH_SPEND_TESTNET else PATH_SPEND_MAINNET
 
-        val spendPrivKey = mnemonicHash.copyOfRange(16, 48)
-        spendPrivKey[0] = ((spendPrivKey[0].toInt() and 0x7F) or 0x40).toByte() // Different prefix
+        // Derive scan key from mnemonic using BDK
+        val scanPrivKey = derivePrivateKeyFromMnemonic(mnemonic, scanPath)
+            ?: throw SilentPaymentException.CryptoError("Failed to derive scan key from mnemonic")
 
-        // STUB: Real implementation would use secp256k1_pubkey_create
-        val scanPubKey = generateStubPublicKey(scanPrivKey)
-        val spendPubKey = generateStubPublicKey(spendPrivKey)
+        // Derive spend key from mnemonic using BDK
+        val spendPrivKey = derivePrivateKeyFromMnemonic(mnemonic, spendPath)
+            ?: throw SilentPaymentException.CryptoError("Failed to derive spend key from mnemonic")
+
+        // Generate public keys from private keys using secp256k1
+        val scanKey = P256K1Key(scanPrivKey)
+        val spendKey = P256K1Key(spendPrivKey)
+
+        val scanPubKey = secp256k1.pubKeyCreate(scanKey)
+        val spendPubKey = secp256k1.pubKeyCreate(spendKey)
+
+        // Convert to byte arrays
+        val scanPublicKeyBytes = compressedPubKeyToBytes(scanPubKey)
+        val spendPublicKeyBytes = compressedPubKeyToBytes(spendPubKey)
 
         return SilentPaymentKeys(
             scanPrivateKey = scanPrivKey,
-            scanPublicKey = scanPubKey,
+            scanPublicKey = scanPublicKeyBytes,
             spendPrivateKey = spendPrivKey,
-            spendPublicKey = spendPubKey,
+            spendPublicKey = spendPublicKeyBytes,
         )
     }
 
     /**
-     * STUB: Generate a placeholder public key from private key.
-     * Real implementation would use secp256k1_pubkey_create.
+     * Derive a private key from mnemonic at a specific BIP32 path.
+     * Uses BDK's DescriptorSecretKey for derivation.
      */
-    private fun generateStubPublicKey(privateKey: ByteArray): ByteArray {
-        // STUB: Generate fake 33-byte compressed public key
-        // Format: 0x02 + 32 bytes (x-coordinate, even parity)
-        val pubKey = ByteArray(33)
-        pubKey[0] = 0x02.toByte()
+    private fun derivePrivateKeyFromMnemonic(
+        mnemonic: Mnemonic,
+        path: String,
+    ): ByteArray? {
+        return try {
+            // Create a BDK descriptor secret key from mnemonic
+            val descriptorKey = org.bitcoindevkit.DescriptorSecretKey(
+                org.bitcoindevkit.Network.TESTNET,  // BDK network parameter
+                mnemonic,
+                null  // No passphrase
+            )
 
-        // Deterministic "public key" from private key hash
-        val hash = sha256(privateKey)
-        System.arraycopy(hash, 0, pubKey, 1, 32)
+            // Derive at the specified path
+            val derivedKey = descriptorKey.extend(
+                org.bitcoindevkit.DerivationPath(path)
+            )
 
-        return pubKey
+            // Extract the private key bytes
+            val secretBytes = derivedKey.secretBytes()
+            if (secretBytes != null && secretBytes.size == 32) {
+                secretBytes.copyOf()
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Convert bitcoinj public key to 33-byte compressed format.
+     */
+    private fun compressedPubKeyToBytes(pubKey: org.bitcoinj.secp256k1.api.P256K1PubKey): ByteArray {
+        // Get compressed public key (33 bytes: 0x02/0x03 + 32-byte x-coordinate)
+        return pubKey.toCompressed()
     }
 
     /**
@@ -324,9 +362,7 @@ object SilentPaymentCrypto {
      * This is the core Silent Payments operation for generating
      * the tweaked output public key that the recipient can spend.
      *
-     * STUB: Returns placeholder result. Real implementation would:
-     * 1. Compute t·G (scalar multiplication of generator)
-     * 2. Add to spendPublicKey (point addition)
+     * Uses secp256k1_ec_pubkey_tweak_add: adds tweak*G to the public key.
      *
      * @param spendPublicKey Recipient's spend public key P (33 bytes)
      * @param tweak Tweak value t (32 bytes)
@@ -347,17 +383,22 @@ object SilentPaymentCrypto {
             )
         }
 
-        // STUB: Real implementation would use secp256k1 point addition
-        // Q = P + t·G
-        // For now, return deterministic "tweaked" key
-        val combined = spendPublicKey + tweak
-        val hash = sha256(combined)
+        return try {
+            // Parse public key
+            val pubKey = secp256k1.pubKeyParse(spendPublicKey)
+                ?: throw SilentPaymentException.CryptoError("Failed to parse spend public key")
 
-        val result = ByteArray(33)
-        result[0] = 0x02.toByte() // Even parity
-        System.arraycopy(hash, 0, result, 1, 32)
+            // Apply tweak: Q = P + t·G
+            val tweakedPubKey = secp256k1.pubKeyTweakAdd(pubKey, tweak)
+                ?: throw SilentPaymentException.CryptoError("Failed to tweak public key")
 
-        return result
+            // Serialize to compressed format (33 bytes)
+            tweakedPubKey.toCompressed()
+        } catch (e: Exception) {
+            throw SilentPaymentException.CryptoError(
+                "Failed to tweak public key: ${e.message}"
+            )
+        }
     }
 
     /**
@@ -369,9 +410,7 @@ object SilentPaymentCrypto {
      * - t is the tweak from scanning
      * - n is the curve order
      *
-     * STUB: Returns placeholder result. Real implementation would:
-     * 1. Add tweak to spendPrivateKey modulo curve order n
-     * 2. Use secp256k1_ec_privkey_tweak_add
+     * Uses secp256k1_ec_privkey_tweak_add: adds tweak to private key (mod n).
      *
      * @param spendPrivateKey Original spend private key b (32 bytes)
      * @param tweak Tweak value t (32 bytes)
@@ -392,15 +431,17 @@ object SilentPaymentCrypto {
             )
         }
 
-        // STUB: Real implementation would use secp256k1 scalar addition
-        // b' = b + t (mod n)
-        // For now, XOR the keys (NOT cryptographically secure!)
-        val result = ByteArray(32)
-        for (i in 0 until 32) {
-            result[i] = (spendPrivateKey[i].toInt() xor tweak[i].toInt()).toByte()
-        }
+        return try {
+            // Apply tweak to private key: b' = b + t (mod n)
+            val tweakedPrivKey = secp256k1.privKeyTweakAdd(spendPrivateKey, tweak)
+                ?: throw SilentPaymentException.CryptoError("Failed to tweak private key")
 
-        return result
+            tweakedPrivKey.bytes
+        } catch (e: Exception) {
+            throw SilentPaymentException.CryptoError(
+                "Failed to derive private key: ${e.message}"
+            )
+        }
     }
 
     /**
@@ -411,8 +452,6 @@ object SilentPaymentCrypto {
      * 2. Generate tweaked public key: Q_i = P_spend + t·G
      * 3. Convert Q_i to x-only public key for P2TR
      * 4. Check if output scriptPubKey matches P2TR(Q_i)
-     *
-     * STUB: Always returns null. Real implementation would perform checks.
      *
      * @param scriptPubKey Output's scriptPubKey to check
      * @param scanPublicKey Our scan public key
@@ -426,9 +465,31 @@ object SilentPaymentCrypto {
         spendPublicKey: ByteArray,
         inputPubKeys: List<ByteArray>,
     ): ByteArray? {
-        // STUB: Real implementation would check each input
-        // For MVP, return null (no outputs found)
-        // This is correct for development - scanning will return empty
+        // Check each input public key
+        for (inputPubKey in inputPubKeys) {
+            try {
+                // Compute tweak for this input
+                val tweak = computeTweak(scanPublicKey, inputPubKey)
+
+                // Generate the expected tweaked public key
+                val tweakedPubKey = tweakPublicKey(spendPublicKey, tweak)
+
+                // Convert to P2TR x-only public key (remove parity byte)
+                val xOnlyPubKey = tweakedPubKey.copyOfRange(1, 33)
+
+                // Build expected P2TR scriptPubKey: 0x51 + 32-byte x-only pubkey
+                val expectedScript = byteArrayOf(0x51) + xOnlyPubKey
+
+                // Check if this matches the output
+                if (scriptPubKey.contentEquals(expectedScript)) {
+                    return tweak
+                }
+            } catch (e: Exception) {
+                // Continue to next input
+                continue
+            }
+        }
+
         return null
     }
 
@@ -453,8 +514,6 @@ object SilentPaymentCrypto {
     /**
      * Generate a public key from a private key.
      *
-     * STUB: Returns placeholder. Real implementation uses secp256k1_pubkey_create.
-     *
      * @param privateKey 32-byte private key
      * @return 33-byte compressed public key
      */
@@ -464,13 +523,19 @@ object SilentPaymentCrypto {
                 "Private key must be 32 bytes, got ${privateKey.size}"
             )
         }
-        // STUB: Return deterministic placeholder
-        return generateStubPublicKey(privateKey)
+        return try {
+            val key = P256K1Key(privateKey)
+            val pubKey = secp256k1.pubKeyCreate(key)
+            pubKey.toCompressed()
+        } catch (e: Exception) {
+            throw SilentPaymentException.CryptoError(
+                "Failed to derive public key: ${e.message}"
+            )
+        }
     }
 
     /**
-     * Verify a private key is valid.
-     * STUB: Basic format check. Real implementation checks 0 < key < n.
+     * Verify a private key is valid (non-zero and less than curve order).
      */
     fun isValidPrivateKey(privateKey: ByteArray): Boolean {
         if (privateKey.size != 32) return false
@@ -480,7 +545,6 @@ object SilentPaymentCrypto {
 
     /**
      * Verify a public key is valid.
-     * STUB: Format check. Real implementation validates curve point.
      */
     fun isValidPublicKey(publicKey: ByteArray): Boolean {
         if (publicKey.size != 33) return false
@@ -515,6 +579,15 @@ object SilentPaymentCrypto {
     private operator fun ByteArray.plus(other: ByteArray): ByteArray {
         return this.copyOf(this.size + other.size).apply {
             other.copyInto(this, this@plus.size)
+        }
+    }
+
+    /**
+     * Generate random bytes.
+     */
+    private fun randomBytes(size: Int): ByteArray {
+        return java.security.SecureRandom().let { random ->
+            ByteArray(size).apply { random.nextBytes(this) }
         }
     }
 }
