@@ -671,7 +671,7 @@ object SilentPaymentCrypto {
         val xLength = xBytes.size - xOffset
         System.arraycopy(xBytes, xOffset, result, 33 - xLength, xLength)
 
-        result
+        return result
     }
 
     // ═══════════════════════════════════════════════════════════════
