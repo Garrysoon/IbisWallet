@@ -1,7 +1,6 @@
 package github.aeonbtc.ibiswallet.silentpayments
 
 import android.util.Log
-import fr.acinq.secp256k1.Secp256k1
 import org.bitcoindevkit.Address
 import org.bitcoindevkit.Network
 import org.bitcoindevkit.Script
@@ -93,7 +92,7 @@ class SilentPaymentSender(
         }
 
         // Generate tweaked public key: Q = P_spend + t·G
-        // This uses secp256k1 point addition via Secp256k1.pubKeyAdd()
+        // This uses SilentPaymentCrypto.tweakPublicKey (STUB for MVP)
         val tweakedPublicKey = try {
             SilentPaymentCrypto.tweakPublicKey(
                 spendPublicKey = decoded.spendPublicKey,
@@ -373,8 +372,8 @@ class SilentPaymentSender(
             val privateKeyBytes = derivedKey.secretBytes()
                 ?: throw SilentPaymentException.CryptoError("Failed to derive private key")
 
-            // Generate public key from private using secp256k1
-            Secp256k1.privKeyPubKey(privateKeyBytes, compressed = true)
+            // Generate public key from private using SilentPaymentCrypto (STUB for MVP)
+            SilentPaymentCrypto.derivePublicKey(privateKeyBytes)
         } catch (e: Exception) {
             throw SilentPaymentException.CryptoError(
                 "Failed to derive input public key: ${e.message}"

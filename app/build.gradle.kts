@@ -120,10 +120,8 @@ dependencies {
 
     // Bitcoin Development Kit
     implementation(libs.bdk.android)
-
-    // Silent Payments (BIP 352) - secp256k1 for cryptographic operations
-    implementation("fr.acinq.secp256k1:secp256k1-kmp:0.23.0")
-    implementation("fr.acinq.secp256k1:secp256k1-kmp-jni-android:0.23.0")
+    // Note: BDK includes rust-secp256k1 via FFI, which can be used for Silent Payments
+    // Full secp256k1 integration TODO - using STUB implementation for MVP
 
     // Security & Storage
     implementation(libs.androidx.security.crypto)
