@@ -3501,4 +3501,18 @@ class SecureStorage private constructor(private val context: Context) {
         }
     }
 
+    // ════════════════════════════════════════════
+    // Generic boolean preferences
+    // ════════════════════════════════════════════
+
+    /** Get a boolean preference value */
+    fun getBoolean(key: String, defaultValue: Boolean = false): Boolean {
+        return regularPrefs.getBoolean(key, defaultValue)
+    }
+
+    /** Save a boolean preference value */
+    fun putBoolean(key: String, value: Boolean) {
+        regularPrefs.edit { putBoolean(key, value) }
+    }
+
 }

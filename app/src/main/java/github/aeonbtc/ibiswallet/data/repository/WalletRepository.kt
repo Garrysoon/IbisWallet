@@ -971,10 +971,6 @@ class WalletRepository(context: Context) {
                         keychainKind = KeychainKind.EXTERNAL,
                         network = bdkNetwork,
                     )
-                AddressType.SILENT_PAYMENT ->
-                    throw IllegalArgumentException(
-                        "Silent Payment is not a BDK wallet type. Use SilentPaymentRepository instead."
-                    )
             }
 
         // Extract the supported xpub from the descriptor string
@@ -1009,7 +1005,6 @@ class WalletRepository(context: Context) {
                     AddressType.LEGACY -> Descriptor.newBip44(descriptorSecretKey, KeychainKind.EXTERNAL, bdkNetwork)
                     AddressType.SEGWIT -> Descriptor.newBip84(descriptorSecretKey, KeychainKind.EXTERNAL, bdkNetwork)
                     AddressType.TAPROOT -> Descriptor.newBip86(descriptorSecretKey, KeychainKind.EXTERNAL, bdkNetwork)
-                    AddressType.SILENT_PAYMENT -> null // Not a BDK wallet type
                 }
             // Descriptor string: wpkh([73c5da0a/84'/0'/0']xpub.../0/*)
             extractFingerprint(descriptor.toString())
@@ -1506,10 +1501,6 @@ class WalletRepository(context: Context) {
                     )
                 Pair(external, internal)
             }
-            AddressType.SILENT_PAYMENT ->
-                throw IllegalArgumentException(
-                    "Silent Payment is not a BDK wallet type. Use SilentPaymentRepository instead."
-                )
         }
     }
 
@@ -1741,10 +1732,6 @@ class WalletRepository(context: Context) {
                 AddressType.LEGACY -> "pkh($wif)"
                 AddressType.SEGWIT -> "wpkh($wif)"
                 AddressType.TAPROOT -> "tr($wif)"
-                AddressType.SILENT_PAYMENT ->
-                    throw IllegalArgumentException(
-                        "Silent Payment is not a BDK wallet type. Use SilentPaymentRepository instead."
-                    )
             }
         return Descriptor(descriptorStr, network)
     }

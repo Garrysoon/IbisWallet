@@ -283,8 +283,7 @@ object QrFormatParser {
                 AddressType.SEGWIT -> "p2wpkh" to "p2wpkh_deriv"
                 AddressType.LEGACY -> "p2pkh" to "p2pkh_deriv"
                 AddressType.TAPROOT -> "p2tr" to "p2tr_deriv"
-                AddressType.SILENT_PAYMENT -> null to null // Not supported by ColdCard
-            } ?: (return null)
+            }
 
         // Try the preferred type first, then fall back to any available key
         var key = obj.optString(keyField, "").takeIf { it.isNotBlank() }

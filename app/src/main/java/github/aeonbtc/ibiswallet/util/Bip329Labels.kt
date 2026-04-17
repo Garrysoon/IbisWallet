@@ -92,7 +92,6 @@ object Bip329Labels {
             AddressType.LEGACY -> "pkh([$fp/$path])"
             AddressType.SEGWIT -> "wpkh([$fp/$path])"
             AddressType.TAPROOT -> "tr([$fp/$path])"
-            AddressType.SILENT_PAYMENT -> null // Not a descriptor-based type
         }
     }
 

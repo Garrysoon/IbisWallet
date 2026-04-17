@@ -82,6 +82,8 @@ import github.aeonbtc.ibiswallet.util.getNfcAvailability
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.util.Locale
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.TextButton
 
 @Composable
 fun ReceiveScreen(
@@ -110,6 +112,27 @@ fun ReceiveScreen(
     var showLabelField by remember { mutableStateOf(false) }
     val amountBringIntoViewRequester = rememberBringIntoViewRequesterOnExpand(showAmountField, "receive_amount")
     val labelBringIntoViewRequester = rememberBringIntoViewRequesterOnExpand(showLabelField, "receive_label")
+
+    // Silent Payment onboarding dialog state
+    var showSilentPaymentSuggestion by remember { mutableStateOf(false) }
+    var silentPaymentSuggestionChecked by remember { mutableStateOf(false) }
+
+    // Check for Silent Payment suggestion on first open
+    LaunchedEffect(Unit) {
+        if (!silentPaymentSuggestionChecked) {
+            silentPaymentSuggestionChecked = true
+            val secureStorage = SecureStorage.getInstance(context)
+            val activeWalletId = secureStorage.getActiveWalletId()
+            if (activeWalletId != null) {
+                // Check if Silent Payments have never been suggested or enabled
+                val hasBeenSuggested = secureStorage.getBoolean("sp_suggestion_shown_${activeWalletId}", false)
+                val isEnabled = secureStorage.isSilentPaymentEnabled(activeWalletId)
+                if (!hasBeenSuggested && !isEnabled) {
+                    showSilentPaymentSuggestion = true
+                }
+            }
+        }
+    }
 
     // Convert amount to sats for URI (handles BTC, sats, and USD input)
     val amountInSats =
@@ -641,6 +664,57 @@ fun ReceiveScreen(
         }
 
         Spacer(modifier = Modifier.height(12.dp))
+
+        // Silent Payment onboarding suggestion dialog
+        if (showSilentPaymentSuggestion) {
+            AlertDialog(
+                onDismissRequest = {
+                    showSilentPaymentSuggestion = false
+                    // Mark as suggested so we don't show again
+                    val secureStorage = SecureStorage.getInstance(context)
+                    val activeWalletId = secureStorage.getActiveWalletId()
+                    if (activeWalletId != null) {
+                        secureStorage.putBoolean("sp_suggestion_shown_${activeWalletId}", true)
+                    }
+                },
+                title = { Text("Enable Silent Payments?") },
+                text = {
+                    Text(
+                        "Silent Payments (BIP 352) let you receive bitcoin without revealing your address on the blockchain. " +
+                        "You can share one static address that generates unique receiving addresses for each payment."
+                    )
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            showSilentPaymentSuggestion = false
+                            val secureStorage = SecureStorage.getInstance(context)
+                            val activeWalletId = secureStorage.getActiveWalletId()
+                            if (activeWalletId != null) {
+                                secureStorage.putBoolean("sp_suggestion_shown_${activeWalletId}", true)
+                                // TODO: Navigate to Silent Payment onboarding or enable directly
+                            }
+                        }
+                    ) {
+                        Text("Learn More", color = BitcoinOrange)
+                    }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = {
+                            showSilentPaymentSuggestion = false
+                            val secureStorage = SecureStorage.getInstance(context)
+                            val activeWalletId = secureStorage.getActiveWalletId()
+                            if (activeWalletId != null) {
+                                secureStorage.putBoolean("sp_suggestion_shown_${activeWalletId}", true)
+                            }
+                        }
+                    ) {
+                        Text("Not Now")
+                    }
+                }
+            )
+        }
     }
 }
 

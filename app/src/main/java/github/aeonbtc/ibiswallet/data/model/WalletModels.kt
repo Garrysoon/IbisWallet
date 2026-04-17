@@ -42,12 +42,6 @@ enum class AddressType(
         defaultPath = "m/86'/0'/0'/0",
         accountPath = "86'/0'/0'",
     ),
-    SILENT_PAYMENT(
-        displayName = "Silent Payment",
-        description = "BIP352 - Static reusable address starts with 'sp1' (Experimental)",
-        defaultPath = "m/352'/0'/0'/0", // BIP352 scan key path
-        accountPath = "352'/0'/0'",
-    ),
 }
 
 /**
