@@ -1,24 +1,31 @@
 package github.aeonbtc.ibiswallet.silentpayments
 
-import org.bitcoinj.secp256k1.api.P256K1Key
-import org.bitcoinj.secp256k1.api.P256K1XOnlyPubKey
-import org.bitcoinj.secp256k1.api.Secp256k1
-import org.bitcoinj.secp256k1.bouncy.BouncySecp256k1
 import org.bitcoindevkit.Mnemonic
 import org.bitcoindevkit.Network
+import org.bouncycastle.asn1.x9.X9ECParameters
+import org.bouncycastle.crypto.digests.SHA256Digest
+import org.bouncycastle.crypto.params.ECDomainParameters
+import org.bouncycastle.crypto.params.ECPrivateKeyParameters
+import org.bouncycastle.crypto.params.ECPublicKeyParameters
+import org.bouncycastle.crypto.signers.ECDSASigner
+import org.bouncycastle.math.ec.ECCurve
+import org.bouncycastle.math.ec.ECPoint
+import org.bouncycastle.jce.provider.BouncyCastleProvider
+import java.math.BigInteger
 import java.security.MessageDigest
+import java.security.SecureRandom
+import java.security.Security
 
 /**
  * Silent Payments (BIP 352) Cryptographic Operations
  *
- * Uses bitcoinj secp256k1 library (org.bitcoinj.secp256k1) for all elliptic curve operations:
- * - Public key generation from private key
+ * Uses BouncyCastle (org.bouncycastle) for all elliptic curve operations:
+ * - Public key generation from private key: P = d·G
  * - Point addition: Q = P + t·G (for generating tweaked addresses)
  * - Scalar addition: b' = b + t (mod n) (for deriving spend keys)
  * - Tagged hash computation (BIP0352/Const)
  *
- * Library: org.bitcoinj.secp256k1 (v0.17.1)
- * Provider: BouncyCastle implementation (pure Java, no native libs needed)
+ * BouncyCastle is included in Android and the JVM, no extra dependencies needed.
  *
  * Reference: https://github.com/bitcoin/bips/blob/master/bip-0352.mediawiki
  */
@@ -38,18 +45,36 @@ object SilentPaymentCrypto {
     private const val BIP0352_CONST = "BIP0352/Const"
     private const val BIP0352_SEND = "BIP0352/Send"
 
-    // Lazy-initialized secp256k1 instance
-    private val secp256k1: Secp256k1 by lazy {
-        BouncySecp256k1()
+    // secp256k1 curve parameters (BouncyCastle)
+    private val ecParams: ECDomainParameters by lazy {
+        // Ensure BouncyCastle provider is registered
+        if (Security.getProvider("BC") == null) {
+            Security.addProvider(BouncyCastleProvider())
+        }
+
+        // secp256k1 parameters from SEC 2
+        val p = BigInteger("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F", 16)
+        val a = BigInteger.ZERO
+        val b = BigInteger("7", 16)
+        val n = BigInteger("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141", 16)
+        val h = BigInteger.ONE
+        val gX = BigInteger("79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798", 16)
+        val gY = BigInteger("483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8", 16)
+
+        val curve = ECCurve.Fp(p, a, b, n, h)
+        val g = curve.createPoint(gX, gY)
+        ECDomainParameters(curve, g, n, h)
     }
+
+    private val curveOrder: BigInteger by lazy { ecParams.n }
 
     /**
      * Initialize secp256k1 library.
-     * Called automatically on first use.
+     * BouncyCastle is auto-initialized on first use.
      */
     fun initialize() {
-        // Force initialization of lazy secp256k1
-        secp256k1.toString()
+        // Force initialization of lazy ecParams
+        ecParams.toString()
     }
 
     /**
@@ -57,9 +82,10 @@ object SilentPaymentCrypto {
      */
     fun isAvailable(): Boolean {
         return try {
-            val testPrivKey = P256K1Key(randomBytes(32))
-            val pubKey = secp256k1.pubKeyCreate(testPrivKey)
-            pubKey != null
+            // Test with a simple operation
+            val testPrivKey = BigInteger.ONE
+            val pubKey = scalarMultiplyBase(testPrivKey)
+            pubKey != null && !pubKey.isInfinity
         } catch (e: Exception) {
             false
         }
@@ -95,21 +121,14 @@ object SilentPaymentCrypto {
             ?: throw SilentPaymentException.CryptoError("Failed to derive spend key from mnemonic")
 
         // Generate public keys from private keys using secp256k1
-        val scanKey = P256K1Key(scanPrivKey)
-        val spendKey = P256K1Key(spendPrivKey)
-
-        val scanPubKey = secp256k1.pubKeyCreate(scanKey)
-        val spendPubKey = secp256k1.pubKeyCreate(spendKey)
-
-        // Convert to byte arrays
-        val scanPublicKeyBytes = compressedPubKeyToBytes(scanPubKey)
-        val spendPublicKeyBytes = compressedPubKeyToBytes(spendPubKey)
+        val scanPubKey = derivePublicKey(scanPrivKey)
+        val spendPubKey = derivePublicKey(spendPrivKey)
 
         return SilentPaymentKeys(
             scanPrivateKey = scanPrivKey,
-            scanPublicKey = scanPublicKeyBytes,
+            scanPublicKey = scanPubKey,
             spendPrivateKey = spendPrivKey,
-            spendPublicKey = spendPublicKeyBytes,
+            spendPublicKey = spendPubKey,
         )
     }
 
@@ -147,11 +166,28 @@ object SilentPaymentCrypto {
     }
 
     /**
-     * Convert bitcoinj public key to 33-byte compressed format.
+     * Generate a public key from a private key.
+     * P = d·G where d is private key and G is generator point.
+     *
+     * @param privateKey 32-byte private key
+     * @return 33-byte compressed public key
      */
-    private fun compressedPubKeyToBytes(pubKey: org.bitcoinj.secp256k1.api.P256K1PubKey): ByteArray {
-        // Get compressed public key (33 bytes: 0x02/0x03 + 32-byte x-coordinate)
-        return pubKey.toCompressed()
+    fun derivePublicKey(privateKey: ByteArray): ByteArray {
+        if (privateKey.size != 32) {
+            throw SilentPaymentException.CryptoError(
+                "Private key must be 32 bytes, got ${privateKey.size}"
+            )
+        }
+
+        val d = BigInteger(1, privateKey)
+        if (d <= BigInteger.ZERO || d >= curveOrder) {
+            throw SilentPaymentException.CryptoError("Invalid private key (out of range)")
+        }
+
+        val point = scalarMultiplyBase(d)
+            ?: throw SilentPaymentException.CryptoError("Failed to generate public key")
+
+        return ecPointToCompressedBytes(point)
     }
 
     /**
@@ -362,9 +398,12 @@ object SilentPaymentCrypto {
      * This is the core Silent Payments operation for generating
      * the tweaked output public key that the recipient can spend.
      *
-     * Uses secp256k1_ec_pubkey_tweak_add: adds tweak*G to the public key.
+     * BIP352: Q = P_spend + t·G
+     * - P_spend is the recipient's spend public key
+     * - t is the tweak from hash(P_scan || P_input)
+     * - G is the generator point
      *
-     * @param spendPublicKey Recipient's spend public key P (33 bytes)
+     * @param spendPublicKey Recipient's spend public key P (33 bytes compressed)
      * @param tweak Tweak value t (32 bytes)
      * @return Tweaked public key Q (33 bytes compressed)
      */
@@ -384,16 +423,21 @@ object SilentPaymentCrypto {
         }
 
         return try {
-            // Parse public key
-            val pubKey = secp256k1.pubKeyParse(spendPublicKey)
+            // Parse spend public key (P)
+            val pPoint = compressedBytesToECPoint(spendPublicKey)
                 ?: throw SilentPaymentException.CryptoError("Failed to parse spend public key")
 
-            // Apply tweak: Q = P + t·G
-            val tweakedPubKey = secp256k1.pubKeyTweakAdd(pubKey, tweak)
-                ?: throw SilentPaymentException.CryptoError("Failed to tweak public key")
+            // Compute t·G (scalar multiplication)
+            val tScalar = BigInteger(1, tweak)
+            val tG = scalarMultiplyBase(tScalar)
+                ?: throw SilentPaymentException.CryptoError("Failed to compute t·G")
 
-            // Serialize to compressed format (33 bytes)
-            tweakedPubKey.toCompressed()
+            // Q = P + t·G (point addition)
+            val qPoint = pPoint.add(tG)
+                .normalize()
+
+            // Convert back to compressed bytes
+            ecPointToCompressedBytes(qPoint)
         } catch (e: Exception) {
             throw SilentPaymentException.CryptoError(
                 "Failed to tweak public key: ${e.message}"
@@ -409,8 +453,6 @@ object SilentPaymentCrypto {
      * - b is the spend private key
      * - t is the tweak from scanning
      * - n is the curve order
-     *
-     * Uses secp256k1_ec_privkey_tweak_add: adds tweak to private key (mod n).
      *
      * @param spendPrivateKey Original spend private key b (32 bytes)
      * @param tweak Tweak value t (32 bytes)
@@ -432,11 +474,24 @@ object SilentPaymentCrypto {
         }
 
         return try {
-            // Apply tweak to private key: b' = b + t (mod n)
-            val tweakedPrivKey = secp256k1.privKeyTweakAdd(spendPrivateKey, tweak)
-                ?: throw SilentPaymentException.CryptoError("Failed to tweak private key")
+            // b' = b + t (mod n)
+            val b = BigInteger(1, spendPrivateKey)
+            val t = BigInteger(1, tweak)
+            val n = curveOrder
 
-            tweakedPrivKey.bytes
+            val bPrime = b.add(t).mod(n)
+
+            // Convert to 32-byte array
+            val result = ByteArray(32)
+            val bytes = bPrime.toByteArray()
+
+            // Copy to result (handle leading zero in BigInteger representation)
+            val srcOffset = if (bytes.size > 32) bytes.size - 32 else 0
+            val destOffset = 32 - (bytes.size - srcOffset)
+            val length = bytes.size - srcOffset
+
+            System.arraycopy(bytes, srcOffset, result, destOffset, length)
+            result
         } catch (e: Exception) {
             throw SilentPaymentException.CryptoError(
                 "Failed to derive private key: ${e.message}"
@@ -512,35 +567,12 @@ object SilentPaymentCrypto {
     }
 
     /**
-     * Generate a public key from a private key.
-     *
-     * @param privateKey 32-byte private key
-     * @return 33-byte compressed public key
-     */
-    fun derivePublicKey(privateKey: ByteArray): ByteArray {
-        if (privateKey.size != 32) {
-            throw SilentPaymentException.CryptoError(
-                "Private key must be 32 bytes, got ${privateKey.size}"
-            )
-        }
-        return try {
-            val key = P256K1Key(privateKey)
-            val pubKey = secp256k1.pubKeyCreate(key)
-            pubKey.toCompressed()
-        } catch (e: Exception) {
-            throw SilentPaymentException.CryptoError(
-                "Failed to derive public key: ${e.message}"
-            )
-        }
-    }
-
-    /**
      * Verify a private key is valid (non-zero and less than curve order).
      */
     fun isValidPrivateKey(privateKey: ByteArray): Boolean {
         if (privateKey.size != 32) return false
-        // Check not all zeros
-        return privateKey.any { it != 0.toByte() }
+        val d = BigInteger(1, privateKey)
+        return d > BigInteger.ZERO && d < curveOrder
     }
 
     /**
@@ -549,11 +581,101 @@ object SilentPaymentCrypto {
     fun isValidPublicKey(publicKey: ByteArray): Boolean {
         if (publicKey.size != 33) return false
         // Check first byte is valid compression flag
-        return publicKey[0] == 0x02.toByte() || publicKey[0] == 0x03.toByte()
+        if (publicKey[0] != 0x02.toByte() && publicKey[0] != 0x03.toByte()) return false
+        // Try to parse
+        return try {
+            compressedBytesToECPoint(publicKey) != null
+        } catch (e: Exception) {
+            false
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // Helper functions
+    // BouncyCastle helper functions
+    // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * Scalar multiplication: d·G
+     * Multiply generator point by scalar d.
+     */
+    private fun scalarMultiplyBase(d: BigInteger): ECPoint? {
+        return ecParams.g.multiply(d)
+    }
+
+    /**
+     * Convert compressed bytes (33 bytes: 0x02/0x03 + 32-byte x) to ECPoint.
+     */
+    private fun compressedBytesToECPoint(bytes: ByteArray): ECPoint? {
+        if (bytes.size != 33) return null
+
+        val yIsEven = bytes[0] == 0x02.toByte()
+        val yIsOdd = bytes[0] == 0x03.toByte()
+        if (!yIsEven && !yIsOdd) return null
+
+        val x = BigInteger(1, bytes.copyOfRange(1, 33))
+        return try {
+            val curve = ecParams.curve as ECCurve.Fp
+            val p = curve.q
+
+            // y² = x³ + 7 (mod p)
+            val xCubed = x.modPow(BigInteger.valueOf(3), p)
+            val seven = BigInteger.valueOf(7)
+            val ySquared = xCubed.add(seven).mod(p)
+
+            // y = sqrt(y²)
+            val y = modSqrt(ySquared, p)
+                ?: return null
+
+            // Choose correct y based on parity
+            val yFinal = if (y.testBit(0) == yIsOdd) y else p.subtract(y)
+
+            curve.createPoint(x, yFinal)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Compute modular square root: x such that x² ≡ n (mod p)
+     * Using Tonelli-Shanks algorithm for prime p ≡ 3 (mod 4).
+     * For secp256k1, p ≡ 3 (mod 4), so sqrt(n) = n^((p+1)/4) mod p.
+     */
+    private fun modSqrt(n: BigInteger, p: BigInteger): BigInteger? {
+        // secp256k1: p ≡ 3 (mod 4), use simple formula
+        // sqrt(n) = n^((p+1)/4) mod p
+        val exponent = p.add(BigInteger.ONE).shiftRight(2) // (p+1)/4
+        val sqrt = n.modPow(exponent, p)
+
+        // Verify
+        return if (sqrt.multiply(sqrt).mod(p) == n) {
+            sqrt
+        } else {
+            null // No square root exists
+        }
+    }
+
+    /**
+     * Convert ECPoint to compressed bytes (33 bytes: 0x02/0x03 + 32-byte x).
+     */
+    private fun ecPointToCompressedBytes(point: ECPoint): ByteArray {
+        val affineX = point.affineXCoord.toBigInteger()
+        val affineY = point.affineYCoord.toBigInteger()
+
+        val result = ByteArray(33)
+        // First byte: 0x02 if y is even, 0x03 if y is odd
+        result[0] = if (affineY.testBit(0)) 0x03.toByte() else 0x02.toByte()
+
+        // Copy x coordinate (32 bytes, big-endian)
+        val xBytes = affineX.toByteArray()
+        val xOffset = if (xBytes.size > 32) xBytes.size - 32 else 0
+        val xLength = xBytes.size - xOffset
+        System.arraycopy(xBytes, xOffset, result, 33 - xLength, xLength)
+
+        result
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Hash helper functions
     // ═══════════════════════════════════════════════════════════════
 
     /**
@@ -579,15 +701,6 @@ object SilentPaymentCrypto {
     private operator fun ByteArray.plus(other: ByteArray): ByteArray {
         return this.copyOf(this.size + other.size).apply {
             other.copyInto(this, this@plus.size)
-        }
-    }
-
-    /**
-     * Generate random bytes.
-     */
-    private fun randomBytes(size: Int): ByteArray {
-        return java.security.SecureRandom().let { random ->
-            ByteArray(size).apply { random.nextBytes(this) }
         }
     }
 }

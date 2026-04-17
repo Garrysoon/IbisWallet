@@ -23,7 +23,6 @@ hummingbird = "1.7.2"
 lwk = "0.15.0"
 jna = "5.14.0"
 lightningKmp = "1.11.4"
-secp256k1 = "0.17.1"
 # Testing
 kotest = "5.9.1"
 mockk = "1.13.13"
@@ -60,8 +59,6 @@ hummingbird = { group = "com.sparrowwallet", name = "hummingbird", version.ref =
 lwk = { group = "com.blockstream", name = "lwk", version.ref = "lwk" }
 jna = { group = "net.java.dev.jna", name = "jna", version.ref = "jna" }
 lightning-kmp-core-jvm = { group = "fr.acinq.lightning", name = "lightning-kmp-core-jvm", version.ref = "lightningKmp" }
-secp256k1-api = { group = "org.bitcoinj.secp256k1", name = "secp256k1-api", version.ref = "secp256k1" }
-secp256k1-bouncy = { group = "org.bitcoinj.secp256k1", name = "secp256k1-bouncy", version.ref = "secp256k1" }
 # Testing
 kotest-runner-junit5 = { group = "io.kotest", name = "kotest-runner-junit5", version.ref = "kotest" }
 kotest-assertions-core = { group = "io.kotest", name = "kotest-assertions-core", version.ref = "kotest" }
