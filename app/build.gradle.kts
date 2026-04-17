@@ -152,6 +152,9 @@ dependencies {
     implementation(libs.jna) { artifact { type = "aar" } }
     implementation(libs.lightning.kmp.core.jvm)
 
+    // Silent Payments (BIP 352) - secp256k1 operations
+    implementation("org.kotlincrypto.curves:secp256k1-kmp:0.13.0")
+
     // Testing
     testImplementation(libs.kotest.runner.junit5)
     testImplementation(libs.kotest.assertions.core)
