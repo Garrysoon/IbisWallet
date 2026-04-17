@@ -34,6 +34,8 @@ import github.aeonbtc.ibiswallet.util.findMaxExactSendAmount
 import github.aeonbtc.ibiswallet.tor.CachingElectrumProxy
 import github.aeonbtc.ibiswallet.tor.ElectrumNotification
 import github.aeonbtc.ibiswallet.util.TofuTrustManager
+import github.aeonbtc.ibiswallet.silentpayments.SilentPaymentSyncManager
+import github.aeonbtc.ibiswallet.silentpayments.SilentPaymentOutput
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -126,10 +128,74 @@ class WalletRepository(context: Context) {
     private val lwkDbDir: File = File(context.filesDir, LWK_DB_DIR).apply { mkdirs() }
     private val sweepTempDbDir: File = File(context.cacheDir, SWEEP_TEMP_DB_DIR).apply { mkdirs() }
 
+    // Silent Payment sync manager (lazy-initialized, needs network)
+    private var silentPaymentSyncManager: SilentPaymentSyncManager? = null
+
     init {
         if (!cleanupSweepTempDatabases() && BuildConfig.DEBUG) {
             Log.w(TAG, "Failed to clean sweep temp databases on startup")
         }
+    }
+
+    /**
+     * Get or create Silent Payment sync manager.
+     * Initializes lazily with the current network from active wallet.
+     */
+    private fun getOrCreateSilentPaymentManager(): SilentPaymentSyncManager? {
+        val activeWalletId = secureStorage.getActiveWalletId() ?: return null
+        val metadata = secureStorage.getWalletMetadata(activeWalletId) ?: return null
+        val network = metadata.network.toBdkNetwork()
+
+        // Create or update the manager
+        val existing = silentPaymentSyncManager
+        if (existing != null) {
+            return existing
+        }
+
+        val manager = SilentPaymentSyncManager(
+            secureStorage = secureStorage,
+            network = network,
+            walletRepository = this,
+        )
+        silentPaymentSyncManager = manager
+        return manager
+    }
+
+    /**
+     * Scan for Silent Payment outputs during wallet sync.
+     * Called after successful BDK sync to detect incoming SP payments.
+     */
+    private suspend fun scanForSilentPayments(walletId: String, blockHeight: Int) {
+        if (!secureStorage.isSilentPaymentEnabled(walletId)) {
+            return
+        }
+
+        val manager = getOrCreateSilentPaymentManager() ?: return
+
+        try {
+            if (BuildConfig.DEBUG) Log.d(TAG, "Starting Silent Payment scan for wallet $walletId")
+            val outputs = manager.scanDuringSync(walletId, blockHeight)
+            if (outputs.isNotEmpty()) {
+                if (BuildConfig.DEBUG) Log.d(TAG, "Found ${outputs.size} Silent Payment outputs")
+                updateWalletStateWithSilentPayments(outputs)
+            }
+        } catch (e: Exception) {
+            if (BuildConfig.DEBUG) Log.e(TAG, "Silent Payment scan failed: ${e.message}")
+        }
+    }
+
+    /**
+     * Update wallet state with Silent Payment outputs.
+     * Adds SP balance to the wallet state for display.
+     */
+    private fun updateWalletStateWithSilentPayments(outputs: List<SilentPaymentOutput>) {
+        val currentState = _walletState.value
+        val spBalance = outputs.filter { !it.isSpent }.sumOf { it.amountSat }
+
+        _walletState.value = currentState.copy(
+            silentPaymentBalanceSat = spBalance,
+            silentPaymentUtxos = outputs.filter { !it.isSpent },
+        )
     }
 
     /**
@@ -2142,6 +2208,13 @@ class WalletRepository(context: Context) {
                 }
 
                 secureStorage.saveLastSyncTime(activeWalletId, System.currentTimeMillis())
+
+                // Scan for Silent Payment outputs after successful sync
+                val currentHeight = _walletState.value.blockHeight?.toInt() ?: 0
+                if (currentHeight > 0) {
+                    scanForSilentPayments(activeWalletId, currentHeight)
+                }
+
                 if (BuildConfig.DEBUG) Log.d(TAG, "Quick sync completed successfully")
                 WalletResult.Success(Unit)
             } catch (e: Exception) {
@@ -2344,6 +2417,12 @@ class WalletRepository(context: Context) {
                     refreshScriptHashCache(postSyncWallet)
                     _walletState.value = _walletState.value.copy(isSyncing = false, isFullSyncing = false, syncProgress = null)
                     scheduleDetailedTransactionRefresh(activeWalletId, postSyncWallet)
+
+                    // Scan for Silent Payment outputs after full sync
+                    val currentHeight = _walletState.value.blockHeight?.toInt() ?: 0
+                    if (currentHeight > 0) {
+                        scanForSilentPayments(activeWalletId, currentHeight)
+                    }
 
                     if (BuildConfig.DEBUG) Log.d(TAG, "Full sync completed successfully")
                     WalletResult.Success(Unit)

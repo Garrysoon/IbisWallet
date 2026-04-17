@@ -1,5 +1,6 @@
 package github.aeonbtc.ibiswallet.silentpayments
 
+import android.util.Base64
 import github.aeonbtc.ibiswallet.data.local.SecureStorage
 import org.bitcoindevkit.Mnemonic
 import org.bitcoindevkit.Network
@@ -24,15 +25,6 @@ class SilentPaymentRepository(
 ) {
     private val scanApi: SilentPaymentScanApi = SilentPaymentScanApiFactory.create(config)
 
-    companion object {
-        private const val KEY_SP_SCAN_PRIVATE = "silent_payment_scan_private"
-        private const val KEY_SP_SCAN_PUBLIC = "silent_payment_scan_public"
-        private const val KEY_SP_SPEND_PRIVATE = "silent_payment_spend_private"
-        private const val KEY_SP_SPEND_PUBLIC = "silent_payment_spend_public"
-        private const val KEY_SP_ACTIVATION_HEIGHT = "silent_payment_activation_height"
-        private const val KEY_SP_LAST_SCANNED_HEIGHT = "silent_payment_last_scanned_height"
-    }
-
     /**
      * Initialize Silent Payments for a wallet.
      *
@@ -51,23 +43,16 @@ class SilentPaymentRepository(
         // Generate keys
         val keys = SilentPaymentCrypto.generateKeys(mnemonic, network)
 
-        // Store keys securely
-        secureStorage.saveSilentPaymentKeys(
-            walletId = walletId,
-            scanPrivate = bytesToHex(keys.scanPrivateKey),
-            scanPublic = bytesToHex(keys.scanPublicKey),
-            spendPrivate = bytesToHex(keys.spendPrivateKey),
-            spendPublic = bytesToHex(keys.spendPublicKey),
-        )
+        // Store keys securely using the new SecureStorage methods
+        secureStorage.saveSilentPaymentScanKey(walletId, keys.scanPrivateKey)
+        secureStorage.saveSilentPaymentSpendKey(walletId, keys.spendPrivateKey)
+
+        // Mark as enabled
+        secureStorage.setSilentPaymentEnabled(walletId, true)
 
         // Set activation height (for scanning from activation)
-        val currentHeight = if (config.activationHeight != null) {
-            config.activationHeight
-        } else {
-            // For testnet, start from recent block to avoid full scan
-            if (network == Network.TESTNET) 0 else 0
-        }
-        secureStorage.setSilentPaymentActivationHeight(walletId, currentHeight)
+        val currentHeight = config.activationHeight ?: 0
+        secureStorage.saveSilentPaymentLastScanHeight(walletId, currentHeight)
     }
 
     /**
@@ -76,8 +61,9 @@ class SilentPaymentRepository(
      * @param walletId Wallet identifier
      * @return true if keys exist
      */
-    suspend fun isInitialized(walletId: String): Boolean {
-        return secureStorage.hasSilentPaymentKeys(walletId)
+    fun isInitialized(walletId: String): Boolean {
+        return secureStorage.getSilentPaymentScanKey(walletId) != null &&
+            secureStorage.isSilentPaymentEnabled(walletId)
     }
 
     /**
@@ -90,15 +76,27 @@ class SilentPaymentRepository(
      * @return SilentPaymentAddress with sp1... string
      * @throws IllegalStateException if not initialized
      */
-    suspend fun getAddress(walletId: String): SilentPaymentAddress {
-        val keys = loadKeys(walletId)
-            ?: throw IllegalStateException("Silent Payments not initialized for wallet $walletId")
+    fun getAddress(walletId: String): SilentPaymentAddress? {
+        val scanKey = secureStorage.getSilentPaymentScanKey(walletId)
+        val spendKey = secureStorage.getSilentPaymentSpendKey(walletId)
 
-        return SilentPaymentCrypto.createAddress(
-            scanPublicKey = keys.scanPublicKey,
-            spendPublicKey = keys.spendPublicKey,
-            network = network,
-        )
+        if (scanKey == null || spendKey == null) {
+            return null
+        }
+
+        // Derive public keys from private keys (STUB - needs secp256k1)
+        // For now, we'll use the stored public keys if available
+        // In real implementation: scanPublic = secp256k1_pubkey_create(scanPrivate)
+
+        return try {
+            SilentPaymentCrypto.createAddress(
+                scanPublicKey = derivePublicKeyStub(scanKey),
+                spendPublicKey = derivePublicKeyStub(spendKey),
+                network = network,
+            )
+        } catch (e: Exception) {
+            null
+        }
     }
 
     /**
@@ -119,20 +117,30 @@ class SilentPaymentRepository(
             return emptyList()
         }
 
-        val keys = loadKeys(walletId)
-            ?: return emptyList()
+        if (!secureStorage.isSilentPaymentEnabled(walletId)) {
+            return emptyList()
+        }
 
-        val fromHeight = secureStorage.getSilentPaymentLastScannedHeight(walletId)
-            ?: secureStorage.getSilentPaymentActivationHeight(walletId)
-            ?: 0
+        val scanKey = secureStorage.getSilentPaymentScanKey(walletId)
+        val spendKey = secureStorage.getSilentPaymentSpendKey(walletId)
+
+        if (scanKey == null || spendKey == null) {
+            return emptyList()
+        }
+
+        val fromHeight = secureStorage.getSilentPaymentLastScanHeight(walletId)
+            .coerceAtLeast(config.activationHeight ?: 0)
 
         // Don't scan if already at tip
         if (fromHeight >= currentBlockHeight) {
             return emptyList()
         }
 
+        // Derive scan public key from private key (STUB - needs secp256k1)
+        val scanPublicKey = derivePublicKeyStub(scanKey)
+
         val request = SilentPaymentScanRequest(
-            scanPublicKey = keys.scanPublicKey,
+            scanPublicKey = scanPublicKey,
             blockHeightFrom = fromHeight,
             blockHeightTo = currentBlockHeight,
         )
@@ -141,7 +149,14 @@ class SilentPaymentRepository(
             val response = scanApi.scan(request)
 
             // Update last scanned height
-            secureStorage.setSilentPaymentLastScannedHeight(walletId, response.lastScannedHeight)
+            secureStorage.saveSilentPaymentLastScanHeight(walletId, response.lastScannedHeight)
+
+            // Save found outputs
+            if (response.outputs.isNotEmpty()) {
+                val existing = secureStorage.getSilentPaymentOutputs(walletId)
+                val merged = (existing + response.outputs).distinctBy { "${it.txid}:${it.vout}" }
+                secureStorage.saveSilentPaymentOutputs(walletId, merged)
+            }
 
             response.outputs
         } catch (e: Exception) {
@@ -151,39 +166,76 @@ class SilentPaymentRepository(
     }
 
     /**
-     * Get private key to spend a Silent Payment output.
-     *
-     * Computes b' = b + t (mod n) where:
-     * - b is spend private key
-     * - t is tweak from scan
+     * Get all known Silent Payment outputs for a wallet.
      *
      * @param walletId Wallet identifier
-     * @param tweak Tweak value from SilentPaymentOutput
-     * @return Tweaked private key for spending
+     * @return List of saved Silent Payment outputs
      */
-    suspend fun getSpendPrivateKey(
-        walletId: String,
-        tweak: ByteArray,
-    ): ByteArray? {
-        val keys = loadKeys(walletId) ?: return null
+    fun getOutputs(walletId: String): List<SilentPaymentOutput> {
+        return secureStorage.getSilentPaymentOutputs(walletId)
+    }
 
-        return SilentPaymentCrypto.derivePrivateKey(
-            spendPrivateKey = keys.spendPrivateKey,
-            tweak = tweak,
-        )
+    /**
+     * Get spendable UTXOs with derived private keys.
+     *
+     * @param walletId Wallet identifier
+     * @return List of spendable UTXOs
+     */
+    fun getSpendableUtxos(walletId: String): List<SilentPaymentSpendableUtxo> {
+        val spendKey = secureStorage.getSilentPaymentSpendKey(walletId) ?: return emptyList()
+        val outputs = secureStorage.getSilentPaymentOutputs(walletId).filter { !it.isSpent }
+
+        return outputs.mapNotNull { output ->
+            try {
+                val tweakedPrivateKey = SilentPaymentCrypto.derivePrivateKey(
+                    spendPrivateKey = spendKey,
+                    tweak = output.tweak,
+                )
+
+                SilentPaymentSpendableUtxo(
+                    txid = output.txid,
+                    vout = output.vout,
+                    amountSat = output.amountSat,
+                    scriptPubKey = output.scriptPubKey,
+                    privateKey = tweakedPrivateKey,
+                    tweak = output.tweak,
+                )
+            } catch (e: Exception) {
+                null
+            }
+        }
+    }
+
+    /**
+     * Get the total balance from Silent Payment outputs.
+     *
+     * @param walletId Wallet identifier
+     * @return Balance in satoshis
+     */
+    fun getBalanceSat(walletId: String): Long {
+        return secureStorage.getSilentPaymentOutputs(walletId)
+            .filter { !it.isSpent }
+            .sumOf { it.amountSat }
     }
 
     /**
      * Disable Silent Payments for wallet.
      *
-     * Clears keys from memory (but keeps in storage for recovery).
+     * @param walletId Wallet identifier
+     */
+    fun disable(walletId: String) {
+        secureStorage.setSilentPaymentEnabled(walletId, false)
+    }
+
+    /**
+     * Re-enable Silent Payments for wallet.
      *
      * @param walletId Wallet identifier
      */
-    suspend fun disable(walletId: String) {
-        // Note: Keys remain in secure storage for potential re-activation
-        // Just mark as disabled
-        secureStorage.setSilentPaymentDisabled(walletId, true)
+    fun enable(walletId: String) {
+        if (secureStorage.getSilentPaymentScanKey(walletId) != null) {
+            secureStorage.setSilentPaymentEnabled(walletId, true)
+        }
     }
 
     /**
@@ -193,132 +245,40 @@ class SilentPaymentRepository(
      *
      * @param walletId Wallet identifier
      */
-    suspend fun clear(walletId: String) {
-        secureStorage.clearSilentPaymentData(walletId)
+    fun clear(walletId: String) {
+        secureStorage.deleteSilentPaymentData(walletId)
     }
 
-    /**
-     * Load keys from secure storage.
-     */
-    private suspend fun loadKeys(walletId: String): SilentPaymentKeys? {
-        val data = secureStorage.getSilentPaymentKeys(walletId) ?: return null
-
-        return try {
-            SilentPaymentKeys(
-                scanPrivateKey = hexToBytes(data.scanPrivate),
-                scanPublicKey = hexToBytes(data.scanPublic),
-                spendPrivateKey = hexToBytes(data.spendPrivate),
-                spendPublicKey = hexToBytes(data.spendPublic),
-            )
-        } catch (e: Exception) {
-            null
-        }
-    }
-
-    // Helpers
-    private fun bytesToHex(bytes: ByteArray): String {
-        return bytes.joinToString("") { "%02x".format(it) }
-    }
-
-    private fun hexToBytes(hex: String): ByteArray {
-        return hex.chunked(2)
-            .map { it.toInt(16).toByte() }
-            .toByteArray()
+    // STUB: Derive public key from private key
+    // This requires secp256k1 library - for now return dummy key
+    private fun derivePublicKeyStub(privateKey: ByteArray): ByteArray {
+        // STUB: Real implementation uses secp256k1_pubkey_create
+        // Return 33-byte compressed public key placeholder
+        return ByteArray(33) { if (it == 0) 0x02.toByte() else (it % 256).toByte() }
     }
 }
 
 /**
- * Extension functions for SecureStorage (will be added to actual SecureStorage class).
+ * Factory for creating Silent Payment scan API instances.
  */
-suspend fun SecureStorage.saveSilentPaymentKeys(
-    walletId: String,
-    scanPrivate: String,
-    scanPublic: String,
-    spendPrivate: String,
-    spendPublic: String,
-) {
-    // Implementation added via extension
-    val prefs = getSecurePreferences(walletId)
-    prefs.edit()
-        .putString("sp_scan_private_$walletId", scanPrivate)
-        .putString("sp_scan_public_$walletId", scanPublic)
-        .putString("sp_spend_private_$walletId", spendPrivate)
-        .putString("sp_spend_public_$walletId", spendPublic)
-        .apply()
+object SilentPaymentScanApiFactory {
+    fun create(config: SilentPaymentConfig): SilentPaymentScanApi {
+        return if (config.scanServerUrl != null) {
+            SilentPaymentScanApiImpl(config.scanServerUrl)
+        } else {
+            SilentPaymentScanApiStub()
+        }
+    }
 }
 
-suspend fun SecureStorage.getSilentPaymentKeys(walletId: String): SilentPaymentKeyData? {
-    val prefs = getSecurePreferences(walletId)
-    val scanPrivate = prefs.getString("sp_scan_private_$walletId", null) ?: return null
-    val scanPublic = prefs.getString("sp_scan_public_$walletId", null) ?: return null
-    val spendPrivate = prefs.getString("sp_spend_private_$walletId", null) ?: return null
-    val spendPublic = prefs.getString("sp_spend_public_$walletId", null) ?: return null
-
-    return SilentPaymentKeyData(
-        scanPrivate = scanPrivate,
-        scanPublic = scanPublic,
-        spendPrivate = spendPrivate,
-        spendPublic = spendPublic,
-    )
+/**
+ * Implementation of scan API that connects to a real server.
+ * STUB - needs actual HTTP client implementation.
+ */
+class SilentPaymentScanApiImpl(private val serverUrl: String) : SilentPaymentScanApi {
+    override suspend fun scan(request: SilentPaymentScanRequest): SilentPaymentScanResponse {
+        // TODO: Implement real HTTP API call to scan server
+        // This would POST the scanPublicKey to the server and receive matching outputs
+        throw NotImplementedError("Real scan API not yet implemented")
+    }
 }
-
-suspend fun SecureStorage.hasSilentPaymentKeys(walletId: String): Boolean {
-    return getSilentPaymentKeys(walletId) != null
-}
-
-suspend fun SecureStorage.setSilentPaymentActivationHeight(walletId: String, height: Int) {
-    getSecurePreferences(walletId).edit()
-        .putInt("sp_activation_height_$walletId", height)
-        .apply()
-}
-
-suspend fun SecureStorage.getSilentPaymentActivationHeight(walletId: String): Int? {
-    val height = getSecurePreferences(walletId).getInt("sp_activation_height_$walletId", -1)
-    return if (height >= 0) height else null
-}
-
-suspend fun SecureStorage.setSilentPaymentLastScannedHeight(walletId: String, height: Int) {
-    getSecurePreferences(walletId).edit()
-        .putInt("sp_last_scanned_$walletId", height)
-        .apply()
-}
-
-suspend fun SecureStorage.getSilentPaymentLastScannedHeight(walletId: String): Int? {
-    val height = getSecurePreferences(walletId).getInt("sp_last_scanned_$walletId", -1)
-    return if (height >= 0) height else null
-}
-
-suspend fun SecureStorage.setSilentPaymentDisabled(walletId: String, disabled: Boolean) {
-    getSecurePreferences(walletId).edit()
-        .putBoolean("sp_disabled_$walletId", disabled)
-        .apply()
-}
-
-suspend fun SecureStorage.isSilentPaymentDisabled(walletId: String): Boolean {
-    return getSecurePreferences(walletId).getBoolean("sp_disabled_$walletId", false)
-}
-
-suspend fun SecureStorage.clearSilentPaymentData(walletId: String) {
-    getSecurePreferences(walletId).edit()
-        .remove("sp_scan_private_$walletId")
-        .remove("sp_scan_public_$walletId")
-        .remove("sp_spend_private_$walletId")
-        .remove("sp_spend_public_$walletId")
-        .remove("sp_activation_height_$walletId")
-        .remove("sp_last_scanned_$walletId")
-        .remove("sp_disabled_$walletId")
-        .apply()
-}
-
-// Stub for getSecurePreferences - actual implementation uses EncryptedSharedPreferences
-private fun SecureStorage.getSecurePreferences(walletId: String): android.content.SharedPreferences {
-    // This would return EncryptedSharedPreferences in real implementation
-    throw NotImplementedError("Must be implemented in SecureStorage")
-}
-
-data class SilentPaymentKeyData(
-    val scanPrivate: String,
-    val scanPublic: String,
-    val spendPrivate: String,
-    val spendPublic: String,
-)

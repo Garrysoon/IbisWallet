@@ -3110,6 +3110,14 @@ class SecureStorage private constructor(private val context: Context) {
         private const val KEY_LIQUID_DESCRIPTOR_PREFIX = "liquid_descriptor_"
         private const val KEY_LIQUID_WATCH_ONLY_PREFIX = "liquid_watch_only_"
         private const val KEY_LIQUID_SCRIPT_HASH_STATUS_PREFIX = "liquid_script_hash_status_"
+
+        // Silent Payments (BIP 352)
+        private const val KEY_SP_ENABLED_PREFIX = "sp_enabled_"
+        private const val KEY_SP_SCAN_KEY_PREFIX = "sp_scan_key_"
+        private const val KEY_SP_SPEND_KEY_PREFIX = "sp_spend_key_"
+        private const val KEY_SP_ADDRESS_INDEX_PREFIX = "sp_address_index_"
+        private const val KEY_SP_LAST_SCAN_HEIGHT_PREFIX = "sp_last_scan_height_"
+        private const val KEY_SP_OUTPUTS_PREFIX = "sp_outputs_"
     }
 
     // ════════════════════════════════════════════
@@ -3367,6 +3375,126 @@ class SecureStorage private constructor(private val context: Context) {
 
     fun setLiquidAutoSwitchEnabled(enabled: Boolean) {
         regularPrefs.edit { putBoolean("liquid_auto_switch", enabled) }
+    }
+
+    // ════════════════════════════════════════════
+    // Silent Payments (BIP 352) persistence
+    // ════════════════════════════════════════════
+
+    /** Check if Silent Payments are enabled for a wallet */
+    fun isSilentPaymentEnabled(walletId: String): Boolean =
+        regularPrefs.getBoolean("${KEY_SP_ENABLED_PREFIX}$walletId", false)
+
+    /** Enable/disable Silent Payments for a wallet */
+    fun setSilentPaymentEnabled(walletId: String, enabled: Boolean) {
+        regularPrefs.edit { putBoolean("${KEY_SP_ENABLED_PREFIX}$walletId", enabled) }
+    }
+
+    /** Check if Silent Payments are explicitly disabled (for opt-out) */
+    fun isSilentPaymentDisabled(walletId: String): Boolean =
+        !regularPrefs.getBoolean("${KEY_SP_ENABLED_PREFIX}$walletId", false) &&
+        regularPrefs.contains("${KEY_SP_ENABLED_PREFIX}$walletId")
+
+    /** Save Silent Payment scan key (encrypted) */
+    fun saveSilentPaymentScanKey(walletId: String, scanKey: ByteArray) {
+        val base64 = Base64.encodeToString(scanKey, Base64.NO_WRAP)
+        securePrefs.edit { putString("${KEY_SP_SCAN_KEY_PREFIX}$walletId", base64) }
+    }
+
+    /** Get Silent Payment scan key */
+    fun getSilentPaymentScanKey(walletId: String): ByteArray? {
+        val base64 = securePrefs.getString("${KEY_SP_SCAN_KEY_PREFIX}$walletId", null) ?: return null
+        return try {
+            Base64.decode(base64, Base64.NO_WRAP)
+        } catch (_: Exception) { null }
+    }
+
+    /** Save Silent Payment spend key (encrypted) */
+    fun saveSilentPaymentSpendKey(walletId: String, spendKey: ByteArray) {
+        val base64 = Base64.encodeToString(spendKey, Base64.NO_WRAP)
+        securePrefs.edit { putString("${KEY_SP_SPEND_KEY_PREFIX}$walletId", base64) }
+    }
+
+    /** Get Silent Payment spend key */
+    fun getSilentPaymentSpendKey(walletId: String): ByteArray? {
+        val base64 = securePrefs.getString("${KEY_SP_SPEND_KEY_PREFIX}$walletId", null) ?: return null
+        return try {
+            Base64.decode(base64, Base64.NO_WRAP)
+        } catch (_: Exception) { null }
+    }
+
+    /** Save Silent Payment address index (for labeled addresses) */
+    fun saveSilentPaymentAddressIndex(walletId: String, index: Int) {
+        regularPrefs.edit { putInt("${KEY_SP_ADDRESS_INDEX_PREFIX}$walletId", index) }
+    }
+
+    /** Get Silent Payment address index */
+    fun getSilentPaymentAddressIndex(walletId: String): Int {
+        return regularPrefs.getInt("${KEY_SP_ADDRESS_INDEX_PREFIX}$walletId", 0)
+    }
+
+    /** Save last scan height for a wallet */
+    fun saveSilentPaymentLastScanHeight(walletId: String, height: Int) {
+        regularPrefs.edit { putInt("${KEY_SP_LAST_SCAN_HEIGHT_PREFIX}$walletId", height) }
+    }
+
+    /** Get last scan height for a wallet */
+    fun getSilentPaymentLastScanHeight(walletId: String): Int {
+        return regularPrefs.getInt("${KEY_SP_LAST_SCAN_HEIGHT_PREFIX}$walletId", 0)
+    }
+
+    /** Save found Silent Payment outputs as JSON */
+    fun saveSilentPaymentOutputs(walletId: String, outputs: List<github.aeonbtc.ibiswallet.silentpayments.SilentPaymentOutput>) {
+        val jsonArray = org.json.JSONArray()
+        outputs.forEach { output ->
+            val obj = org.json.JSONObject().apply {
+                put("txid", output.txid)
+                put("vout", output.vout)
+                put("amountSat", output.amountSat)
+                put("scriptPubKey", Base64.encodeToString(output.scriptPubKey, Base64.NO_WRAP))
+                put("tweak", Base64.encodeToString(output.tweak, Base64.NO_WRAP))
+                put("blockHeight", output.blockHeight)
+                put("isSpent", output.isSpent)
+            }
+            jsonArray.put(obj)
+        }
+        securePrefs.edit { putString("${KEY_SP_OUTPUTS_PREFIX}$walletId", jsonArray.toString()) }
+    }
+
+    /** Get saved Silent Payment outputs */
+    fun getSilentPaymentOutputs(walletId: String): List<github.aeonbtc.ibiswallet.silentpayments.SilentPaymentOutput> {
+        val json = securePrefs.getString("${KEY_SP_OUTPUTS_PREFIX}$walletId", null) ?: return emptyList()
+        return try {
+            val array = org.json.JSONArray(json)
+            (0 until array.length()).mapNotNull { i ->
+                try {
+                    val obj = array.getJSONObject(i)
+                    github.aeonbtc.ibiswallet.silentpayments.SilentPaymentOutput(
+                        txid = obj.getString("txid"),
+                        vout = obj.getInt("vout"),
+                        amountSat = obj.getLong("amountSat"),
+                        scriptPubKey = Base64.decode(obj.getString("scriptPubKey"), Base64.NO_WRAP),
+                        tweak = Base64.decode(obj.getString("tweak"), Base64.NO_WRAP),
+                        blockHeight = obj.optInt("blockHeight", 0),
+                        isSpent = obj.optBoolean("isSpent", false),
+                    )
+                } catch (_: Exception) { null }
+            }
+        } catch (_: Exception) { emptyList() }
+    }
+
+    /** Delete all Silent Payment data for a wallet */
+    fun deleteSilentPaymentData(walletId: String) {
+        securePrefs.edit {
+            remove("${KEY_SP_SCAN_KEY_PREFIX}$walletId")
+            remove("${KEY_SP_SPEND_KEY_PREFIX}$walletId")
+            remove("${KEY_SP_OUTPUTS_PREFIX}$walletId")
+        }
+        regularPrefs.edit {
+            remove("${KEY_SP_ENABLED_PREFIX}$walletId")
+            remove("${KEY_SP_ADDRESS_INDEX_PREFIX}$walletId")
+            remove("${KEY_SP_LAST_SCAN_HEIGHT_PREFIX}$walletId")
+        }
     }
 
 }

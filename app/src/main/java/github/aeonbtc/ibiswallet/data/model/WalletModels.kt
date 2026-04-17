@@ -1,5 +1,7 @@
 package github.aeonbtc.ibiswallet.data.model
 
+import github.aeonbtc.ibiswallet.silentpayments.SilentPaymentOutput
+
 /**
  * Seed phrase format used to derive the wallet.
  * Determines key stretching algorithm and derivation paths.
@@ -98,6 +100,9 @@ data class WalletState(
     val lastSyncTimestamp: Long? = null,
     val blockHeight: UInt? = null,
     val error: String? = null,
+    // Silent Payments (BIP 352) fields
+    val silentPaymentBalanceSat: Long = 0L,
+    val silentPaymentUtxos: List<SilentPaymentOutput> = emptyList(),
 )
 
 /**
