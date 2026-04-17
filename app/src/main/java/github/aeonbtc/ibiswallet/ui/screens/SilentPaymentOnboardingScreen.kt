@@ -176,12 +176,12 @@ fun SilentPaymentOnboardingScreen(
                         colors = ButtonDefaults.buttonColors(
                             containerColor = SuccessGreen,
                         ),
-                        modifier = Modifier.heightIn(min = 48.dp)
                     ) {
                         Text(
                             "Enable Silent Payments",
                             maxLines = 1,
                             overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.labelMedium,
                         )
                         Icon(
                             imageVector = Icons.Default.Check,
