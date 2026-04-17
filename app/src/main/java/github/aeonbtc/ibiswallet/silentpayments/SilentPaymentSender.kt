@@ -182,8 +182,10 @@ class SilentPaymentSender(
             val script = address.scriptPubkey()
 
             // Use BDK TxBuilder to create the transaction
+            // BDK Amount type: use fromSat() for satoshi amounts
+            val amount = org.bitcoindevkit.Amount.fromSat(amountSat.toULong())
             val psbt = TxBuilder()
-                .addRecipient(script, amountSat.toULong())
+                .addRecipient(script, amount)
                 .feeRate(feeRate)
                 .finish(wallet)
 
@@ -236,7 +238,8 @@ class SilentPaymentSender(
             val address = Address(tweakedAddress, network)
             val script = address.scriptPubkey()
 
-            txBuilder = txBuilder.addRecipient(script, amountSat.toULong())
+            val amount = org.bitcoindevkit.Amount.fromSat(amountSat.toULong())
+            txBuilder = txBuilder.addRecipient(script, amount)
             Log.d(TAG, "Added output: $amountSat sats to $spAddress (P2TR: $tweakedAddress)")
         }
 
@@ -271,8 +274,9 @@ class SilentPaymentSender(
             )
         }
 
-        // Create P2TR script: OP_1 (0x51) + 32-byte x-only pubkey
-        val script = Script.fromHex("5120" + xOnlyKey.toHex())
+        // Create P2TR script: OP_1 (0x51) + 32-byte x-only pubkey (0x20 + key)
+        val scriptBytes = hexToBytes("5120") + xOnlyKey
+        val script = Script(scriptBytes)
 
         // Convert to address
         val address = Address.fromScript(script, network)
@@ -365,12 +369,12 @@ class SilentPaymentSender(
                 org.bitcoindevkit.DerivationPath(path)
             )
 
-            // Get the public key
-            val publicKeyBytes = derivedKey.secretBytes()
-                ?: throw SilentPaymentException.CryptoError("Failed to derive public key")
+            // Get the private key
+            val privateKeyBytes = derivedKey.secretBytes()
+                ?: throw SilentPaymentException.CryptoError("Failed to derive private key")
 
             // Generate public key from private using secp256k1
-            Secp256k1.pubKeyCreate(publicKeyBytes, compressed = true)
+            Secp256k1.privKeyPubKey(privateKeyBytes, compressed = true)
         } catch (e: Exception) {
             throw SilentPaymentException.CryptoError(
                 "Failed to derive input public key: ${e.message}"
@@ -381,6 +385,13 @@ class SilentPaymentSender(
     // Helper: ByteArray to hex string
     private fun ByteArray.toHex(): String {
         return joinToString("") { "%02x".format(it) }
+    }
+
+    // Helper: hex string to ByteArray
+    private fun hexToBytes(hex: String): ByteArray {
+        return hex.chunked(2)
+            .map { it.toInt(16).toByte() }
+            .toByteArray()
     }
 }
 

@@ -3454,6 +3454,8 @@ class SecureStorage private constructor(private val context: Context) {
                 put("scriptPubKey", Base64.encodeToString(output.scriptPubKey, Base64.NO_WRAP))
                 put("tweak", Base64.encodeToString(output.tweak, Base64.NO_WRAP))
                 put("blockHeight", output.blockHeight)
+                put("blockHash", output.blockHash)
+                put("timestamp", output.timestamp)
                 put("isSpent", output.isSpent)
             }
             jsonArray.put(obj)
@@ -3476,6 +3478,8 @@ class SecureStorage private constructor(private val context: Context) {
                         scriptPubKey = Base64.decode(obj.getString("scriptPubKey"), Base64.NO_WRAP),
                         tweak = Base64.decode(obj.getString("tweak"), Base64.NO_WRAP),
                         blockHeight = obj.optInt("blockHeight", 0),
+                        blockHash = obj.optString("blockHash", ""),
+                        timestamp = obj.optLong("timestamp", 0L),
                         isSpent = obj.optBoolean("isSpent", false),
                     )
                 } catch (_: Exception) { null }

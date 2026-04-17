@@ -111,6 +111,7 @@ data class SilentPaymentOutput(
     val blockHeight: Int,
     val blockHash: String,
     val timestamp: Long,
+    val isSpent: Boolean = false,
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -122,7 +123,8 @@ data class SilentPaymentOutput(
                 scriptPubKey.contentEquals(other.scriptPubKey) &&
                 blockHeight == other.blockHeight &&
                 blockHash == other.blockHash &&
-                timestamp == other.timestamp
+                timestamp == other.timestamp &&
+                isSpent == other.isSpent
     }
 
     override fun hashCode(): Int {
@@ -134,6 +136,7 @@ data class SilentPaymentOutput(
         result = 31 * result + blockHeight
         result = 31 * result + blockHash.hashCode()
         result = 31 * result + timestamp.hashCode()
+        result = 31 * result + isSpent.hashCode()
         return result
     }
 }

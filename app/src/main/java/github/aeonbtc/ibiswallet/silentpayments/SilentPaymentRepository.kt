@@ -257,28 +257,3 @@ class SilentPaymentRepository(
         return ByteArray(33) { if (it == 0) 0x02.toByte() else (it % 256).toByte() }
     }
 }
-
-/**
- * Factory for creating Silent Payment scan API instances.
- */
-object SilentPaymentScanApiFactory {
-    fun create(config: SilentPaymentConfig): SilentPaymentScanApi {
-        return if (config.scanServerUrl != null) {
-            SilentPaymentScanApiImpl(config.scanServerUrl)
-        } else {
-            SilentPaymentScanApiStub()
-        }
-    }
-}
-
-/**
- * Implementation of scan API that connects to a real server.
- * STUB - needs actual HTTP client implementation.
- */
-class SilentPaymentScanApiImpl(private val serverUrl: String) : SilentPaymentScanApi {
-    override suspend fun scan(request: SilentPaymentScanRequest): SilentPaymentScanResponse {
-        // TODO: Implement real HTTP API call to scan server
-        // This would POST the scanPublicKey to the server and receive matching outputs
-        throw NotImplementedError("Real scan API not yet implemented")
-    }
-}

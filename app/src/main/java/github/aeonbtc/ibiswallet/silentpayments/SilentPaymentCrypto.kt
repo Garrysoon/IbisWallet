@@ -44,9 +44,11 @@ object SilentPaymentCrypto {
      */
     fun isAvailable(): Boolean {
         return try {
-            // Test with a simple operation
+            // Test with a simple operation - try to create a public key
             val testPrivKey = ByteArray(32) { 0x01 }
-            Secp256k1.verifyPrivateKey(testPrivKey)
+            // A valid private key (must be non-zero and less than curve order)
+            val validTestKey = ByteArray(32) { i -> if (i == 31) 0x01.toByte() else 0x00.toByte() }
+            Secp256k1.privKeyPubKey(validTestKey, compressed = true)
             true
         } catch (e: Exception) {
             false
@@ -83,8 +85,8 @@ object SilentPaymentCrypto {
             ?: throw SilentPaymentException.CryptoError("Failed to derive spend key from mnemonic")
 
         // Generate public keys from private keys using secp256k1
-        val scanPubKey = Secp256k1.pubKeyCreate(scanPrivKey, compressed = true)
-        val spendPubKey = Secp256k1.pubKeyCreate(spendPrivKey, compressed = true)
+        val scanPubKey = Secp256k1.privKeyPubKey(scanPrivKey, compressed = true)
+        val spendPubKey = Secp256k1.privKeyPubKey(spendPrivKey, compressed = true)
 
         // Validate keys
         if (scanPrivKey.size != 32 || spendPrivKey.size != 32) {
@@ -378,9 +380,9 @@ object SilentPaymentCrypto {
         }
 
         return try {
-            // secp256k1_ec_pubkey_add: adds tweak*G to the public key
+            // secp256k1_ec_pubkey_tweak_add: adds tweak*G to the public key
             // This gives us: Q = P + t·G
-            Secp256k1.pubKeyAdd(spendPublicKey, tweak)
+            Secp256k1.pubKeyTweakAdd(spendPublicKey, tweak)
         } catch (e: Exception) {
             throw SilentPaymentException.CryptoError(
                 "Failed to tweak public key: ${e.message}"
@@ -417,9 +419,9 @@ object SilentPaymentCrypto {
         }
 
         return try {
-            // secp256k1_ec_privkey_add: adds tweak to private key (mod n)
+            // secp256k1_ec_privkey_tweak_add: adds tweak to private key (mod n)
             // This gives us: b' = b + t (mod n)
-            Secp256k1.privKeyAdd(spendPrivateKey, tweak)
+            Secp256k1.privKeyTweakAdd(spendPrivateKey, tweak)
         } catch (e: Exception) {
             throw SilentPaymentException.CryptoError(
                 "Failed to derive private key: ${e.message}"
@@ -506,26 +508,36 @@ object SilentPaymentCrypto {
                 "Private key must be 32 bytes, got ${privateKey.size}"
             )
         }
-        return Secp256k1.pubKeyCreate(privateKey, compressed = true)
+        return Secp256k1.privKeyPubKey(privateKey, compressed = true)
     }
 
     /**
      * Verify a private key is valid (non-zero and less than curve order).
+     * A valid private key can generate a public key.
      */
     fun isValidPrivateKey(privateKey: ByteArray): Boolean {
         return try {
-            Secp256k1.verifyPrivateKey(privateKey)
+            // A valid private key can be converted to a public key
+            // If this succeeds, the key is valid (non-zero and < n)
+            Secp256k1.privKeyPubKey(privateKey, compressed = true)
+            true
         } catch (e: Exception) {
             false
         }
     }
 
     /**
-     * Verify a public key is valid.
+     * Verify a public key is valid by checking it parses correctly.
+     * Valid public keys are 33 bytes (compressed) starting with 0x02 or 0x03.
      */
     fun isValidPublicKey(publicKey: ByteArray): Boolean {
+        if (publicKey.size != 33) return false
+        if (publicKey[0] != 0x02.toByte() && publicKey[0] != 0x03.toByte()) return false
         return try {
-            Secp256k1.verifyPublicKey(publicKey)
+            // Try to parse/validate the public key via tweak operation
+            // This will fail if the point is not on the curve
+            Secp256k1.pubKeyTweakAdd(publicKey, ByteArray(32) { 0x00 })
+            true
         } catch (e: Exception) {
             false
         }
@@ -598,7 +610,7 @@ object Bech32m {
         require(check) { "Invalid checksum" }
 
         val result = convertBits(payload.map { it.toByte() }.toByteArray(), 5, 8, false)
-        return hrp to result
+        return hrp to result.toByteArray()
     }
 
     private fun hrpExpand(hrp: String): List<Byte> {

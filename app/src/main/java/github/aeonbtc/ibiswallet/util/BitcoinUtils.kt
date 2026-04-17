@@ -479,6 +479,10 @@ object BitcoinUtils {
                 "tr($keyWithOrigin/0/*)",
                 "tr($keyWithOrigin/1/*)",
             )
+            AddressType.SILENT_PAYMENT ->
+                throw IllegalArgumentException(
+                    "Silent Payment does not use BDK descriptors. Use SilentPaymentRepository instead."
+                )
         }
     }
 
@@ -633,6 +637,7 @@ object BitcoinUtils {
             AddressType.LEGACY -> 592L
             AddressType.SEGWIT -> 272L
             AddressType.TAPROOT -> 230L
+            AddressType.SILENT_PAYMENT -> 230L // Same as Taproot (P2TR output)
         }
     }
 

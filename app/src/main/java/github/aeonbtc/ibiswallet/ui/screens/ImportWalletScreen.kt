@@ -509,6 +509,7 @@ fun ImportWalletScreen(
                                     AddressType.LEGACY -> Descriptor.newBip44(secretKey, KeychainKind.EXTERNAL, Network.BITCOIN)
                                     AddressType.SEGWIT -> Descriptor.newBip84(secretKey, KeychainKind.EXTERNAL, Network.BITCOIN)
                                     AddressType.TAPROOT -> Descriptor.newBip86(secretKey, KeychainKind.EXTERNAL, Network.BITCOIN)
+                                    AddressType.SILENT_PAYMENT -> null // Not a BDK wallet type
                                 }
                             """\[([a-fA-F0-9]{8})/""".toRegex()
                                 .find(descriptor.toString())?.groupValues?.get(1)?.lowercase()
