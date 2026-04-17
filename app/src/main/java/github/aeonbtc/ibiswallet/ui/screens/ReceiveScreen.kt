@@ -31,6 +31,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -82,8 +83,9 @@ import github.aeonbtc.ibiswallet.util.getNfcAvailability
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.util.Locale
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.TextButton
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Arrangement
 
 @Composable
 fun ReceiveScreen(
@@ -97,6 +99,7 @@ fun ReceiveScreen(
     onShowAllAddresses: () -> Unit = {},
     onShowAllUtxos: () -> Unit = {},
     onToggleDenomination: () -> Unit = {},
+    onNavigateToSilentPaymentOnboarding: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val useSats = denomination == SecureStorage.DENOMINATION_SATS
@@ -667,53 +670,90 @@ fun ReceiveScreen(
 
         // Silent Payment onboarding suggestion dialog
         if (showSilentPaymentSuggestion) {
-            AlertDialog(
+            androidx.compose.material3.BasicAlertDialog(
                 onDismissRequest = {
                     showSilentPaymentSuggestion = false
-                    // Mark as suggested so we don't show again
                     val secureStorage = SecureStorage.getInstance(context)
                     val activeWalletId = secureStorage.getActiveWalletId()
                     if (activeWalletId != null) {
                         secureStorage.putBoolean("sp_suggestion_shown_${activeWalletId}", true)
                     }
-                },
-                title = { Text("Enable Silent Payments?") },
-                text = {
-                    Text(
-                        "Silent Payments (BIP 352) let you receive bitcoin without revealing your address on the blockchain. " +
-                        "You can share one static address that generates unique receiving addresses for each payment."
-                    )
-                },
-                confirmButton = {
-                    TextButton(
-                        onClick = {
-                            showSilentPaymentSuggestion = false
-                            val secureStorage = SecureStorage.getInstance(context)
-                            val activeWalletId = secureStorage.getActiveWalletId()
-                            if (activeWalletId != null) {
-                                secureStorage.putBoolean("sp_suggestion_shown_${activeWalletId}", true)
-                                // TODO: Navigate to Silent Payment onboarding or enable directly
+                }
+            ) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(0.9f),
+                    colors = CardDefaults.cardColors(
+                        containerColor = DarkCard
+                    ),
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(24.dp)
+                    ) {
+                        Text(
+                            text = "Enable Silent Payments?",
+                            style = MaterialTheme.typography.headlineSmall,
+                            color = MaterialTheme.colorScheme.onBackground
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Text(
+                            text = "Silent Payments (BIP 352) let you receive bitcoin without revealing your address on the blockchain. " +
+                                "You can share one static address that generates unique receiving addresses for each payment.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = TextSecondary
+                        )
+                        Spacer(modifier = Modifier.height(24.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End
+                        ) {
+                            TextButton(
+                                onClick = {
+                                    showSilentPaymentSuggestion = false
+                                    val secureStorage = SecureStorage.getInstance(context)
+                                    val activeWalletId = secureStorage.getActiveWalletId()
+                                    if (activeWalletId != null) {
+                                        secureStorage.putBoolean("sp_suggestion_shown_${activeWalletId}", true)
+                                    }
+                                }
+                            ) {
+                                Text("Not Now", color = TextSecondary)
+                            }
+                            TextButton(
+                                onClick = {
+                                    showSilentPaymentSuggestion = false
+                                    val secureStorage = SecureStorage.getInstance(context)
+                                    val activeWalletId = secureStorage.getActiveWalletId()
+                                    if (activeWalletId != null) {
+                                        secureStorage.putBoolean("sp_suggestion_shown_${activeWalletId}", true)
+                                    }
+                                    onNavigateToSilentPaymentOnboarding()
+                                }
+                            ) {
+                                Text("Learn More", color = BitcoinOrange)
+                            }
+                            androidx.compose.material3.FilledTonalButton(
+                                onClick = {
+                                    showSilentPaymentSuggestion = false
+                                    val secureStorage = SecureStorage.getInstance(context)
+                                    val activeWalletId = secureStorage.getActiveWalletId()
+                                    if (activeWalletId != null) {
+                                        secureStorage.putBoolean("sp_suggestion_shown_${activeWalletId}", true)
+                                        // Enable Silent Payments immediately
+                                        secureStorage.setSilentPaymentEnabled(activeWalletId, true)
+                                        // TODO: Trigger SP key generation
+                                    }
+                                },
+                                colors = androidx.compose.material3.ButtonDefaults.filledTonalButtonColors(
+                                    containerColor = SuccessGreen
+                                )
+                            ) {
+                                Text("Enable")
                             }
                         }
-                    ) {
-                        Text("Learn More", color = BitcoinOrange)
-                    }
-                },
-                dismissButton = {
-                    TextButton(
-                        onClick = {
-                            showSilentPaymentSuggestion = false
-                            val secureStorage = SecureStorage.getInstance(context)
-                            val activeWalletId = secureStorage.getActiveWalletId()
-                            if (activeWalletId != null) {
-                                secureStorage.putBoolean("sp_suggestion_shown_${activeWalletId}", true)
-                            }
-                        }
-                    ) {
-                        Text("Not Now")
                     }
                 }
-            )
+            }
         }
     }
 }
