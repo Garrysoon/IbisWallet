@@ -58,16 +58,9 @@ android {
         }
     }
 
-    // Split APKs by ABI for side-loading (F-Droid, GitHub)
-    // Reduces APK size from ~100MB to ~50MB per architecture
-    splits {
-        abi {
-            isEnable = true
-            reset()
-            include("arm64-v8a")
-            isUniversalApk = false  // Don't build fat APK
-        }
-    }
+    // Note: ndk.abiFilters already restricts to arm64-v8a
+    // This produces a single optimized APK (not split APKs)
+    // For smaller side-load distribution, users can use Android App Bundle (AAB)
     testOptions {
         unitTests.all {
             it.useJUnitPlatform()

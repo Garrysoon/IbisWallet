@@ -34,25 +34,13 @@ jobs:
         rm -rf ~/.gradle
         ./gradlew --no-daemon --no-build-cache :app:assembleDebug --stacktrace
       
-    - name: Upload Split APKs (arm64-v8a optimized)
+    - name: Upload Optimized APK (arm64-v8a, LZ4 compressed)
       uses: actions/upload-artifact@v4
       with:
-        name: ibis-wallet-silent-payments-arm64
-        # With split APKs, the path includes ABI in filename
-        path: |
-          app/build/outputs/apk/debug/*-arm64-v8a-*.apk
-          app/build/outputs/apk/debug/app-arm64-v8a-debug.apk
-        retention-days: 14
-        if-no-files-found: warn
-        
-    - name: Upload Universal APK (fallback)
-      uses: actions/upload-artifact@v4
-      if: failure()
-      with:
-        name: ibis-wallet-silent-payments-universal
+        name: ibis-wallet-silent-payments
         path: app/build/outputs/apk/debug/app-debug.apk
         retention-days: 14
-        if-no-files-found: ignore
+        if-no-files-found: error
         
     - name: List APK outputs
       run: |
