@@ -120,9 +120,8 @@ dependencies {
 
     // Bitcoin Development Kit
     implementation(libs.bdk.android)
-    // Note: BDK includes rust-secp256k1 via FFI
-    // For Silent Payments operations (point addition, scalar multiplication)
-    // we use BouncyCastle which is included in Android and the JVM
+    // Silent Payments (BIP 352) - secp256k1 operations via BouncyCastle
+    implementation(libs.bouncycastle.bcprov)
 
     // Security & Storage
     implementation(libs.androidx.security.crypto)

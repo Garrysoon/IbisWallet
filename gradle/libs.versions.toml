@@ -23,6 +23,7 @@ hummingbird = "1.7.2"
 lwk = "0.15.0"
 jna = "5.14.0"
 lightningKmp = "1.11.4"
+bouncycastle = "1.78"
 # Testing
 kotest = "5.9.1"
 mockk = "1.13.13"
@@ -59,6 +60,7 @@ hummingbird = { group = "com.sparrowwallet", name = "hummingbird", version.ref =
 lwk = { group = "com.blockstream", name = "lwk", version.ref = "lwk" }
 jna = { group = "net.java.dev.jna", name = "jna", version.ref = "jna" }
 lightning-kmp-core-jvm = { group = "fr.acinq.lightning", name = "lightning-kmp-core-jvm", version.ref = "lightningKmp" }
+bouncycastle-bcprov = { group = "org.bouncycastle", name = "bcprov-jdk15to18", version.ref = "bouncycastle" }
 # Testing
 kotest-runner-junit5 = { group = "io.kotest", name = "kotest-runner-junit5", version.ref = "kotest" }
 kotest-assertions-core = { group = "io.kotest", name = "kotest-assertions-core", version.ref = "kotest" }
