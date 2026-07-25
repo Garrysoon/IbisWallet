@@ -17,8 +17,8 @@ android {
         applicationId = "github.aeonbtc.ibiswallet"
         minSdk = 26
         targetSdk = 36
-        versionCode = 17
-        versionName = "4.6-beta"
+        versionCode = 18
+        versionName = "4.6.1-beta"
 
         vectorDrawables {
             useSupportLibrary = true
