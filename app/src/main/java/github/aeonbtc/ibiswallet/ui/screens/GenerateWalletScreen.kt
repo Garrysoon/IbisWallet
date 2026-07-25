@@ -82,7 +82,7 @@ import org.bitcoindevkit.Descriptor
 import org.bitcoindevkit.DescriptorSecretKey
 import org.bitcoindevkit.KeychainKind
 import org.bitcoindevkit.Mnemonic
-import org.bitcoindevkit.Network
+import org.bitcoindevkit.NetworkKind
 import org.bitcoindevkit.WordCount
 import androidx.compose.material3.Text
 import androidx.compose.ui.res.stringResource
@@ -147,12 +147,12 @@ fun GenerateWalletScreen(
                     try {
                         val mnemonicObj = Mnemonic.fromString(mnemonic)
                         val pass = if (usePassphrase && passphrase.isNotBlank()) passphrase else null
-                        val secretKey = DescriptorSecretKey(Network.BITCOIN, mnemonicObj, pass)
+                        val secretKey = DescriptorSecretKey(NetworkKind.MAIN, mnemonicObj, pass)
                         val descriptor =
                             when (selectedAddressType) {
-                                AddressType.LEGACY -> Descriptor.newBip44(secretKey, KeychainKind.EXTERNAL, Network.BITCOIN)
-                                AddressType.SEGWIT -> Descriptor.newBip84(secretKey, KeychainKind.EXTERNAL, Network.BITCOIN)
-                                AddressType.TAPROOT -> Descriptor.newBip86(secretKey, KeychainKind.EXTERNAL, Network.BITCOIN)
+                                AddressType.LEGACY -> Descriptor.newBip44(secretKey, KeychainKind.EXTERNAL, NetworkKind.MAIN)
+                                AddressType.SEGWIT -> Descriptor.newBip84(secretKey, KeychainKind.EXTERNAL, NetworkKind.MAIN)
+                                AddressType.TAPROOT -> Descriptor.newBip86(secretKey, KeychainKind.EXTERNAL, NetworkKind.MAIN)
                             }
                         """\[([a-fA-F0-9]{8})/""".toRegex()
                             .find(descriptor.toString())?.groupValues?.get(1)?.lowercase()

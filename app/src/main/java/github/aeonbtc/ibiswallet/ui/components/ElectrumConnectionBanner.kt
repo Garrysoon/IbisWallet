@@ -1,5 +1,6 @@
 package github.aeonbtc.ibiswallet.ui.components
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -20,13 +21,15 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import github.aeonbtc.ibiswallet.R
 import github.aeonbtc.ibiswallet.ui.theme.BitcoinOrange
+import github.aeonbtc.ibiswallet.ui.theme.BorderColor
 import github.aeonbtc.ibiswallet.ui.theme.DarkCard
 import github.aeonbtc.ibiswallet.ui.theme.ErrorRed
 import github.aeonbtc.ibiswallet.ui.theme.TextSecondary
 
 /**
- * Shown on Bitcoin Balance / Send when the Electrum server is not connected.
- * Connects the active server when configured, otherwise opens Electrum settings.
+ * Shown on Bitcoin Balance when the Electrum server is not connected.
+ * Connect reconnects the active server (only shown when one is configured);
+ * Configure opens the Electrum server settings screen.
  * Dismiss via Work offline stays until the next successful connection.
  */
 @Composable
@@ -72,26 +75,38 @@ fun ElectrumConnectionBanner(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    TextButton(
-                        onClick = {
-                            if (hasServerConfigured) {
-                                onConnect()
-                            } else {
-                                onOpenServerSettings()
-                            }
-                        },
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        Text(
-                            text =
-                                if (hasServerConfigured) {
-                                    stringResource(R.string.electrum_connect_server)
-                                } else {
-                                    stringResource(R.string.electrum_setup_server)
-                                },
-                            color = BitcoinOrange,
-                        )
+                        if (hasServerConfigured) {
+                            TextButton(
+                                onClick = onConnect,
+                                shape = RoundedCornerShape(8.dp),
+                                border = BorderStroke(1.dp, BorderColor),
+                            ) {
+                                Text(
+                                    text = stringResource(R.string.electrum_connect_server),
+                                    color = BitcoinOrange,
+                                )
+                            }
+                        }
+                        TextButton(
+                            onClick = onOpenServerSettings,
+                            shape = RoundedCornerShape(8.dp),
+                            border = BorderStroke(1.dp, BorderColor),
+                        ) {
+                            Text(
+                                text = stringResource(R.string.electrum_configure_server),
+                                color = BitcoinOrange,
+                            )
+                        }
                     }
-                    TextButton(onClick = onWorkOffline) {
+                    TextButton(
+                        onClick = onWorkOffline,
+                        shape = RoundedCornerShape(8.dp),
+                        border = BorderStroke(1.dp, BorderColor),
+                    ) {
                         Text(
                             text = stringResource(R.string.electrum_work_offline),
                             color = TextSecondary,

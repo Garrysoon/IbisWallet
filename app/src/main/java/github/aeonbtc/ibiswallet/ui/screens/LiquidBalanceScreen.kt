@@ -176,8 +176,10 @@ fun LiquidBalanceScreen(
     isLiquidConnected: Boolean = false,
     isLiquidConnecting: Boolean = false,
     hasLiquidServerConfigured: Boolean = false,
+    liquidBannerDismissed: Boolean = false,
     onConnectLiquidServer: () -> Unit = {},
     onOpenLiquidServerSettings: () -> Unit = {},
+    onDismissLiquidBanner: () -> Unit = {},
 ) {
     var selectedLiquidTransaction by remember { mutableStateOf<LiquidTransaction?>(null) }
     var liquidTransactionPendingHistoryDelete by remember { mutableStateOf<LiquidTransaction?>(null) }
@@ -421,13 +423,14 @@ fun LiquidBalanceScreen(
                     },
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            if (!isLiquidConnected && !isLiquidConnecting) {
+            if (!isLiquidConnected && !isLiquidConnecting && !liquidBannerDismissed) {
                 item {
                     LiquidConnectionBanner(
                         isConnecting = false,
                         hasServerConfigured = hasLiquidServerConfigured,
                         onConnect = onConnectLiquidServer,
                         onOpenServerSettings = onOpenLiquidServerSettings,
+                        onWorkOffline = onDismissLiquidBanner,
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                 }

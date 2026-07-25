@@ -73,6 +73,7 @@ import github.aeonbtc.ibiswallet.data.model.SparkReceiveState
 import github.aeonbtc.ibiswallet.data.model.SparkSendState
 import github.aeonbtc.ibiswallet.data.model.SparkWalletState
 import github.aeonbtc.ibiswallet.ui.components.AmountLabel
+import github.aeonbtc.ibiswallet.ui.components.ElectrumConnectionBanner
 import github.aeonbtc.ibiswallet.ui.components.FeeRateOption
 import github.aeonbtc.ibiswallet.ui.components.FeeRateSection
 import github.aeonbtc.ibiswallet.ui.components.IbisButton
@@ -142,6 +143,13 @@ fun SparkTransferScreen(
     onExecuteSparkToLayer1: suspend () -> Unit,
     onResetSparkSend: () -> Unit,
     onToggleDenomination: () -> Unit,
+    isElectrumConnected: Boolean = false,
+    isElectrumConnecting: Boolean = false,
+    electrumBannerDismissed: Boolean = false,
+    hasElectrumServerConfigured: Boolean = false,
+    onConnectElectrumServer: () -> Unit = {},
+    onOpenElectrumServerSettings: () -> Unit = {},
+    onDismissElectrumBanner: () -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     val useSats = denomination == SecureStorage.DENOMINATION_SATS
@@ -259,8 +267,10 @@ fun SparkTransferScreen(
         } else {
             defaultFundingFeeRate
         }
+    // Swaps in both directions settle on Layer 1, so Electrum must be connected
     val canPrepareReview =
-        !isPreparingReview &&
+        isElectrumConnected &&
+            !isPreparingReview &&
             !isExecutingReview &&
             !isCustomDestinationMissing &&
             destinationValidationError == null &&
@@ -402,6 +412,17 @@ fun SparkTransferScreen(
             .padding(horizontal = 16.dp),
     ) {
         Spacer(modifier = Modifier.height(8.dp))
+        // Layer 1 Electrum is required to fund or settle Spark swaps
+        if (!isElectrumConnected && !isElectrumConnecting && !electrumBannerDismissed) {
+            ElectrumConnectionBanner(
+                isConnecting = false,
+                hasServerConfigured = hasElectrumServerConfigured,
+                onConnect = onConnectElectrumServer,
+                onOpenServerSettings = onOpenElectrumServerSettings,
+                onWorkOffline = onDismissElectrumBanner,
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+        }
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(12.dp),

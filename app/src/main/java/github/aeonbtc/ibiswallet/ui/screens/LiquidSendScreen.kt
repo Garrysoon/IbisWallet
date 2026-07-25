@@ -107,7 +107,6 @@ import github.aeonbtc.ibiswallet.ui.components.AvailableBalanceMaxRow
 import github.aeonbtc.ibiswallet.ui.components.IbisButton
 import github.aeonbtc.ibiswallet.ui.components.NfcStatusIndicator
 import github.aeonbtc.ibiswallet.ui.components.QrScannerDialog
-import github.aeonbtc.ibiswallet.ui.components.LiquidConnectionBanner
 import github.aeonbtc.ibiswallet.ui.components.ScrollableDialogSurface
 import github.aeonbtc.ibiswallet.ui.components.formatFeeRate
 import github.aeonbtc.ibiswallet.ui.components.rememberBringIntoViewRequesterOnExpand
@@ -243,11 +242,6 @@ fun LiquidSendScreen(
     onClearDraft: () -> Unit = {},
     onResetSend: () -> Unit = {},
     onToggleDenomination: () -> Unit = {},
-    isLiquidConnected: Boolean = false,
-    isLiquidConnecting: Boolean = false,
-    hasLiquidServerConfigured: Boolean = false,
-    onConnectLiquidServer: () -> Unit = {},
-    onOpenLiquidServerSettings: () -> Unit = {},
 ) {
     var recipientAddress by remember { mutableStateOf(draft.recipientAddress) }
     var amountInput by remember { mutableStateOf(draft.amountInput) }
@@ -897,16 +891,6 @@ fun LiquidSendScreen(
                 privacyMode = privacyMode,
                 useSats = useSats,
                 onRetryLightningRefund = onRetryPendingLightningRefund,
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-        }
-
-        if (!isLiquidConnected && !isLiquidConnecting) {
-            LiquidConnectionBanner(
-                isConnecting = false,
-                hasServerConfigured = hasLiquidServerConfigured,
-                onConnect = onConnectLiquidServer,
-                onOpenServerSettings = onOpenLiquidServerSettings,
             )
             Spacer(modifier = Modifier.height(8.dp))
         }

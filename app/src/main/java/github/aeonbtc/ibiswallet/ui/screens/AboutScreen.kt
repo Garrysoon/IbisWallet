@@ -3,8 +3,10 @@ package github.aeonbtc.ibiswallet.ui.screens
 import android.content.Intent
 import androidx.compose.foundation.Image
 import androidx.core.net.toUri
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -14,9 +16,14 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.Icon
@@ -24,23 +31,41 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
 import github.aeonbtc.ibiswallet.BuildConfig
 import github.aeonbtc.ibiswallet.R
+import github.aeonbtc.ibiswallet.ui.components.IbisButton
+import github.aeonbtc.ibiswallet.ui.components.ScrollableDialogSurface
 import github.aeonbtc.ibiswallet.ui.theme.BitcoinOrange
 import github.aeonbtc.ibiswallet.ui.theme.DarkSurface
 import github.aeonbtc.ibiswallet.ui.theme.TextPrimary
 import github.aeonbtc.ibiswallet.ui.theme.TextSecondary
+import github.aeonbtc.ibiswallet.util.SecureClipboard
+import github.aeonbtc.ibiswallet.util.generateQrBitmap
 import github.aeonbtc.ibiswallet.viewmodel.AppUpdateStatus
 import androidx.compose.material3.Text
+import kotlinx.coroutines.delay
+
+const val DONATE_BITCOIN_ADDRESS = "bc1qk54j45l8s20z6glxnt5zuk7efq2qsjj9n44wc8"
 
 @Composable
 fun AboutScreen(
@@ -48,10 +73,22 @@ fun AboutScreen(
     appUpdateCheckEnabled: Boolean,
     onAppUpdateCheckEnabledChange: (Boolean) -> Unit,
     onDownloadUpdateClick: (String) -> Unit,
+    onDonateClick: () -> Unit,
     onBack: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val updateAvailable = appUpdateStatus as? AppUpdateStatus.UpdateAvailable
+    var showDonateDialog by remember { mutableStateOf(false) }
+
+    if (showDonateDialog) {
+        DonateDialog(
+            onDismiss = { showDonateDialog = false },
+            onDonateClick = {
+                showDonateDialog = false
+                onDonateClick()
+            },
+        )
+    }
 
     Column(
         modifier =
@@ -190,32 +227,232 @@ fun AboutScreen(
                         textAlign = TextAlign.Center,
                         lineHeight = 18.sp,
                     )
+
+                    Spacer(modifier = Modifier.height(20.dp))
+
+                    Row(
+                        modifier =
+                            Modifier
+                                .fillMaxWidth()
+                                .clickable { onAppUpdateCheckEnabledChange(!appUpdateCheckEnabled) }
+                                .padding(horizontal = 4.dp),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Checkbox(
+                            checked = appUpdateCheckEnabled,
+                            onCheckedChange = { onAppUpdateCheckEnabledChange(it) },
+                            colors =
+                                CheckboxDefaults.colors(
+                                    checkedColor = BitcoinOrange,
+                                ),
+                        )
+
+                        Text(
+                            text = stringResource(R.string.app_update_check_title),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = TextPrimary,
+                        )
+                    }
                 }
 
-                Row(
+                Button(
+                    onClick = { showDonateDialog = true },
                     modifier =
                         Modifier
                             .fillMaxWidth()
-                            .clickable { onAppUpdateCheckEnabledChange(!appUpdateCheckEnabled) }
-                            .padding(horizontal = 4.dp),
-                    horizontalArrangement = Arrangement.Center,
-                    verticalAlignment = Alignment.CenterVertically,
+                            .height(48.dp),
+                    shape = RoundedCornerShape(8.dp),
+                    colors =
+                        ButtonDefaults.buttonColors(
+                            containerColor = BitcoinOrange,
+                        ),
                 ) {
-                    Checkbox(
-                        checked = appUpdateCheckEnabled,
-                        onCheckedChange = { onAppUpdateCheckEnabledChange(it) },
-                        colors =
-                            CheckboxDefaults.colors(
-                                checkedColor = BitcoinOrange,
-                            ),
+                    Icon(
+                        imageVector = Icons.Filled.Favorite,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
                     )
-
+                    Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = stringResource(R.string.app_update_check_title),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = TextPrimary,
+                        text = stringResource(R.string.loc_7a3f1c9e),
+                        style = MaterialTheme.typography.titleMedium,
                     )
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DonateDialog(
+    onDismiss: () -> Unit,
+    onDonateClick: () -> Unit,
+) {
+    val context = LocalContext.current
+    val qrBitmap = remember { generateQrBitmap(DONATE_BITCOIN_ADDRESS) }
+    var showCopied by remember { mutableStateOf(false) }
+    var showEnlargedQr by remember { mutableStateOf(false) }
+
+    LaunchedEffect(showCopied) {
+        if (showCopied) {
+            delay(3000)
+            showCopied = false
+        }
+    }
+
+    if (showEnlargedQr && qrBitmap != null) {
+        Dialog(
+            onDismissRequest = { showEnlargedQr = false },
+        ) {
+            Box(
+                modifier =
+                    Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.9f))
+                        .clickable { showEnlargedQr = false },
+                contentAlignment = Alignment.Center,
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Box(
+                        modifier =
+                            Modifier
+                                .size(320.dp)
+                                .clip(RoundedCornerShape(16.dp))
+                                .background(Color.White)
+                                .padding(16.dp),
+                    ) {
+                        Image(
+                            bitmap = qrBitmap.asImageBitmap(),
+                            contentDescription = stringResource(R.string.loc_7a3f1c9e),
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Fit,
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(24.dp))
+
+                    Text(
+                        text = stringResource(R.string.loc_e1041b50),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = TextSecondary,
+                    )
+                }
+            }
+        }
+    }
+
+    ScrollableDialogSurface(
+        onDismissRequest = onDismiss,
+        actions = {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IbisButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.widthIn(min = 84.dp),
+                    activeColor = TextSecondary,
+                ) {
+                    Text(
+                        text = stringResource(R.string.loc_d2c0aec0),
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                }
+
+                Spacer(modifier = Modifier.widthIn(min = 12.dp))
+
+                Button(
+                    onClick = onDonateClick,
+                    modifier = Modifier.widthIn(min = 84.dp),
+                    shape = RoundedCornerShape(8.dp),
+                    colors =
+                        ButtonDefaults.buttonColors(
+                            containerColor = BitcoinOrange,
+                        ),
+                ) {
+                    Text(
+                        text = stringResource(R.string.loc_7a3f1c9e),
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                }
+            }
+        },
+    ) {
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Text(
+                text = stringResource(R.string.loc_7a3f1c9e),
+                style = MaterialTheme.typography.titleLarge,
+                color = MaterialTheme.colorScheme.onBackground,
+                modifier = Modifier.fillMaxWidth(),
+            )
+
+            if (qrBitmap != null) {
+                Spacer(modifier = Modifier.height(16.dp))
+                Box(
+                    modifier =
+                        Modifier
+                            .size(220.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Color.White)
+                            .clickable { showEnlargedQr = true }
+                            .padding(8.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Image(
+                        bitmap = qrBitmap.asImageBitmap(),
+                        contentDescription = stringResource(R.string.loc_7a3f1c9e),
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Fit,
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center,
+            ) {
+                Text(
+                    text = DONATE_BITCOIN_ADDRESS,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = TextSecondary,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Icon(
+                    imageVector = Icons.Default.ContentCopy,
+                    contentDescription = stringResource(R.string.loc_3c19e32e),
+                    tint = if (showCopied) BitcoinOrange else TextSecondary,
+                    modifier =
+                        Modifier
+                            .size(16.dp)
+                            .clickable {
+                                SecureClipboard.copyAndScheduleClear(
+                                    context,
+                                    DONATE_BITCOIN_ADDRESS,
+                                )
+                                showCopied = true
+                            },
+                )
+            }
+
+            if (showCopied) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = stringResource(R.string.loc_e287255d),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = BitcoinOrange,
+                )
             }
         }
     }

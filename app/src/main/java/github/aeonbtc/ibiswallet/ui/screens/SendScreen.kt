@@ -80,7 +80,6 @@ import github.aeonbtc.ibiswallet.nfc.NfcReaderUiState
 import github.aeonbtc.ibiswallet.nfc.NfcRuntimeStatus
 import github.aeonbtc.ibiswallet.ui.components.AmountLabel
 import github.aeonbtc.ibiswallet.ui.components.AvailableBalanceMaxRow
-import github.aeonbtc.ibiswallet.ui.components.ElectrumConnectionBanner
 import github.aeonbtc.ibiswallet.ui.components.IbisButton
 import github.aeonbtc.ibiswallet.ui.components.NfcStatusIndicator
 import github.aeonbtc.ibiswallet.ui.components.QrScannerDialog
@@ -175,11 +174,6 @@ fun SendScreen(
     onHandleScannedInput: (String) -> Boolean = { false },
     onHandleRecipientInput: (String) -> Boolean = { false },
     onToggleDenomination: () -> Unit = {},
-    hasElectrumServerConfigured: Boolean = false,
-    electrumBannerDismissed: Boolean = false,
-    onConnectElectrumServer: () -> Unit = {},
-    onOpenElectrumServerSettings: () -> Unit = {},
-    onDismissElectrumBanner: () -> Unit = {},
 ) {
     // Initialize state from draft
     var recipientAddress by remember { mutableStateOf(draft.recipientAddress) }
@@ -673,23 +667,6 @@ fun SendScreen(
                 .padding(horizontal = 16.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        if (
-            walletState.isInitialized &&
-            !uiState.isConnected &&
-            !uiState.isConnecting &&
-            !electrumBannerDismissed &&
-            !isWatchOnly
-        ) {
-            ElectrumConnectionBanner(
-                isConnecting = false,
-                hasServerConfigured = hasElectrumServerConfigured,
-                onConnect = onConnectElectrumServer,
-                onOpenServerSettings = onOpenElectrumServerSettings,
-                onWorkOffline = onDismissElectrumBanner,
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-        }
-
         // Send Form Card
         Card(
             modifier = Modifier.fillMaxWidth(),

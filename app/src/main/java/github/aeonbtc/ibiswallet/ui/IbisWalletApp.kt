@@ -135,6 +135,7 @@ import github.aeonbtc.ibiswallet.ui.components.LayerSwitcherCenterMode
 import github.aeonbtc.ibiswallet.ui.components.WalletSelectorDropdown
 import github.aeonbtc.ibiswallet.ui.components.WalletSelectorPanel
 import github.aeonbtc.ibiswallet.ui.screens.AboutScreen
+import github.aeonbtc.ibiswallet.ui.screens.DONATE_BITCOIN_ADDRESS
 import github.aeonbtc.ibiswallet.ui.screens.AllAddressesScreen
 import github.aeonbtc.ibiswallet.ui.screens.AllUtxosScreen
 import github.aeonbtc.ibiswallet.ui.screens.BackupRestoreScreen
@@ -375,6 +376,7 @@ fun IbisWalletApp(
     val liquidExplorer by liquidViewModel.liquidExplorer.collectAsStateWithLifecycle()
     val isLiquidConnected by liquidViewModel.isLiquidConnected.collectAsStateWithLifecycle()
     val isLiquidConnecting by liquidViewModel.isLiquidConnecting.collectAsStateWithLifecycle()
+    val liquidBannerDismissed by liquidViewModel.liquidBannerDismissed.collectAsStateWithLifecycle()
     val isLiquidTorEnabled by liquidViewModel.isLiquidTorEnabled.collectAsStateWithLifecycle()
     val liquidAutoSwitch by liquidViewModel.liquidAutoSwitchServer.collectAsStateWithLifecycle()
     val liquidTorState by liquidViewModel.torState.collectAsStateWithLifecycle()
@@ -3300,19 +3302,6 @@ fun IbisWalletApp(
                                                 onOpenLayer2Options = {
                                                     navController.navigate(Screen.Layer2Options.route)
                                                 },
-                                                isLiquidConnected = isLiquidConnected,
-                                                isLiquidConnecting = showLiquidConnecting,
-                                                hasLiquidServerConfigured =
-                                                    liquidServersState.hasUserSelectedServer &&
-                                                        liquidServersState.activeServerId != null,
-                                                onConnectLiquidServer = {
-                                                    liquidServersState.activeServerId?.let(liquidViewModel::connectToLiquidServer)
-                                                },
-                                                onOpenLiquidServerSettings = {
-                                                    navController.navigate(Screen.LiquidServerConfig.route) {
-                                                        launchSingleTop = true
-                                                    }
-                                                },
                                             )
                                         }
                                     } else if (isLightningAvailable) {
@@ -3551,6 +3540,7 @@ fun IbisWalletApp(
                                                 onSyncLiquid = { liquidViewModel.syncLiquidWallet() },
                                                 isLiquidConnected = isLiquidConnected,
                                                 isLiquidConnecting = showLiquidConnecting,
+                                                liquidBannerDismissed = liquidBannerDismissed,
                                                 hasLiquidServerConfigured =
                                                     liquidServersState.hasUserSelectedServer &&
                                                         liquidServersState.activeServerId != null,
@@ -3561,6 +3551,9 @@ fun IbisWalletApp(
                                                     navController.navigate(Screen.LiquidServerConfig.route) {
                                                         launchSingleTop = true
                                                     }
+                                                },
+                                                onDismissLiquidBanner = {
+                                                    liquidViewModel.dismissLiquidConnectionBanner()
                                                 },
                                             )
                                         }
@@ -4019,19 +4012,6 @@ fun IbisWalletApp(
                                                 onClearDraft = { liquidViewModel.clearSendDraft() },
                                                 onResetSend = { liquidViewModel.resetSendState() },
                                                 onToggleDenomination = toggleLayer2Denomination,
-                                                isLiquidConnected = isLiquidConnected,
-                                                isLiquidConnecting = showLiquidConnecting,
-                                                hasLiquidServerConfigured =
-                                                    liquidServersState.hasUserSelectedServer &&
-                                                        liquidServersState.activeServerId != null,
-                                                onConnectLiquidServer = {
-                                                    liquidServersState.activeServerId?.let(liquidViewModel::connectToLiquidServer)
-                                                },
-                                                onOpenLiquidServerSettings = {
-                                                    navController.navigate(Screen.LiquidServerConfig.route) {
-                                                        launchSingleTop = true
-                                                    }
-                                                },
                                             )
                                             }
                                         } else if (isLightningAvailable) {
@@ -4179,17 +4159,6 @@ fun IbisWalletApp(
                                                 navController.navigate(Screen.BroadcastTransaction.route)
                                             },
                                             onToggleDenomination = toggleLayer1Denomination,
-                                            hasElectrumServerConfigured =
-                                                serversState.hasUserSelectedServer &&
-                                                    serversState.activeServerId != null,
-                                            onConnectElectrumServer = {
-                                                serversState.activeServerId?.let(viewModel::connectToServer)
-                                            },
-                                            onOpenElectrumServerSettings = {
-                                                navController.navigate(Screen.ElectrumConfig.route) {
-                                                    launchSingleTop = true
-                                                }
-                                            },
                                         )
                                     }
                                 }
@@ -4279,21 +4248,6 @@ fun IbisWalletApp(
                                     navController.navigate(Screen.BroadcastTransaction.route)
                                 },
                                 onToggleDenomination = toggleLayer1Denomination,
-                                hasElectrumServerConfigured =
-                                    serversState.hasUserSelectedServer &&
-                                        serversState.activeServerId != null,
-                                electrumBannerDismissed = uiState.electrumBannerDismissed,
-                                onConnectElectrumServer = {
-                                    serversState.activeServerId?.let(viewModel::connectToServer)
-                                },
-                                onOpenElectrumServerSettings = {
-                                    navController.navigate(Screen.ElectrumConfig.route) {
-                                        launchSingleTop = true
-                                    }
-                                },
-                                onDismissElectrumBanner = {
-                                    viewModel.dismissElectrumConnectionBanner()
-                                },
                             )
                         }
                     }
@@ -5312,6 +5266,7 @@ fun IbisWalletApp(
                                     context.startActivity(Intent(Intent.ACTION_VIEW, releaseUrl.toUri()))
                                 }
                             },
+                            onDonateClick = { handleParsedSendInput(DONATE_BITCOIN_ADDRESS) },
                             onBack = { navController.popBackStack() },
                         )
                     }
@@ -5849,6 +5804,7 @@ fun IbisWalletApp(
                                     },
                                     isLiquidConnected = isLiquidConnected,
                                     isLiquidConnecting = showLiquidConnecting,
+                                    liquidBannerDismissed = liquidBannerDismissed,
                                     hasLiquidServerConfigured =
                                         liquidServersState.hasUserSelectedServer &&
                                             liquidServersState.activeServerId != null,
@@ -5859,6 +5815,9 @@ fun IbisWalletApp(
                                         navController.navigate(Screen.LiquidServerConfig.route) {
                                             launchSingleTop = true
                                         }
+                                    },
+                                    onDismissLiquidBanner = {
+                                        liquidViewModel.dismissLiquidConnectionBanner()
                                     },
                                 )
                             }
@@ -6008,6 +5967,23 @@ fun IbisWalletApp(
                                         sparkViewModel.resetSendState()
                                     },
                                     onToggleDenomination = toggleLayer2Denomination,
+                                    isElectrumConnected = uiState.isConnected,
+                                    isElectrumConnecting = uiState.isConnecting,
+                                    electrumBannerDismissed = uiState.electrumBannerDismissed,
+                                    hasElectrumServerConfigured =
+                                        serversState.hasUserSelectedServer &&
+                                            serversState.activeServerId != null,
+                                    onConnectElectrumServer = {
+                                        serversState.activeServerId?.let(viewModel::connectToServer)
+                                    },
+                                    onOpenElectrumServerSettings = {
+                                        navController.navigate(Screen.ElectrumConfig.route) {
+                                            launchSingleTop = true
+                                        }
+                                    },
+                                    onDismissElectrumBanner = {
+                                        viewModel.dismissElectrumConnectionBanner()
+                                    },
                                 )
                             }
                         }

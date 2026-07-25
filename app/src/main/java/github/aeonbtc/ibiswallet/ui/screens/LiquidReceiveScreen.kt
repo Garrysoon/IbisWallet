@@ -82,7 +82,6 @@ import github.aeonbtc.ibiswallet.nfc.NfcRuntimeStatus
 import github.aeonbtc.ibiswallet.nfc.NfcShareUiState
 import github.aeonbtc.ibiswallet.ui.components.AmountLabel
 import github.aeonbtc.ibiswallet.ui.components.IbisButton
-import github.aeonbtc.ibiswallet.ui.components.LiquidConnectionBanner
 import github.aeonbtc.ibiswallet.ui.components.NfcStatusIndicator
 import github.aeonbtc.ibiswallet.ui.components.ReceiveActionButton
 import github.aeonbtc.ibiswallet.ui.components.SquareToggle
@@ -103,6 +102,8 @@ import github.aeonbtc.ibiswallet.util.SecureClipboard
 import github.aeonbtc.ibiswallet.util.generateQrBitmap
 import github.aeonbtc.ibiswallet.util.getNfcAvailability
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import java.net.URLEncoder
 import java.util.Locale
@@ -135,11 +136,6 @@ fun LiquidReceiveScreen(
     onResetLightningInvoice: () -> Unit = {},
     onToggleDenomination: () -> Unit = {},
     onOpenLayer2Options: () -> Unit = {},
-    isLiquidConnected: Boolean = false,
-    isLiquidConnecting: Boolean = false,
-    hasLiquidServerConfigured: Boolean = false,
-    onConnectLiquidServer: () -> Unit = {},
-    onOpenLiquidServerSettings: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val receiveShareRequestTitle = stringResource(R.string.receive_share_request_title)
@@ -410,16 +406,6 @@ fun LiquidReceiveScreen(
             .padding(horizontal = 16.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        if (!isLiquidConnected && !isLiquidConnecting) {
-            LiquidConnectionBanner(
-                isConnecting = false,
-                hasServerConfigured = hasLiquidServerConfigured,
-                onConnect = onConnectLiquidServer,
-                onOpenServerSettings = onOpenLiquidServerSettings,
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-        }
-
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(12.dp),
@@ -954,6 +940,15 @@ fun LiquidReceiveScreen(
                                         )
                                     }
 
+                                    lightningInvoiceState.expiresAtMs?.let { expiresAtMs ->
+                                        Spacer(modifier = Modifier.height(8.dp))
+                                        LightningInvoiceExpiryText(
+                                            expiresAtMs = expiresAtMs,
+                                            modifier = Modifier.fillMaxWidth(),
+                                            textAlign = TextAlign.Center,
+                                        )
+                                    }
+
                                     Spacer(modifier = Modifier.height(12.dp))
 
                                     Column(
@@ -1220,6 +1215,53 @@ fun LiquidReceiveScreen(
 }
 
 @Composable
+private fun LightningInvoiceExpiryText(
+    expiresAtMs: Long,
+    modifier: Modifier = Modifier,
+    style: androidx.compose.ui.text.TextStyle = MaterialTheme.typography.bodySmall,
+    textAlign: TextAlign? = null,
+) {
+    var nowMs by remember(expiresAtMs) { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(expiresAtMs) {
+        while (isActive) {
+            nowMs = System.currentTimeMillis()
+            if (nowMs >= expiresAtMs) break
+            delay(1_000L)
+        }
+    }
+    val remainingMs = expiresAtMs - nowMs
+    val expired = remainingMs <= 0L
+    Text(
+        text =
+            if (expired) {
+                stringResource(R.string.lightning_invoice_expired)
+            } else {
+                stringResource(
+                    R.string.lightning_invoice_expires_in_format,
+                    formatLightningInvoiceExpiryCountdown(remainingMs),
+                )
+            },
+        style = style,
+        color = if (expired) ErrorRed else TextSecondary,
+        fontWeight = if (expired) FontWeight.SemiBold else FontWeight.Normal,
+        textAlign = textAlign,
+        modifier = modifier,
+    )
+}
+
+private fun formatLightningInvoiceExpiryCountdown(remainingMs: Long): String {
+    val totalSeconds = (remainingMs.coerceAtLeast(0L) + 999L) / 1000L
+    val hours = totalSeconds / 3600L
+    val minutes = (totalSeconds % 3600L) / 60L
+    val seconds = totalSeconds % 60L
+    return if (hours > 0L) {
+        String.format(Locale.US, "%d:%02d:%02d", hours, minutes, seconds)
+    } else {
+        String.format(Locale.US, "%d:%02d", minutes, seconds)
+    }
+}
+
+@Composable
 private fun LiquidLightningApiRequiredCard(
     onOpenLayer2Options: () -> Unit,
 ) {
@@ -1408,57 +1450,36 @@ private fun PendingLightningInvoiceRow(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clickable(onClick = onExpandedChange),
-                verticalAlignment = Alignment.CenterVertically,
+                verticalAlignment = Alignment.Top,
             ) {
                 Column(
                     modifier = Modifier.weight(1f),
                     verticalArrangement = Arrangement.spacedBy(2.dp),
                 ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
+                    Text(
+                        text = "${formatLiquidAmountForReceive(invoice.amountSats.toULong(), useSats)} ${liquidDisplayUnit(useSats)}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onBackground,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    invoice.label.takeIf { it.isNotBlank() }?.let { label ->
                         Text(
-                            text = "${formatLiquidAmountForReceive(invoice.amountSats.toULong(), useSats)} ${liquidDisplayUnit(useSats)}",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onBackground,
-                            fontWeight = FontWeight.SemiBold,
-                        )
-                        invoice.label.takeIf { it.isNotBlank() }?.let { label ->
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = label,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = TextTertiary,
-                                textAlign = TextAlign.End,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f),
-                            )
-                        }
-                    }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(
-                            text = "${stringResource(R.string.pending_lightning_invoice_boltz_id)}: ${invoice.swapId.take(8)}",
+                            text = label,
                             style = MaterialTheme.typography.bodySmall,
-                            color = TextSecondary,
+                            color = TextTertiary,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f),
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = DateFormat.format("MMM d HH:mm", invoice.createdAt).toString(),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = TextSecondary,
-                            maxLines = 1,
                         )
                     }
+                    Text(
+                        text = "${stringResource(R.string.pending_lightning_invoice_boltz_id)}: ${invoice.swapId.take(8)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextSecondary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                     if (invoice.isClaiming) {
                         Text(
                             text = stringResource(R.string.pending_lightning_invoice_claiming),
@@ -1469,11 +1490,32 @@ private fun PendingLightningInvoiceRow(
                     }
                 }
                 Spacer(modifier = Modifier.width(8.dp))
-                Icon(
-                    imageVector = if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
-                    contentDescription = null,
-                    tint = if (invoice.isClaiming) LightningYellow else TextSecondary,
-                )
+                Column(horizontalAlignment = Alignment.End) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = DateFormat.format("MMM d HH:mm", invoice.createdAt).toString(),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = TextSecondary,
+                            maxLines = 1,
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Icon(
+                            imageVector = if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                            contentDescription = null,
+                            tint = if (invoice.isClaiming) LightningYellow else TextSecondary,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
+                    invoice.expiresAtMs?.let { expiresAtMs ->
+                        LightningInvoiceExpiryText(
+                            expiresAtMs = expiresAtMs,
+                            style = MaterialTheme.typography.bodySmall,
+                            textAlign = TextAlign.End,
+                            // Align under date, not under the chevron.
+                            modifier = Modifier.padding(end = 24.dp),
+                        )
+                    }
+                }
             }
 
             AnimatedVisibility(visible = expanded) {

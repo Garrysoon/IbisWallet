@@ -2483,6 +2483,11 @@ private fun sparkRailLabelRes(rail: SparkRail): Int =
 private fun sparkExtractLayer1Txid(payment: SparkPayment): String? {
     if (sparkRailBadge(payment).rail != SparkRail.SWAP) return null
 
+    payment.onchainTxid
+        ?.trim()
+        ?.takeIf { it.length == 64 && it.all { ch -> ch.isDigit() || ch in 'a'..'f' || ch in 'A'..'F' } }
+        ?.let { return it.lowercase(Locale.US) }
+
     val txidPattern = Regex("""\b[0-9a-fA-F]{64}\b""")
     val candidates =
         buildList {

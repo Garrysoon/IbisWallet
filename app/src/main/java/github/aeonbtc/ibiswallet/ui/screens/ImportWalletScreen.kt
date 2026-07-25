@@ -125,6 +125,7 @@ import org.bitcoindevkit.DescriptorSecretKey
 import org.bitcoindevkit.KeychainKind
 import org.bitcoindevkit.Mnemonic
 import org.bitcoindevkit.Network
+import org.bitcoindevkit.NetworkKind
 import org.json.JSONObject
 import androidx.compose.material3.Text
 
@@ -358,7 +359,7 @@ fun ImportWalletScreen(
             } else {
                 try {
                     // Validate Base58Check via BDK descriptor parse (fast, no network)
-                    Descriptor("wpkh($t)", Network.BITCOIN)
+                    Descriptor("wpkh($t)", NetworkKind.MAIN)
                     true
                 } catch (_: Exception) {
                     false
@@ -598,12 +599,12 @@ fun ImportWalletScreen(
                         try {
                             val mnemonicObj = Mnemonic.fromString(keyMaterial.trim())
                             val pass = if (usePassphrase && passphrase.isNotBlank()) passphrase else null
-                            val secretKey = DescriptorSecretKey(Network.BITCOIN, mnemonicObj, pass)
+                            val secretKey = DescriptorSecretKey(NetworkKind.MAIN, mnemonicObj, pass)
                             val descriptor =
                                 when (selectedAddressType) {
-                                    AddressType.LEGACY -> Descriptor.newBip44(secretKey, KeychainKind.EXTERNAL, Network.BITCOIN)
-                                    AddressType.SEGWIT -> Descriptor.newBip84(secretKey, KeychainKind.EXTERNAL, Network.BITCOIN)
-                                    AddressType.TAPROOT -> Descriptor.newBip86(secretKey, KeychainKind.EXTERNAL, Network.BITCOIN)
+                                    AddressType.LEGACY -> Descriptor.newBip44(secretKey, KeychainKind.EXTERNAL, NetworkKind.MAIN)
+                                    AddressType.SEGWIT -> Descriptor.newBip84(secretKey, KeychainKind.EXTERNAL, NetworkKind.MAIN)
+                                    AddressType.TAPROOT -> Descriptor.newBip86(secretKey, KeychainKind.EXTERNAL, NetworkKind.MAIN)
                                 }
                             """\[([a-fA-F0-9]{8})/""".toRegex()
                                 .find(descriptor.toString())?.groupValues?.get(1)?.lowercase()

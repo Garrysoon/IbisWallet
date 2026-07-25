@@ -166,8 +166,10 @@ fun SwapScreen(
     isLiquidConnected: Boolean = false,
     isLiquidConnecting: Boolean = false,
     hasLiquidServerConfigured: Boolean = false,
+    liquidBannerDismissed: Boolean = false,
     onConnectLiquidServer: () -> Unit = {},
     onOpenLiquidServerSettings: () -> Unit = {},
+    onDismissLiquidBanner: () -> Unit = {},
 ) {
     val useSats = denomination == SecureStorage.DENOMINATION_SATS
     val unit = if (useSats) "sats" else "BTC"
@@ -739,12 +741,13 @@ fun SwapScreen(
             Spacer(modifier = Modifier.height(12.dp))
         }
 
-        if (!isLiquidConnected && !isLiquidConnecting) {
+        if (!isLiquidConnected && !isLiquidConnecting && !liquidBannerDismissed) {
             LiquidConnectionBanner(
                 isConnecting = false,
                 hasServerConfigured = hasLiquidServerConfigured,
                 onConnect = onConnectLiquidServer,
                 onOpenServerSettings = onOpenLiquidServerSettings,
+                onWorkOffline = onDismissLiquidBanner,
             )
             Spacer(modifier = Modifier.height(12.dp))
         }
