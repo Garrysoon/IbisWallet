@@ -497,6 +497,9 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
         refreshServersState()
         refreshPricePreferences()
 
+        // A persisted "Work offline" choice keeps the banner hidden across sessions
+        _uiState.value = _uiState.value.copy(electrumBannerDismissed = repository.isUserDisconnected())
+
         // Refresh UTXOs asynchronously when wallet sync state changes in a way that can
         // affect confirmation status, balance, or the active wallet.
         // Wait until deferred transaction hydration completes so large-wallet startup
@@ -2776,9 +2779,14 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
         refreshServersState()
     }
 
-    /** Dismiss the Electrum offline banner until the next successful connection. */
+    /**
+     * Dismiss the Electrum offline banner until the user reconnects.
+     * Persists as "user disconnected" so the choice survives app restarts
+     * and suppresses auto-connect.
+     */
     fun dismissElectrumConnectionBanner() {
         _uiState.value = _uiState.value.copy(electrumBannerDismissed = true)
+        repository.setUserDisconnected(true)
     }
 
     /**

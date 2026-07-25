@@ -41,6 +41,9 @@ data class SparkPayment(
     val method: String,
     val recipient: String? = null,
     val methodDetails: String = method,
+    /** L1 txid for DEPOSIT / WITHDRAW payments (from SDK PaymentDetails). */
+    val onchainTxid: String? = null,
+    val onchainVout: UInt? = null,
     /** Human failure detail when known (SDK often only exposes status FAILED). */
     val failureReason: String? = null,
 )

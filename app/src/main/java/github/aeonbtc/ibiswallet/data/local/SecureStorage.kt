@@ -2619,6 +2619,11 @@ class SecureStorage private constructor(private val context: Context) {
             .put("method", payment.method)
             .put("recipient", payment.recipient ?: JSONObject.NULL)
             .put("methodDetails", payment.methodDetails)
+            .put("onchainTxid", payment.onchainTxid ?: JSONObject.NULL)
+            .put(
+                "onchainVout",
+                payment.onchainVout?.toLong() ?: JSONObject.NULL,
+            )
 
     private fun sparkUnclaimedDepositToJson(deposit: SparkUnclaimedDeposit): JSONObject =
         JSONObject()
@@ -2652,6 +2657,18 @@ class SecureStorage private constructor(private val context: Context) {
                                 it.optString("recipient")
                             },
                         methodDetails = it.optString("methodDetails", it.optString("method")),
+                        onchainTxid =
+                            if (it.isNull("onchainTxid") || !it.has("onchainTxid")) {
+                                null
+                            } else {
+                                it.optString("onchainTxid").takeIf { txid -> txid.isNotBlank() }
+                            },
+                        onchainVout =
+                            if (it.isNull("onchainVout") || !it.has("onchainVout")) {
+                                null
+                            } else {
+                                it.optLong("onchainVout").toUInt()
+                            },
                     )
                 }
             }
@@ -3541,6 +3558,9 @@ class SecureStorage private constructor(private val context: Context) {
             put("invoice", invoice)
             put("amountSats", amountSats)
             put("createdAt", createdAt)
+            if (expiresAtMs != null) {
+                put("expiresAtMs", expiresAtMs)
+            }
         }.toString()
     }
 
@@ -3553,6 +3573,12 @@ class SecureStorage private constructor(private val context: Context) {
                 invoice = json.optString("invoice"),
                 amountSats = json.optLong("amountSats", 0L),
                 createdAt = json.optLong("createdAt", System.currentTimeMillis()),
+                expiresAtMs =
+                    if (json.has("expiresAtMs") && !json.isNull("expiresAtMs")) {
+                        json.optLong("expiresAtMs").takeIf { it > 0L }
+                    } else {
+                        null
+                    },
             )
         } catch (_: Exception) {
             null

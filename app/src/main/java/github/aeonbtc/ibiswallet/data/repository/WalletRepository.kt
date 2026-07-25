@@ -100,6 +100,7 @@ import org.bitcoindevkit.FullScanScriptInspector
 import org.bitcoindevkit.KeychainKind
 import org.bitcoindevkit.Mnemonic
 import org.bitcoindevkit.Network
+import org.bitcoindevkit.NetworkKind
 import org.bitcoindevkit.OutPoint
 import org.bitcoindevkit.Persister
 import org.bitcoindevkit.Psbt
@@ -627,7 +628,7 @@ class WalletRepository(context: Context) {
             createWatchOnlyDescriptors(
                 extendedKey = extendedKey,
                 addressType = storedWallet.addressType,
-                network = network,
+                networkKind = network.toNetworkKind(),
                 masterFingerprint = null,
             )
 
@@ -771,6 +772,24 @@ class WalletRepository(context: Context) {
      */
     private fun feeRateFromSatPerVb(satPerVb: Double): FeeRate {
         return FeeRate.fromSatPerKwu(BitcoinUtils.feeRateToSatPerKwu(satPerVb))
+    }
+
+    /**
+     * BDK Electrum client over the local CachingElectrumProxy.
+     * Sets timeout/retry (new in bdk-android 3.0) to match Tor vs clearnet proxy sockets.
+     */
+    private fun createLocalElectrumClient(
+        localPort: Int,
+        useTor: Boolean,
+    ): ElectrumClient {
+        val timeoutSecs = if (useTor) 30u else 15u
+        return ElectrumClient(
+            url = "tcp://127.0.0.1:$localPort",
+            socks5 = null,
+            timeout = timeoutSecs.toUByte(),
+            retry = 2u.toUByte(),
+            validateDomain = false,
+        )
     }
 
     /**
@@ -1486,11 +1505,11 @@ class WalletRepository(context: Context) {
             }
         }
 
-        val bdkNetwork = network.toBdkNetwork()
+        val bdkNetworkKind = network.toBdkNetworkKind()
         val mnemonicObj = Mnemonic.fromString(mnemonic)
         val descriptorSecretKey =
             DescriptorSecretKey(
-                network = bdkNetwork,
+                networkKind = bdkNetworkKind,
                 mnemonic = mnemonicObj,
                 password = passphrase,
             )
@@ -1502,19 +1521,19 @@ class WalletRepository(context: Context) {
                     Descriptor.newBip44(
                         secretKey = descriptorSecretKey,
                         keychainKind = KeychainKind.EXTERNAL,
-                        network = bdkNetwork,
+                        networkKind = bdkNetworkKind,
                     )
                 AddressType.SEGWIT ->
                     Descriptor.newBip84(
                         secretKey = descriptorSecretKey,
                         keychainKind = KeychainKind.EXTERNAL,
-                        network = bdkNetwork,
+                        networkKind = bdkNetworkKind,
                     )
                 AddressType.TAPROOT ->
                     Descriptor.newBip86(
                         secretKey = descriptorSecretKey,
                         keychainKind = KeychainKind.EXTERNAL,
-                        network = bdkNetwork,
+                        networkKind = bdkNetworkKind,
                     )
             }
 
@@ -1537,19 +1556,19 @@ class WalletRepository(context: Context) {
         network: WalletNetwork,
     ): String? {
         return try {
-            val bdkNetwork = network.toBdkNetwork()
+            val bdkNetworkKind = network.toBdkNetworkKind()
             val mnemonicObj = Mnemonic.fromString(mnemonic)
             val descriptorSecretKey =
                 DescriptorSecretKey(
-                    network = bdkNetwork,
+                    networkKind = bdkNetworkKind,
                     mnemonic = mnemonicObj,
                     password = passphrase,
                 )
             val descriptor =
                 when (addressType) {
-                    AddressType.LEGACY -> Descriptor.newBip44(descriptorSecretKey, KeychainKind.EXTERNAL, bdkNetwork)
-                    AddressType.SEGWIT -> Descriptor.newBip84(descriptorSecretKey, KeychainKind.EXTERNAL, bdkNetwork)
-                    AddressType.TAPROOT -> Descriptor.newBip86(descriptorSecretKey, KeychainKind.EXTERNAL, bdkNetwork)
+                    AddressType.LEGACY -> Descriptor.newBip44(descriptorSecretKey, KeychainKind.EXTERNAL, bdkNetworkKind)
+                    AddressType.SEGWIT -> Descriptor.newBip84(descriptorSecretKey, KeychainKind.EXTERNAL, bdkNetworkKind)
+                    AddressType.TAPROOT -> Descriptor.newBip86(descriptorSecretKey, KeychainKind.EXTERNAL, bdkNetworkKind)
                 }
             // Descriptor string: wpkh([73c5da0a/84'/0'/0']xpub.../0/*)
             extractFingerprint(descriptor.toString())
@@ -1677,9 +1696,10 @@ class WalletRepository(context: Context) {
                 // Create wallet with persistent SQLite storage
                 val persister = Persister.newSqlite(getWalletDbPath(walletId))
 
+                val bdkNetworkKind = bdkNetwork.toNetworkKind()
                 if (isWif) {
                     // Single-key WIF wallet — uses Wallet.createSingle (no change descriptor)
-                    val descriptor = createDescriptorFromWif(trimmedKey, config.addressType, bdkNetwork)
+                    val descriptor = createDescriptorFromWif(trimmedKey, config.addressType, bdkNetworkKind)
                     val importedWallet =
                         Wallet.createSingle(
                             descriptor = descriptor,
@@ -1701,14 +1721,14 @@ class WalletRepository(context: Context) {
                                 createWatchOnlyDescriptors(
                                     trimmedKey,
                                     config.addressType,
-                                    bdkNetwork,
+                                    bdkNetworkKind,
                                     resolvedFingerprint,
                                 )
                             isXprv ->
                                 createExtendedPrivateKeyDescriptors(
                                     trimmedKey,
                                     config.addressType,
-                                    bdkNetwork,
+                                    bdkNetworkKind,
                                     resolvedFingerprint,
                                 )
                             electrumSeedType != null ->
@@ -1716,14 +1736,14 @@ class WalletRepository(context: Context) {
                                     mnemonic = config.keyMaterial,
                                     passphrase = config.passphrase,
                                     seedType = electrumSeedType,
-                                    network = bdkNetwork,
+                                    networkKind = bdkNetworkKind,
                                 )
                             else ->
                                 createDescriptorsFromMnemonic(
                                     mnemonic = config.keyMaterial,
                                     passphrase = config.passphrase,
                                     addressType = config.addressType,
-                                    network = bdkNetwork,
+                                    networkKind = bdkNetworkKind,
                                     customPath = config.customDerivationPath,
                                 )
                         }
@@ -1738,7 +1758,7 @@ class WalletRepository(context: Context) {
                         if (isMultipathInput) {
                             try {
                                 val stripped = trimmedKey.substringBefore('#').trim()
-                                val multipathDescriptor = Descriptor(stripped, bdkNetwork)
+                                val multipathDescriptor = Descriptor(stripped, bdkNetworkKind)
                                 Wallet.createFromTwoPathDescriptor(
                                     twoPathDescriptor = multipathDescriptor,
                                     network = bdkNetwork,
@@ -1835,7 +1855,7 @@ class WalletRepository(context: Context) {
             localCosignerMaterial?.contains("prv", ignoreCase = true) == true ||
                 multisigConfig.externalDescriptor.contains("prv", ignoreCase = true)
         val (externalDescriptor, internalDescriptor) =
-            createMultisigDescriptors(multisigConfig, localCosignerMaterial, network)
+            createMultisigDescriptors(multisigConfig, localCosignerMaterial, network.toNetworkKind())
         val persister = Persister.newSqlite(getWalletDbPath(walletId))
         val importedWallet =
             Wallet(
@@ -1887,14 +1907,14 @@ class WalletRepository(context: Context) {
     private fun createMultisigDescriptors(
         config: MultisigWalletConfig,
         localCosignerMaterial: String?,
-        network: Network,
+        networkKind: NetworkKind,
     ): Pair<Descriptor, Descriptor> {
         val descriptorPair =
             localCosignerMaterial
                 ?.takeIf { MultisigWalletParser.looksLikeMultisig(it) }
                 ?.let { MultisigWalletParser.normalizeDescriptorPair(it) }
                 ?: (config.externalDescriptor to config.internalDescriptor)
-        return Descriptor(descriptorPair.first, network) to Descriptor(descriptorPair.second, network)
+        return Descriptor(descriptorPair.first, networkKind) to Descriptor(descriptorPair.second, networkKind)
     }
 
     /**
@@ -2039,6 +2059,7 @@ class WalletRepository(context: Context) {
                         ?: return@withContext failLoad("Wallet not found")
 
                 val bdkNetwork = storedWallet.network.toBdkNetwork()
+                val bdkNetworkKind = bdkNetwork.toNetworkKind()
                 clearLoadedWallet()
                 loadedWalletId = walletId
 
@@ -2063,7 +2084,7 @@ class WalletRepository(context: Context) {
                             ?: return@withContext failLoad("No multisig config found")
                     val localCosignerMaterial = secureStorage.getLocalCosignerKeyMaterial(walletId)
                     val (externalDescriptor, internalDescriptor) =
-                        createMultisigDescriptors(multisigConfig, localCosignerMaterial, bdkNetwork)
+                        createMultisigDescriptors(multisigConfig, localCosignerMaterial, bdkNetworkKind)
                     val persister = Persister.newSqlite(getWalletDbPath(walletId))
                     walletPersister = persister
                     wallet =
@@ -2103,7 +2124,7 @@ class WalletRepository(context: Context) {
                     val wif =
                         secureStorage.getPrivateKey(walletId)
                             ?: return@withContext failLoad("No private key found")
-                    val descriptor = createDescriptorFromWif(wif, storedWallet.addressType, bdkNetwork)
+                    val descriptor = createDescriptorFromWif(wif, storedWallet.addressType, bdkNetworkKind)
 
                     wallet =
                         try {
@@ -2139,7 +2160,7 @@ class WalletRepository(context: Context) {
                                     createExtendedPrivateKeyDescriptors(
                                         extendedKey,
                                         storedWallet.addressType,
-                                        bdkNetwork,
+                                        bdkNetworkKind,
                                         storedWallet.masterFingerprint,
                                     )
                                 } else {
@@ -2147,7 +2168,7 @@ class WalletRepository(context: Context) {
                                     createWatchOnlyDescriptors(
                                         extendedKey,
                                         storedWallet.addressType,
-                                        bdkNetwork,
+                                        bdkNetworkKind,
                                         storedWallet.masterFingerprint,
                                     )
                                 }
@@ -2166,14 +2187,14 @@ class WalletRepository(context: Context) {
                                             mnemonic,
                                             passphrase,
                                             ElectrumSeedUtil.ElectrumSeedType.STANDARD,
-                                            bdkNetwork,
+                                            bdkNetworkKind,
                                         )
                                     SeedFormat.ELECTRUM_SEGWIT ->
                                         createDescriptorsFromElectrumSeed(
                                             mnemonic,
                                             passphrase,
                                             ElectrumSeedUtil.ElectrumSeedType.SEGWIT,
-                                            bdkNetwork,
+                                            bdkNetworkKind,
                                         )
                                     else -> {
                                         if (storedCustomPath != null) {
@@ -2183,7 +2204,7 @@ class WalletRepository(context: Context) {
                                             mnemonic,
                                             passphrase,
                                             storedWallet.addressType,
-                                            bdkNetwork,
+                                            bdkNetworkKind,
                                             customPath = storedCustomPath,
                                         )
                                     }
@@ -2219,7 +2240,7 @@ class WalletRepository(context: Context) {
                                                 fallbackCredentials.first,
                                                 fallbackCredentials.second,
                                                 storedWallet.addressType,
-                                                bdkNetwork,
+                                                bdkNetworkKind,
                                             )
                                         val legacyWallet =
                                             try {
@@ -2287,13 +2308,13 @@ class WalletRepository(context: Context) {
         mnemonic: String,
         passphrase: String?,
         addressType: AddressType,
-        network: Network,
+        networkKind: NetworkKind,
         customPath: String? = null,
     ): Pair<Descriptor, Descriptor> {
         val mnemonicObj = Mnemonic.fromString(mnemonic)
         val descriptorSecretKey =
             DescriptorSecretKey(
-                network = network,
+                networkKind = networkKind,
                 mnemonic = mnemonicObj,
                 password = passphrase,
             )
@@ -2303,7 +2324,7 @@ class WalletRepository(context: Context) {
                 descriptorSecretKey = descriptorSecretKey,
                 customPath = customPath,
                 addressType = addressType,
-                network = network,
+                networkKind = networkKind,
             )
         }
 
@@ -2314,13 +2335,13 @@ class WalletRepository(context: Context) {
                     Descriptor.newBip44(
                         secretKey = descriptorSecretKey,
                         keychainKind = KeychainKind.EXTERNAL,
-                        network = network,
+                        networkKind = networkKind,
                     )
                 val internal =
                     Descriptor.newBip44(
                         secretKey = descriptorSecretKey,
                         keychainKind = KeychainKind.INTERNAL,
-                        network = network,
+                        networkKind = networkKind,
                     )
                 Pair(external, internal)
             }
@@ -2330,13 +2351,13 @@ class WalletRepository(context: Context) {
                     Descriptor.newBip84(
                         secretKey = descriptorSecretKey,
                         keychainKind = KeychainKind.EXTERNAL,
-                        network = network,
+                        networkKind = networkKind,
                     )
                 val internal =
                     Descriptor.newBip84(
                         secretKey = descriptorSecretKey,
                         keychainKind = KeychainKind.INTERNAL,
-                        network = network,
+                        networkKind = networkKind,
                     )
                 Pair(external, internal)
             }
@@ -2346,13 +2367,13 @@ class WalletRepository(context: Context) {
                     Descriptor.newBip86(
                         secretKey = descriptorSecretKey,
                         keychainKind = KeychainKind.EXTERNAL,
-                        network = network,
+                        networkKind = networkKind,
                     )
                 val internal =
                     Descriptor.newBip86(
                         secretKey = descriptorSecretKey,
                         keychainKind = KeychainKind.INTERNAL,
-                        network = network,
+                        networkKind = networkKind,
                     )
                 Pair(external, internal)
             }
@@ -2370,7 +2391,7 @@ class WalletRepository(context: Context) {
         descriptorSecretKey: DescriptorSecretKey,
         customPath: String,
         addressType: AddressType,
-        network: Network,
+        networkKind: NetworkKind,
     ): Pair<Descriptor, Descriptor> {
         val accountPath = customAccountPath(customPath)
         val accountXprv = descriptorSecretKey.derive(DerivationPath(accountPath)).toString()
@@ -2381,8 +2402,8 @@ class WalletRepository(context: Context) {
                 AddressType.TAPROOT -> "tr"
             }
         return Pair(
-            Descriptor("$function($accountXprv/0/*)", network),
-            Descriptor("$function($accountXprv/1/*)", network),
+            Descriptor("$function($accountXprv/0/*)", networkKind),
+            Descriptor("$function($accountXprv/1/*)", networkKind),
         )
     }
 
@@ -2435,11 +2456,11 @@ class WalletRepository(context: Context) {
         mnemonic: String,
         passphrase: String?,
         seedType: ElectrumSeedUtil.ElectrumSeedType,
-        network: Network,
+        networkKind: NetworkKind,
     ): Pair<Descriptor, Descriptor> {
         val seed = ElectrumSeedUtil.mnemonicToSeed(mnemonic, passphrase)
         val (externalStr, internalStr) = ElectrumSeedUtil.buildDescriptorStrings(seed, seedType)
-        return Pair(Descriptor(externalStr, network), Descriptor(internalStr, network))
+        return Pair(Descriptor(externalStr, networkKind), Descriptor(internalStr, networkKind))
     }
 
     /**
@@ -2488,7 +2509,7 @@ class WalletRepository(context: Context) {
     private fun createExtendedPrivateKeyDescriptors(
         extendedKey: String,
         addressType: AddressType,
-        network: Network,
+        networkKind: NetworkKind,
         masterFingerprint: String? = null,
     ): Pair<Descriptor, Descriptor> {
         val parsed = parseKeyOrigin(extendedKey.trim())
@@ -2498,7 +2519,7 @@ class WalletRepository(context: Context) {
         val xprvKey = BitcoinUtils.convertToXprv(parsed.bareKey)
         val keyWithOrigin = BitcoinUtils.buildKeyWithOrigin(xprvKey, fingerprint, originPath, addressType)
         val (externalStr, internalStr) = BitcoinUtils.buildDescriptorStrings(keyWithOrigin, addressType)
-        return Pair(Descriptor(externalStr, network), Descriptor(internalStr, network))
+        return Pair(Descriptor(externalStr, networkKind), Descriptor(internalStr, networkKind))
     }
 
     /**
@@ -2555,7 +2576,7 @@ class WalletRepository(context: Context) {
     private fun createWatchOnlyDescriptors(
         extendedKey: String,
         addressType: AddressType,
-        network: Network,
+        networkKind: NetworkKind,
         masterFingerprint: String? = null,
     ): Pair<Descriptor, Descriptor> {
         val input = extendedKey.trim()
@@ -2565,7 +2586,7 @@ class WalletRepository(context: Context) {
         val isFullDescriptor = descriptorPrefixes.any { input.lowercase().startsWith(it) }
 
         if (isFullDescriptor) {
-            return parseFullDescriptor(input, network)
+            return parseFullDescriptor(input, networkKind)
         }
 
         // Parse origin info from "[fingerprint/path]xpub..." format
@@ -2590,8 +2611,8 @@ class WalletRepository(context: Context) {
         val keyWithOrigin = BitcoinUtils.buildKeyWithOrigin(xpubKey, fingerprint, originPath, addressType)
         val (externalStr, internalStr) = BitcoinUtils.buildDescriptorStrings(keyWithOrigin, addressType)
 
-        val external = Descriptor(externalStr, network)
-        val internal = Descriptor(internalStr, network)
+        val external = Descriptor(externalStr, networkKind)
+        val internal = Descriptor(internalStr, networkKind)
         return Pair(external, internal)
     }
 
@@ -2604,14 +2625,14 @@ class WalletRepository(context: Context) {
      */
     private fun parseFullDescriptor(
         descriptor: String,
-        network: Network,
+        networkKind: NetworkKind,
     ): Pair<Descriptor, Descriptor> {
         val trimmed = BitcoinUtils.stripDescriptorChecksum(descriptor)
 
         // BIP 389 multipath descriptor: contains <0;1> syntax for combined receive/change paths
         // e.g. "wpkh([73c5da0a/84'/0'/0']xpub6.../<0;1>/*)"
         if (BitcoinUtils.isBip389Multipath(trimmed)) {
-            val multipathDescriptor = Descriptor(trimmed, network)
+            val multipathDescriptor = Descriptor(trimmed, networkKind)
             if (multipathDescriptor.isMultipath()) {
                 val singles = multipathDescriptor.toSingleDescriptors()
                 if (singles.size == 2) {
@@ -2632,7 +2653,7 @@ class WalletRepository(context: Context) {
 
         // Delegate string derivation to BitcoinUtils
         val (externalStr, internalStr) = BitcoinUtils.deriveDescriptorPair(descriptor)
-        return Pair(Descriptor(externalStr, network), Descriptor(internalStr, network))
+        return Pair(Descriptor(externalStr, networkKind), Descriptor(internalStr, networkKind))
     }
 
     /**
@@ -2740,7 +2761,7 @@ class WalletRepository(context: Context) {
     private fun createDescriptorFromWif(
         wif: String,
         addressType: AddressType,
-        network: Network,
+        networkKind: NetworkKind,
     ): Descriptor {
         // Uncompressed-pubkey WIF keys ("5...") are only standard for Legacy P2PKH.
         // wpkh()/tr() with an uncompressed pubkey produces a non-standard script
@@ -2756,7 +2777,7 @@ class WalletRepository(context: Context) {
                 AddressType.SEGWIT -> "wpkh($wif)"
                 AddressType.TAPROOT -> "tr($wif)"
             }
-        return Descriptor(descriptorStr, network)
+        return Descriptor(descriptorStr, networkKind)
     }
 
     /**
@@ -2825,7 +2846,7 @@ class WalletRepository(context: Context) {
                                     "Bitcoin proxy started on port $localPort -> $cleanHost:${config.port} (tor=$useTor, ssl=true)",
                             )
                         }
-                        client = ElectrumClient("tcp://127.0.0.1:$localPort")
+                        client = createLocalElectrumClient(localPort, useTor)
                     } else if (useTor) {
                         newProxy =
                             CachingElectrumProxy(
@@ -2846,7 +2867,7 @@ class WalletRepository(context: Context) {
                                     "Bitcoin proxy started on port $localPort -> $cleanHost:${config.port} (tor=true, ssl=false)",
                             )
                         }
-                        client = ElectrumClient("tcp://127.0.0.1:$localPort")
+                        client = createLocalElectrumClient(localPort, useTor)
                     } else {
                         newProxy =
                             CachingElectrumProxy(
@@ -2867,7 +2888,7 @@ class WalletRepository(context: Context) {
                                     "Bitcoin proxy started on port $localPort -> $cleanHost:${config.port} (tor=false, ssl=false)",
                             )
                         }
-                        client = ElectrumClient("tcp://127.0.0.1:$localPort")
+                        client = createLocalElectrumClient(localPort, useTor)
                     }
 
                     newClient = client
@@ -2965,7 +2986,7 @@ class WalletRepository(context: Context) {
                                     "Bitcoin proxy started on port $localPort -> $cleanHost:${config.port} (tor=$useTor, ssl=true)",
                             )
                         }
-                        client = ElectrumClient("tcp://127.0.0.1:$localPort")
+                        client = createLocalElectrumClient(localPort, useTor)
                     } else if (useTor) {
                         newProxy =
                             CachingElectrumProxy(
@@ -2986,7 +3007,7 @@ class WalletRepository(context: Context) {
                                     "Bitcoin proxy started on port $localPort -> $cleanHost:${config.port} (tor=true, ssl=false)",
                             )
                         }
-                        client = ElectrumClient("tcp://127.0.0.1:$localPort")
+                        client = createLocalElectrumClient(localPort, useTor)
                     } else {
                         newProxy =
                             CachingElectrumProxy(
@@ -3007,7 +3028,7 @@ class WalletRepository(context: Context) {
                                     "Bitcoin proxy started on port $localPort -> $cleanHost:${config.port} (tor=false, ssl=false)",
                             )
                         }
-                        client = ElectrumClient("tcp://127.0.0.1:$localPort")
+                        client = createLocalElectrumClient(localPort, useTor)
                     }
 
                     newClient = client
@@ -6845,7 +6866,7 @@ class WalletRepository(context: Context) {
                     val tempDbPath = getSweepTempDbPath("scan")
 
                     try {
-                        val descriptor = createDescriptorFromWif(wif, addrType, network)
+                        val descriptor = createDescriptorFromWif(wif, addrType, network.toNetworkKind())
                         val persister = Persister.newSqlite(tempDbPath)
                         val tempWallet =
                             Wallet.createSingle(
@@ -6944,7 +6965,7 @@ class WalletRepository(context: Context) {
                     val tempDbPath = getSweepTempDbPath("sweep")
 
                     try {
-                        val descriptor = createDescriptorFromWif(wif, addrType, network)
+                        val descriptor = createDescriptorFromWif(wif, addrType, network.toNetworkKind())
                         val persister = Persister.newSqlite(tempDbPath)
                         val tempWallet =
                             Wallet.createSingle(
@@ -9948,6 +9969,19 @@ class WalletRepository(context: Context) {
     private fun WalletNetwork.toBdkNetwork(): Network {
         return when (this) {
             WalletNetwork.BITCOIN -> Network.BITCOIN
+        }
+    }
+
+    private fun WalletNetwork.toBdkNetworkKind(): NetworkKind {
+        return when (this) {
+            WalletNetwork.BITCOIN -> NetworkKind.MAIN
+        }
+    }
+
+    private fun Network.toNetworkKind(): NetworkKind {
+        return when (this) {
+            Network.BITCOIN -> NetworkKind.MAIN
+            else -> NetworkKind.TEST
         }
     }
 

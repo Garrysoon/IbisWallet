@@ -371,6 +371,8 @@ data class LightningInvoiceCreation(
     val invoice: String,
     val claimAddress: String,
     val amountSats: Long,
+    /** Absolute epoch ms when the BOLT11 hold invoice expires (server timeout). */
+    val expiresAtMs: Long? = null,
 )
 
 data class PendingLightningReceive(
@@ -388,6 +390,8 @@ data class PendingLightningInvoice(
     val label: String = "",
     val lastClaimAttemptAt: Long? = null,
     val isClaiming: Boolean = false,
+    /** Absolute epoch ms when the BOLT11 hold invoice expires (server timeout). */
+    val expiresAtMs: Long? = null,
 )
 
 data class LightningInvoiceLimits(
@@ -590,6 +594,8 @@ data class PendingLightningInvoiceSession(
     val invoice: String,
     val amountSats: Long,
     val createdAt: Long = System.currentTimeMillis(),
+    /** Absolute epoch ms when the BOLT11 hold invoice expires (server timeout). */
+    val expiresAtMs: Long? = null,
 )
 
 enum class PendingLightningPaymentPhase { PREPARED, FUNDING, IN_PROGRESS, REFUNDING, FAILED }
@@ -795,6 +801,8 @@ sealed class LightningInvoiceState {
         val invoice: String,
         val swapId: String,
         val amountSats: Long,
+        /** Absolute epoch ms when the BOLT11 hold invoice expires (server timeout). */
+        val expiresAtMs: Long? = null,
     ) : LightningInvoiceState()
     data class Claimed(val txid: String) : LightningInvoiceState()
     data class Failed(val error: String) : LightningInvoiceState()

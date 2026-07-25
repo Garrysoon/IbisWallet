@@ -184,10 +184,16 @@ class CachingElectrumProxy(
 
     // ==================== Lifecycle ====================
 
+    /** Local bridge port while running, or null when stopped. */
+    @Synchronized
+    fun currentPort(): Int? = localPort.takeIf { isRunning && it > 0 }
+
     @Synchronized
     fun start(): Int {
         if (isRunning) {
-            if (BuildConfig.DEBUG) Log.d(TAG, "${roleTag("lifecycle")} Proxy already running on port $localPort")
+            if (BuildConfig.DEBUG) {
+                runCatching { Log.d(TAG, "${roleTag("lifecycle")} Proxy already running on port $localPort") }
+            }
             return localPort
         }
         if (!scope.isActive) {
@@ -203,17 +209,22 @@ class CachingElectrumProxy(
             localPort = serverSocket!!.localPort
             isRunning = true
 
+            // A logging failure here must not be mistaken for a bind failure and
+            // send us into the catch block below, which tears the proxy back down.
             if (BuildConfig.DEBUG) {
-                Log.d(
-                    TAG,
-                    "${roleTag("lifecycle")} Proxy started on port $localPort -> $endpointLabel (SSL=$useSsl, Tor=$useTorProxy)",
-                )
+                runCatching {
+                    Log.d(
+                        TAG,
+                        "${roleTag("lifecycle")} Proxy started on port $localPort -> $endpointLabel " +
+                            "(SSL=$useSsl, Tor=$useTorProxy)",
+                    )
+                }
             }
 
             bridgeJob = scope.launch { acceptConnections() }
             return localPort
         } catch (e: Exception) {
-            if (BuildConfig.DEBUG) Log.e(TAG, "${roleTag("lifecycle")} Failed to start proxy", e)
+            if (BuildConfig.DEBUG) runCatching { Log.e(TAG, "${roleTag("lifecycle")} Failed to start proxy", e) }
             stop()
             throw e
         }
@@ -221,7 +232,9 @@ class CachingElectrumProxy(
 
     @Synchronized
     fun stop() {
-        if (BuildConfig.DEBUG) Log.d(TAG, "${roleTag("lifecycle")} Stopping proxy")
+        // Wrapped: a logging failure must never abort teardown and leak the
+        // listening socket / bridge job.
+        if (BuildConfig.DEBUG) runCatching { Log.d(TAG, "${roleTag("lifecycle")} Stopping proxy") }
         isRunning = false
         bridgeJob?.cancel()
         bridgeJob = null
@@ -306,6 +319,9 @@ class CachingElectrumProxy(
                     bridgeConnections(client, target)
                 } catch (_: SocketTimeoutException) {
                     // Accept timeout — loop
+                } catch (e: CancellationException) {
+                    // Expected when stop() cancels bridgeJob.
+                    throw e
                 } catch (e: SocketException) {
                     if (isRunning) {
                         if (BuildConfig.DEBUG) Log.e(TAG, "${roleTag("bridge")} Socket exception in accept loop", e)
@@ -388,6 +404,9 @@ class CachingElectrumProxy(
                     "${roleTag("bridge")} Local bridge session ended; waiting for the next client is expected",
                 )
             }
+        } catch (e: CancellationException) {
+            // Expected when stop() cancels bridgeJob during reconnect/disconnect.
+            throw e
         } catch (e: Exception) {
             if (BuildConfig.DEBUG) Log.e(TAG, "${roleTag("bridge")} Error in bridge", e)
         } finally {
@@ -1459,9 +1478,19 @@ class CachingElectrumProxy(
         txHex: String,
     ): Boolean {
         return try {
-            if (txHex.length % 2 != 0) return false
-            val txBytes = txHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
-            Transaction(txBytes).computeTxid().toString().equals(expectedTxid, ignoreCase = true)
+            if (txHex.isBlank() || txHex.length % 2 != 0) return false
+            // Liquid/Elements txs are not valid BDK Bitcoin transactions; LWK owns that format.
+            if (proxyOwner == "liquid-lwk") {
+                val liquidTx = lwk.Transaction.fromString(txHex)
+                try {
+                    liquidTx.txid().toString().equals(expectedTxid, ignoreCase = true)
+                } finally {
+                    liquidTx.close()
+                }
+            } else {
+                val txBytes = txHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+                Transaction(txBytes).computeTxid().toString().equals(expectedTxid, ignoreCase = true)
+            }
         } catch (_: Exception) {
             false
         }

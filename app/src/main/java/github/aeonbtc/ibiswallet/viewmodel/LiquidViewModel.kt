@@ -59,6 +59,7 @@ import github.aeonbtc.ibiswallet.data.model.UtxoInfo
 import github.aeonbtc.ibiswallet.data.model.WalletAddress
 import github.aeonbtc.ibiswallet.data.model.WalletLayer
 import github.aeonbtc.ibiswallet.data.repository.LiquidRepository
+import github.aeonbtc.ibiswallet.data.repository.isBoltzSessionDeadSignalError
 import github.aeonbtc.ibiswallet.localization.AppLocale
 import github.aeonbtc.ibiswallet.service.ConnectivityKeepAlivePolicy
 import github.aeonbtc.ibiswallet.data.swap.buildBitcoinSwapFundingRequest
@@ -118,7 +119,9 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
         private const val TOR_BOOTSTRAP_TIMEOUT_MS = 60_000L
         private const val TOR_POST_BOOTSTRAP_DELAY_MS = 2_500L
         private const val BACKGROUND_SYNC_INTERVAL_MS = 300_000L
-        private const val BOLTZ_AUTO_PREWARM_STABILIZATION_MS = 2_000L
+        // Only wait long enough for Liquid subscriptions/realtime to settle; LN invoice
+        // and swap creation should not pay cold BoltzSession cost on first navigation.
+        private const val BOLTZ_AUTO_PREWARM_STABILIZATION_MS = 250L
         private const val BOLTZ_AUTO_PREWARM_FAILURE_COOLDOWN_MS = 30_000L
         private const val REVIEW_ORDER_VALIDITY_MS = 5 * 60_000L
         private const val MIN_LIQUID_SEND_FEE_RATE = 0.1
@@ -147,6 +150,11 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
     val loadedWalletId: StateFlow<String?> = repository.loadedWalletId
     val isLiquidConnected: StateFlow<Boolean> = repository.isConnected
     val torState: StateFlow<TorState> = torManager.torState
+
+    // Dismissed via "Work offline"; persisted as "user disconnected" so the choice
+    // survives app restarts, and stays hidden until the user reconnects
+    private val _liquidBannerDismissed = MutableStateFlow(repository.isUserDisconnected())
+    val liquidBannerDismissed: StateFlow<Boolean> = _liquidBannerDismissed
 
     private val _activeLayer = MutableStateFlow(WalletLayer.LAYER1)
     val activeLayer: StateFlow<WalletLayer> = _activeLayer
@@ -353,6 +361,13 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
                         refreshLiquidTransactionLabelSnapshots(walletId)
                     }
                 }
+        }
+
+        // Re-show the connection banner after the next successful connection
+        viewModelScope.launch {
+            isLiquidConnected.collect { connected ->
+                if (connected) _liquidBannerDismissed.value = false
+            }
         }
 
         viewModelScope.launch {
@@ -1405,6 +1420,7 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
                         invoice = restored.invoice,
                         swapId = restored.swapId,
                         amountSats = restored.amountSats,
+                        expiresAtMs = restored.expiresAtMs ?: session.expiresAtMs,
                     )
                 } else if (activeLightningInvoiceSwapId == null) {
                     activeLightningInvoiceSwapId = session.swapId
@@ -1412,6 +1428,7 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
                         invoice = session.invoice,
                         swapId = session.swapId,
                         amountSats = session.amountSats,
+                        expiresAtMs = session.expiresAtMs,
                     )
                 }
                 monitorLightningInvoice(session.swapId)
@@ -1824,7 +1841,8 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
             return
         }
 
-        cancelAutomaticBoltzPrewarm()
+        // Do not cancel Boltz prewarm when leaving the Liquid UI context — session
+        // warmup continues in the background so Receive/Swap stay warm on return.
         cancelActiveLayerPersistence()
         _activeLayer.value = WalletLayer.LAYER1
         cancelManagedJobs()
@@ -2262,6 +2280,16 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
             repository.setUserDisconnected(true)
             repository.disconnect()
         }
+    }
+
+    /**
+     * Dismiss the "Not connected" banner until the user reconnects.
+     * Persists as "user disconnected" so the choice survives app restarts
+     * and suppresses auto-connect.
+     */
+    fun dismissLiquidConnectionBanner() {
+        _liquidBannerDismissed.value = true
+        repository.setUserDisconnected(true)
     }
 
     /** Cancel an in-progress connection attempt */
@@ -2807,6 +2835,7 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
                     invoice = created.invoice,
                     swapId = created.swapId,
                     amountSats = amountSats,
+                    expiresAtMs = created.expiresAtMs,
                 )
                 refreshPendingLightningInvoices()
                 monitorLightningInvoice(created.swapId)
@@ -3136,10 +3165,12 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
             val session = repository.getPendingLightningInvoiceSession(swapId) ?: return@launchLiquidJob
             markLightningInvoiceClaiming(swapId, claiming = true, updateAttempt = true)
             activeLightningInvoiceSwapId = session.swapId
+            val pending = _pendingLightningInvoices.value.firstOrNull { it.swapId == swapId }
             _lightningInvoiceState.value = LightningInvoiceState.Ready(
                 invoice = session.invoice,
                 swapId = session.swapId,
                 amountSats = session.amountSats,
+                expiresAtMs = session.expiresAtMs ?: pending?.expiresAtMs,
             )
             monitorLightningInvoice(session.swapId)
             refreshPendingLightningInvoices()
@@ -4796,12 +4827,15 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
         boltzAutoPrewarmJob = null
     }
 
+    /**
+     * Auto prewarm after Liquid Electrum is up. Does not require the Liquid UI
+     * context or a Bitcoin Electrum URL — Lightning only needs Liquid + Boltz.
+     * Chain prewarm is best-effort and skipped when no L1 Electrum is configured.
+     */
     private fun canRunAutomaticBoltzPrewarm(): Boolean =
         isBoltzEnabled() &&
             _isLayer2Enabled.value &&
-            liquidContextActive &&
-            isLiquidConnected.value &&
-            repository.canPrewarmBoltzSession()
+            isLiquidConnected.value
 
     private fun scheduleAutomaticBoltzPrewarm(reason: String) {
         val trace =
@@ -4838,6 +4872,7 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
                     trace,
                     "reason" to reason,
                     "delayMs" to delayMs,
+                    "hasBitcoinElectrumUrl" to repository.canPrewarmBoltzSession(),
                 )
                 if (delayMs > 0) {
                     delay(delayMs)
@@ -4859,6 +4894,7 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
                     )
                     return@launchLiquidJob
                 }
+                // Always full LN + both chain directions (chain skipped inside if no L1 Electrum)
                 prewarmBoltzSwapContext(automatic = true)
             }
     }
@@ -4920,9 +4956,19 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
                     // Keep startup warmup sequential and best-effort.
                     // Parallel async children can surface failures before the parent
                     // handles them, which is too risky for non-critical prewarm work.
+                    // Lightning first (no L1 Electrum required), then chain if available.
                     repository.prewarmBoltzLightningContext()
-                    repository.prewarmBoltzChainSwapContext(SwapDirection.BTC_TO_LBTC)
-                    repository.prewarmBoltzChainSwapContext(SwapDirection.LBTC_TO_BTC)
+                    if (repository.canPrewarmBoltzSession()) {
+                        repository.prewarmBoltzChainSwapContext(SwapDirection.BTC_TO_LBTC)
+                        repository.prewarmBoltzChainSwapContext(SwapDirection.LBTC_TO_BTC)
+                    } else {
+                        logBoltzTrace(
+                            "chain_skipped",
+                            trace,
+                            "reason" to "no_bitcoin_electrum",
+                            "automatic" to automatic,
+                        )
+                    }
                 }
             } catch (_: CancellationException) {
                 logBoltzTrace(
@@ -6475,6 +6521,13 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
             return AppLocale.createLocalizedContext(appContext, secureStorage.getAppLocale())
                 .getString(R.string.loc_534e1eb2)
         }
+        val errorDetails = generateSequence(error) { it.cause }
+            .mapNotNull { it.message }
+            .joinToString(separator = " | ")
+        if (isBoltzSessionDeadSignalError(errorDetails)) {
+            return AppLocale.createLocalizedContext(appContext, secureStorage.getAppLocale())
+                .getString(R.string.liquid_error_connection_lost)
+        }
         val message = error?.message.orEmpty()
         return when {
             message.contains("dust", ignoreCase = true) -> "Amount below dust limit"
@@ -6494,6 +6547,8 @@ class LiquidViewModel(application: Application) : AndroidViewModel(application) 
             else -> fallback
         }
     }
+
+
 
     private fun summarizeValue(value: String?): String {
         if (value.isNullOrBlank()) return "null"

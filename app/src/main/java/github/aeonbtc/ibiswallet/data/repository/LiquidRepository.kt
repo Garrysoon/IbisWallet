@@ -6,6 +6,7 @@ import fr.acinq.lightning.wire.OfferTypes
 import github.aeonbtc.ibiswallet.BuildConfig
 import github.aeonbtc.ibiswallet.data.boltz.BoltzActivityMode
 import github.aeonbtc.ibiswallet.data.boltz.BoltzChainSwapWorkflow
+import github.aeonbtc.ibiswallet.data.boltz.BoltzLwkLogBridge
 import github.aeonbtc.ibiswallet.data.boltz.BoltzProviderPort
 import github.aeonbtc.ibiswallet.data.boltz.BoltzRuntime
 import github.aeonbtc.ibiswallet.data.boltz.BoltzSwapStatusService
@@ -80,6 +81,7 @@ import github.aeonbtc.ibiswallet.util.ElectrumSeedUtil
 import github.aeonbtc.ibiswallet.util.ElementsPsetSigner
 import github.aeonbtc.ibiswallet.util.SecureLog
 import github.aeonbtc.ibiswallet.util.TofuTrustManager
+import github.aeonbtc.ibiswallet.util.bolt11InvoiceExpiresAtMs
 import github.aeonbtc.ibiswallet.util.buildLiquidTransactionSearchDocument
 import github.aeonbtc.ibiswallet.util.findMaxExactSendAmount
 import github.aeonbtc.ibiswallet.util.isTransactionInsufficientFundsError
@@ -250,6 +252,22 @@ class LiquidRepository(
         private const val BOLTZ_SESSION_TIMEOUT_CLEARNET_SECS = 12u
         private const val BOLTZ_SESSION_TIMEOUT_TOR_SECS = 35u
         private const val BOLTZ_SESSION_KEEP_ALIVE_MS = 10 * 60_000L
+        // boltz-rust starts the WS loop asynchronously; reverse invoice creation
+        // immediately calls subscribe_swap. Over Tor the first subscribe often races
+        // the still-connecting socket, then reconnect() maps a dropped oneshot into
+        // "Failed to send restart signal". Give the WS a short warm-up window first.
+        private const val BOLTZ_WS_WARMUP_TOR_MS = 2_500L
+        // Clearnet also goes through the local TLS relay now; give the first
+        // platform TLS + WS subscribe a moment before invoice() races it.
+        private const val BOLTZ_WS_WARMUP_CLEARNET_MS = 1_000L
+        private const val BOLTZ_SESSION_REBUILD_MAX_ATTEMPTS = 2
+
+        /**
+         * Placeholder loopback port used when no Bitcoin Electrum server is
+         * configured. Keeps LWK off its hardcoded `ssl://` fallback, which would
+         * fail on the missing rustls CryptoProvider. Discard port, nothing listens.
+         */
+        private const val BOLTZ_BITCOIN_ELECTRUM_UNUSED_PORT = 9
         private const val BOLTZ_NEXT_INDEX_COLLISION_MAX_RETRIES = 3
         private const val BOLTZ_RESCUE_MNEMONIC_WORD_COUNT = 12u
         private const val BOLTZ_RESCUE_MNEMONIC_BIP85_INDEX = 26_589u
@@ -285,6 +303,12 @@ class LiquidRepository(
     private var lwkBoltzSession: BoltzSession? = null
     private var lwkBoltzAnyClient: AnyClient? = null
     private var liquidElectrumProxy: CachingElectrumProxy? = null
+
+    /**
+     * Loopback plaintext proxy for the Bitcoin Electrum client that LWK's
+     * BoltzSession builds internally. See [boltzBitcoinElectrumUrl].
+     */
+    private var boltzBitcoinElectrumProxy: CachingElectrumProxy? = null
     private var boltzTorRelay: BoltzTorRelay? = null
     private val invoiceResponses = mutableMapOf<String, InvoiceResponse>()
     private val preparePayResponses = mutableMapOf<String, PreparePayResponse>()
@@ -949,6 +973,17 @@ class LiquidRepository(
         val walletId = currentWalletId ?: return emptyList()
         return secureStorage.getPendingLightningInvoiceSessions(walletId).map { session ->
             val pendingReceive = secureStorage.getPendingLightningReceive(walletId, session.swapId)
+            val expiresAtMs =
+                session.expiresAtMs
+                    ?: bolt11InvoiceExpiresAtMs(session.invoice)?.also { resolved ->
+                        // Backfill older sessions that predate expiresAtMs persistence.
+                        runCatching {
+                            secureStorage.savePendingLightningInvoiceSession(
+                                walletId,
+                                session.copy(expiresAtMs = resolved),
+                            )
+                        }
+                    }
             PendingLightningInvoice(
                 swapId = session.swapId,
                 invoice = session.invoice,
@@ -956,6 +991,7 @@ class LiquidRepository(
                 createdAt = session.createdAt,
                 claimAddress = pendingReceive?.claimAddress.orEmpty(),
                 label = pendingReceive?.label.orEmpty(),
+                expiresAtMs = expiresAtMs,
             )
         }
     }
@@ -970,11 +1006,23 @@ class LiquidRepository(
             } ?: return@withContext null
         val pendingReceive = secureStorage.getPendingLightningReceive(walletId, session.swapId)
         val response = ensureLightningInvoiceResponse(session.swapId)
+        val invoice = session.invoice.ifBlank { response.bolt11Invoice().toString() }
+        val expiresAtMs =
+            session.expiresAtMs
+                ?: bolt11InvoiceExpiresAtMs(invoice)?.also { resolved ->
+                    runCatching {
+                        secureStorage.savePendingLightningInvoiceSession(
+                            walletId,
+                            session.copy(invoice = invoice, expiresAtMs = resolved),
+                        )
+                    }
+                }
         LightningInvoiceCreation(
             swapId = session.swapId,
-            invoice = session.invoice.ifBlank { response.bolt11Invoice().toString() },
+            invoice = invoice,
             claimAddress = pendingReceive?.claimAddress.orEmpty(),
             amountSats = session.amountSats,
+            expiresAtMs = expiresAtMs,
         )
     }
 
@@ -1881,29 +1929,45 @@ class LiquidRepository(
                 nextIndexToUse = cachedNextIndex,
                 timeout = sessionTimeoutSecs.toULong(),
                 apiUrl = boltzSessionApiUrl(usesTor),
+                // Debug-only, opt-in via `setprop log.tag.BoltzLwk VERBOSE`.
+                // Exposes boltz-rust's Boltz WebSocket lifecycle, which is otherwise
+                // invisible when a reverse swap is created but no status push arrives.
+                logging = BoltzLwkLogBridge.createIfEnabled(),
                 // LWK always runs its native Boltz WebSocket. polling=true only
                 // makes advance() drain queued updates without blocking while
                 // boltzOperationMutex is held; blocking here would serialize all
                 // swap/invoice operations for up to timeoutAdvance.
                 polling = true,
-                bitcoinElectrumClientUrl = getBitcoinElectrumUrl(),
+                // Always plain tcp:// on loopback — LWK's pinned boltz-client never
+                // installs a rustls CryptoProvider, so any ssl:// URL (including the
+                // hardcoded default it uses when this is null) fails session init.
+                bitcoinElectrumClientUrl = boltzBitcoinElectrumUrl(),
             )
 
             BoltzSession.fromBuilder(builder).also {
                 lwkBoltzSession = it
                 armBoltzSessionKeepAlive()
                 persistBoltzSessionNextIndex(walletId, it)
+                // LWK spawns boltz-rust's WS loop asynchronously. Invoice/prepare/lockup
+                // immediately call subscribe_swap; if the loop isn't connected yet the
+                // first try times out and reconnect() can fail with "Failed to send
+                // restart signal" when the oneshot was never installed.
+                val warmupMs = if (usesTor) BOLTZ_WS_WARMUP_TOR_MS else BOLTZ_WS_WARMUP_CLEARNET_MS
+                if (warmupMs > 0L) {
+                    delay(warmupMs)
+                }
                 logBoltzTrace(
                     "success",
                     trace.copy(session = "cold"),
                     "elapsedMs" to boltzElapsedMs(traceStartedAt),
                     "timeoutSeconds" to sessionTimeoutSecs,
+                    "warmupMs" to warmupMs,
                     "nextIndex" to secureStorage.getBoltzSessionNextIndex(walletId),
                 )
                 SecureLog.d(
                     TAG,
                     "BoltzSession initialized timeoutSeconds=$sessionTimeoutSecs usesTor=$usesTor " +
-                        "elapsedMs=${System.currentTimeMillis() - startedAt}",
+                        "warmupMs=$warmupMs elapsedMs=${System.currentTimeMillis() - startedAt}",
                 )
             }
         } catch (e: LwkException) {
@@ -1913,6 +1977,7 @@ class LiquidRepository(
             }
             lwkBoltzAnyClient = null
             stopBoltzTorRelay()
+            stopBoltzBitcoinElectrumProxy()
             val sessionError = normalizeBoltzSessionInitFailure(e)
             logBoltzTrace(
                 "failed",
@@ -1933,6 +1998,7 @@ class LiquidRepository(
             }
             lwkBoltzAnyClient = null
             stopBoltzTorRelay()
+            stopBoltzBitcoinElectrumProxy()
             val sessionError = normalizeBoltzSessionInitFailure(e)
             logBoltzTrace(
                 "failed",
@@ -2014,11 +2080,18 @@ class LiquidRepository(
         logBoltzTrace("success", trace, "elapsedMs" to boltzElapsedMs(startedAt))
     }
 
-    private fun boltzSessionApiUrl(usesTor: Boolean): String? {
-        if (!usesTor) return null
-        // LWK's Boltz HTTP/WebSocket clients don't expose SOCKS5 proxy settings.
-        // Route them through a localhost relay that dials Boltz's onion over Tor.
-        return (boltzTorRelay ?: BoltzTorRelay().also { boltzTorRelay = it }).start()
+    private fun boltzSessionApiUrl(usesTor: Boolean): String {
+        // LWK/boltz-rust native HTTP+WS (rustls/tungstenite) fails reverse-invoice
+        // subscribe on Android clearnet and Tor alike — REST create may work, then
+        // WS subscribe dies with Generic("Failed to send restart signal"). Route
+        // all LWK Boltz traffic through a localhost relay that uses the platform
+        // TLS stack (clearnet) or Tor SOCKS (onion).
+        val mode = if (usesTor) BoltzTorRelay.Mode.TOR else BoltzTorRelay.Mode.CLEARNET
+        val existing = boltzTorRelay
+        if (existing != null && existing.mode != mode) {
+            stopBoltzTorRelay()
+        }
+        return (boltzTorRelay ?: BoltzTorRelay(mode = mode).also { boltzTorRelay = it }).start()
     }
 
     private fun stopBoltzTorRelay() {
@@ -4386,6 +4459,7 @@ class LiquidRepository(
         } catch (_: Exception) {}
         lwkBoltzAnyClient = null
         stopBoltzTorRelay()
+        stopBoltzBitcoinElectrumProxy()
         boltzSessionKeepAliveExpiryJob?.cancel()
         boltzSessionKeepAliveExpiryJob = null
         boltzSessionKeepAliveUntilMs = 0L
@@ -4440,28 +4514,31 @@ class LiquidRepository(
     }
 
     private fun shouldRetryLightningInvoiceCreation(error: Exception): Boolean {
-        return error is LwkException &&
-            (
-                boltzErrorDetails(error).contains("Invoice failed: Timeout(", ignoreCase = true) ||
-                    isBoltzNextIndexCollision(error)
-            )
+        if (error !is LwkException) return false
+        val details = boltzErrorDetails(error)
+        return details.contains("Invoice failed: Timeout(", ignoreCase = true) ||
+            isBoltzWsRecoverableError(details) ||
+            isBoltzNextIndexCollision(error)
     }
 
     private fun shouldRetryBoltzChainSwapCreation(error: Exception): Boolean {
-        return error is LwkException &&
-            (
-                boltzErrorDetails(error).contains("Timeout(", ignoreCase = true) ||
-                    isBoltzNextIndexCollision(error)
-            )
+        if (error !is LwkException) return false
+        val details = boltzErrorDetails(error)
+        return details.contains("Timeout(", ignoreCase = true) ||
+            isBoltzWsRecoverableError(details) ||
+            isBoltzNextIndexCollision(error)
     }
 
     private fun shouldRetryLightningPaymentPreparation(error: Exception): Boolean {
-        return error is LwkException &&
-            (
-                boltzErrorDetails(error).contains("Timeout(", ignoreCase = true) ||
-                    isBoltzNextIndexCollision(error)
-            )
+        if (error !is LwkException) return false
+        val details = boltzErrorDetails(error)
+        return details.contains("Timeout(", ignoreCase = true) ||
+            isBoltzWsRecoverableError(details) ||
+            isBoltzNextIndexCollision(error)
     }
+
+    private fun isBoltzWsRecoverableError(details: String): Boolean =
+        isBoltzWsRecoverableErrorMessage(details)
 
     private fun isBoltzNextIndexCollision(error: Exception): Boolean {
         return error is LwkException &&
@@ -4476,6 +4553,72 @@ class LiquidRepository(
 
     private fun hasActiveBoltzResponses(): Boolean {
         return invoiceResponses.isNotEmpty() || preparePayResponses.isNotEmpty() || lockupResponses.isNotEmpty()
+    }
+
+    /**
+     * Tear down the shared LWK BoltzSession and recreate it, rebinding any live
+     * InvoiceResponse / PreparePayResponse / LockupResponse objects from their
+     * snapshots so other in-flight swaps survive the rebuild.
+     *
+     * Used when boltz-rust's WS actor is dead ("Failed to send restart signal")
+     * or create/subscribe timed out — cases that used to skip retry whenever any
+     * other response was still held.
+     */
+    private suspend fun rebuildBoltzSessionMigratingResponses(reason: String) {
+        val invoiceSnapshots =
+            invoiceResponses.mapNotNull { (swapId, response) ->
+                runCatching { response.serialize() }.getOrNull()?.let { swapId to it }
+            }
+        val preparePaySnapshots =
+            preparePayResponses.mapNotNull { (swapId, response) ->
+                runCatching { response.serialize() }.getOrNull()?.let { swapId to it }
+            }
+        val lockupSnapshots =
+            lockupResponses.mapNotNull { (swapId, response) ->
+                runCatching { response.serialize() }.getOrNull()?.let { swapId to it }
+            }
+        logBoltzTrace(
+            "session_rebuild",
+            BoltzTraceContext(
+                operation = "rebuildBoltzSessionMigratingResponses",
+                viaTor = secureStorage.getBoltzApiSource() == SecureStorage.BOLTZ_API_TOR,
+                source = "lwk",
+            ),
+            level = BoltzTraceLevel.WARN,
+            "reason" to reason,
+            "invoices" to invoiceSnapshots.size,
+            "preparePays" to preparePaySnapshots.size,
+            "lockups" to lockupSnapshots.size,
+        )
+        invoiceResponses.keys.toList().forEach(::cleanupInvoiceResponse)
+        preparePayResponses.keys.toList().forEach(::cleanupPreparePayResponse)
+        lockupResponses.keys.toList().forEach(::cleanupLockupResponse)
+        destroyBoltzSession()
+        val session = ensureBoltzSession()
+        invoiceSnapshots.forEach { (swapId, snapshot) ->
+            runCatching { session.restoreInvoice(snapshot) }
+                .onSuccess { invoiceResponses[swapId] = it }
+                .onFailure { error ->
+                    logWarn("Failed to restore invoice after Boltz session rebuild swapId=$swapId", Exception(error))
+                }
+        }
+        preparePaySnapshots.forEach { (swapId, snapshot) ->
+            runCatching { session.restorePreparePay(snapshot) }
+                .onSuccess { preparePayResponses[swapId] = it }
+                .onFailure { error ->
+                    logWarn(
+                        "Failed to restore preparePay after Boltz session rebuild swapId=$swapId",
+                        Exception(error),
+                    )
+                }
+        }
+        lockupSnapshots.forEach { (swapId, snapshot) ->
+            runCatching { session.restoreLockup(snapshot) }
+                .onSuccess { lockupResponses[swapId] = it }
+                .onFailure { error ->
+                    logWarn("Failed to restore lockup after Boltz session rebuild swapId=$swapId", Exception(error))
+                }
+        }
     }
 
     private fun advanceBoltzPaymentState(
@@ -4623,6 +4766,18 @@ class LiquidRepository(
             val response = createBoltzLightningInvoiceResponse(amountSats, claimAddress, trimmedEmbeddedLabel)
             val swapId = response.swapId()
             val snapshot = response.serialize()
+            val bolt11 = response.bolt11Invoice()
+            val invoice = bolt11.toString()
+            val expiresAtMs =
+                runCatching {
+                    val timestampSec = bolt11.timestamp().toLong()
+                    val expirySec = bolt11.expiryTime().toLong()
+                    if (timestampSec > 0L && expirySec >= 0L) {
+                        (timestampSec + expirySec) * 1000L
+                    } else {
+                        null
+                    }
+                }.getOrNull() ?: bolt11InvoiceExpiresAtMs(invoice)
             invoiceResponses[swapId] = response
             secureStorage.savePendingLightningReceive(
                 walletId = walletId,
@@ -4634,15 +4789,17 @@ class LiquidRepository(
                 PendingLightningInvoiceSession(
                     swapId = swapId,
                     snapshot = snapshot,
-                    invoice = response.bolt11Invoice().toString(),
+                    invoice = invoice,
                     amountSats = amountSats,
+                    expiresAtMs = expiresAtMs,
                 ),
             )
             LightningInvoiceCreation(
                 swapId = swapId,
-                invoice = response.bolt11Invoice().toString(),
+                invoice = invoice,
                 claimAddress = claimAddress,
                 amountSats = amountSats,
+                expiresAtMs = expiresAtMs,
             )
         } catch (e: Exception) {
             logBoltzTrace(
@@ -4727,35 +4884,34 @@ class LiquidRepository(
                                     attempt++
                                     null
                                 }
-                                // Timeout: the underlying connection may be dead — rebuild the
-                                // session once, unless other swaps are actively using it.
+                                // Timeout / dead WS actor: rebuild the shared session (migrating
+                                // any live responses) and retry. boltz-rust maps a failed WS
+                                // reconnect oneshot to "Failed to send restart signal".
                                 shouldRetryLightningInvoiceCreation(e) &&
                                     !isBoltzNextIndexCollision(e) &&
-                                    attempt == 1 -> {
+                                    attempt <= BOLTZ_SESSION_REBUILD_MAX_ATTEMPTS -> {
+                                    val nextAttempt = attempt + 1
+                                    val reason =
+                                        if (isBoltzSessionDeadSignalError(boltzErrorDetails(e))) {
+                                            "ws_restart_signal"
+                                        } else {
+                                            "timeout"
+                                        }
                                     logBoltzTrace(
                                         "retrying",
-                                        trace.copy(attempt = 2),
+                                        trace.copy(attempt = nextAttempt),
                                         level = BoltzTraceLevel.WARN,
                                         throwable = e,
                                         "elapsedMs" to boltzElapsedMs(traceStartedAt),
                                         "invoiceAmountSats" to invoiceAmountSats,
-                                        "reason" to "timeout",
+                                        "reason" to reason,
                                     )
-                                    if (hasActiveBoltzResponses()) {
-                                        logBoltzTrace(
-                                            "retry_skipped",
-                                            trace.copy(attempt = 2),
-                                            level = BoltzTraceLevel.WARN,
-                                            throwable = e,
-                                            "elapsedMs" to boltzElapsedMs(traceStartedAt),
-                                            "invoiceAmountSats" to invoiceAmountSats,
-                                            "reason" to "timeout.active_responses",
-                                        )
-                                        throw e
-                                    }
-                                    logWarn("Boltz invoice creation timed out, retrying with fresh session", e)
-                                    destroyBoltzSession()
-                                    attempt++
+                                    logWarn(
+                                        "Boltz invoice creation failed ($reason), retrying with rebuilt session",
+                                        e,
+                                    )
+                                    rebuildBoltzSessionMigratingResponses(reason)
+                                    attempt = nextAttempt
                                     null
                                 }
                                 else -> {
@@ -5058,38 +5214,33 @@ class LiquidRepository(
                             } else if (
                                 shouldRetryLightningPaymentPreparation(e) &&
                                 !isBoltzNextIndexCollision(e) &&
-                                attempt == 1
+                                attempt <= BOLTZ_SESSION_REBUILD_MAX_ATTEMPTS
                             ) {
+                                val nextAttempt = attempt + 1
+                                val reason =
+                                    if (isBoltzSessionDeadSignalError(boltzErrorDetails(e))) {
+                                        "ws_restart_signal"
+                                    } else {
+                                        "timeout"
+                                    }
                                 logBoltzTrace(
                                     "retrying",
                                     trace.copy(
                                         backend = LightningPaymentBackend.LWK_PREPARE_PAY.name,
                                         source = "lwk",
-                                        attempt = 2,
+                                        attempt = nextAttempt,
                                     ),
                                     level = BoltzTraceLevel.WARN,
                                     throwable = e,
                                     "elapsedMs" to boltzElapsedMs(traceStartedAt),
-                                    "reason" to "timeout",
+                                    "reason" to reason,
                                 )
-                                if (hasActiveBoltzResponses()) {
-                                    logBoltzTrace(
-                                        "retry_skipped",
-                                        trace.copy(
-                                            backend = LightningPaymentBackend.LWK_PREPARE_PAY.name,
-                                            source = "lwk",
-                                            attempt = 2,
-                                        ),
-                                        level = BoltzTraceLevel.WARN,
-                                        throwable = e,
-                                        "elapsedMs" to boltzElapsedMs(traceStartedAt),
-                                        "reason" to "timeout.active_responses",
-                                    )
-                                    throw e
-                                }
-                                logWarn("Boltz Lightning payment preparation timed out, retrying with fresh session", e)
-                                destroyBoltzSession()
-                                attempt++
+                                logWarn(
+                                    "Boltz Lightning payment preparation failed ($reason), retrying with rebuilt session",
+                                    e,
+                                )
+                                rebuildBoltzSessionMigratingResponses(reason)
+                                attempt = nextAttempt
                                 null
                             } else {
                                 throw e
@@ -6500,41 +6651,34 @@ class LiquidRepository(
                                 attempt++
                                 null
                             }
-                            // Timeout: rebuild the session once, matching Lightning invoice
-                            // / preparePay recovery, unless other Boltz responses are live.
+                            // Timeout / dead WS actor: rebuild shared session (migrating live
+                            // responses) and retry, matching Lightning invoice / preparePay.
                             shouldRetryBoltzChainSwapCreation(e) &&
                                 !isBoltzNextIndexCollision(e) &&
-                                attempt == 1 -> {
+                                attempt <= BOLTZ_SESSION_REBUILD_MAX_ATTEMPTS -> {
+                                val nextAttempt = attempt + 1
+                                val reason =
+                                    if (isBoltzSessionDeadSignalError(boltzErrorDetails(e))) {
+                                        "ws_restart_signal"
+                                    } else {
+                                        "timeout"
+                                    }
                                 logBoltzTrace(
                                     "retrying",
-                                    trace.copy(attempt = 2),
+                                    trace.copy(attempt = nextAttempt),
                                     level = BoltzTraceLevel.WARN,
                                     throwable = e,
                                     "elapsedMs" to boltzElapsedMs(traceStartedAt),
                                     "direction" to direction.name,
                                     "amountSats" to amountSats,
-                                    "reason" to "timeout",
+                                    "reason" to reason,
                                 )
-                                if (hasActiveBoltzResponses()) {
-                                    logBoltzTrace(
-                                        "retry_skipped",
-                                        trace.copy(attempt = 2),
-                                        level = BoltzTraceLevel.WARN,
-                                        throwable = e,
-                                        "elapsedMs" to boltzElapsedMs(traceStartedAt),
-                                        "direction" to direction.name,
-                                        "amountSats" to amountSats,
-                                        "reason" to "timeout.active_responses",
-                                    )
-                                    destroyBoltzSession()
-                                    throw e
-                                }
                                 logWarn(
-                                    "Boltz chain swap creation timed out, retrying with fresh session",
+                                    "Boltz chain swap creation failed ($reason), retrying with rebuilt session",
                                     e,
                                 )
-                                destroyBoltzSession()
-                                attempt++
+                                rebuildBoltzSessionMigratingResponses(reason)
+                                attempt = nextAttempt
                                 null
                             }
                             else -> {
@@ -6547,13 +6691,13 @@ class LiquidRepository(
                                         "elapsedMs" to boltzElapsedMs(traceStartedAt),
                                         "direction" to direction.name,
                                         "amountSats" to amountSats,
-                                        "reason" to "timeout",
+                                        "reason" to "ws_or_timeout",
                                     )
                                     logWarn(
-                                        "Boltz chain swap creation timed out after retry; waiting for user retry on a fresh session",
+                                        "Boltz chain swap creation failed after retry; waiting for user retry on a fresh session",
                                         e,
                                     )
-                                    destroyBoltzSession()
+                                    rebuildBoltzSessionMigratingResponses("reset_after_failure")
                                 }
                                 throw e
                             }
@@ -7395,6 +7539,87 @@ class LiquidRepository(
         return "$protocol://${config.cleanUrl()}:${config.port}"
     }
 
+    /**
+     * Bitcoin Electrum URL handed to LWK's BoltzSession, always plain `tcp://` on
+     * loopback.
+     *
+     * LWK 0.18.x pins boltz-client at a revision predating its
+     * "Install default crypto provider" fix, so boltz-client never calls
+     * `rustls::crypto::ring::default_provider().install_default()`. LWK does call it
+     * in `lwk_boltz`, but each crate links its own rustls instance and the provider
+     * is a per-instance OnceCell, so boltz-client's copy stays uninitialized. Any
+     * `ssl://` Electrum URL then fails with:
+     *   "Could not automatically determine the process-level CryptoProvider"
+     *
+     * Passing null does NOT avoid this: LWK falls back to
+     * `ElectrumBitcoinClient::default(...)`, which is a hardcoded `ssl://` server.
+     *
+     * boltz-client only takes the rustls path for `ElectrumUrl::Tls`; `tcp://` uses a
+     * plain socket. So we terminate TLS/Tor ourselves in [CachingElectrumProxy] and
+     * give LWK a cleartext loopback endpoint.
+     */
+    private fun boltzBitcoinElectrumUrl(): String? {
+        boltzBitcoinElectrumProxy?.let { existing ->
+            existing.currentPort()?.let { return "tcp://127.0.0.1:$it" }
+            runCatching { existing.stop() }
+            boltzBitcoinElectrumProxy = null
+        }
+        val config =
+            secureStorage.getActiveElectrumServer()
+                ?: run {
+                    // No configured Bitcoin server. Returning null would make LWK fall
+                    // back to its hardcoded ssl:// Electrum default and hit the missing
+                    // rustls provider, so point it at a dead loopback port instead:
+                    // Liquid Lightning never uses this client, and BTC chain swaps
+                    // already require a configured server before they run.
+                    logDebug("boltzBitcoinElectrumUrl no active Bitcoin server; using unroutable loopback")
+                    return "tcp://127.0.0.1:$BOLTZ_BITCOIN_ELECTRUM_UNUSED_PORT"
+                }
+        val host = config.cleanUrl()
+        val isOnion = config.isOnionAddress()
+        val useTor = config.useTor || isOnion
+        val trustManager =
+            if (config.useSsl) {
+                TofuTrustManager(
+                    host,
+                    config.port,
+                    secureStorage.getServerCertFingerprint(host, config.port),
+                    isOnionHost = isOnion,
+                )
+            } else {
+                null
+            }
+        val proxy =
+            CachingElectrumProxy(
+                targetHost = host,
+                targetPort = config.port,
+                proxyOwner = "boltz-bitcoin",
+                useSsl = config.useSsl,
+                useTorProxy = useTor,
+                sslTrustManager = trustManager,
+            )
+        val port =
+            runCatching { proxy.start() }
+                .onFailure {
+                    runCatching { proxy.stop() }
+                    logWarn("Failed to start Boltz Bitcoin Electrum proxy", Exception(it))
+                }
+                .getOrNull()
+        if (port == null) {
+            // Never fall through to null; see the placeholder-port note above.
+            return "tcp://127.0.0.1:$BOLTZ_BITCOIN_ELECTRUM_UNUSED_PORT"
+        }
+        boltzBitcoinElectrumProxy = proxy
+        return "tcp://127.0.0.1:$port"
+    }
+
+    private fun stopBoltzBitcoinElectrumProxy() {
+        runCatching { boltzBitcoinElectrumProxy?.stop() }
+        boltzBitcoinElectrumProxy = null
+    }
+
+
+
     private fun shouldUseLiquidTor(): Boolean {
         val activeId = secureStorage.getActiveLiquidServerId() ?: return false
         val config = secureStorage.getLiquidServer(activeId) ?: return false
@@ -7433,6 +7658,7 @@ class LiquidRepository(
         stopNotificationCollector()
         runCatching { boltzProvider.close() }
         runCatching { stopBoltzTorRelay() }
+        runCatching { stopBoltzBitcoinElectrumProxy() }
         repositoryScope.cancel()
     }
 
@@ -7507,6 +7733,22 @@ private fun findBoltzMnemonicValue(node: Any?): String? {
         is String -> normalizeBoltzMnemonic(node).takeIf(::looksLikeBoltzRescueMnemonic)
         else -> null
     }
+}
+
+/**
+ * boltz-rust emits this when [BoltzWsApi::reconnect] finds the oneshot
+ * restart_sender already closed/taken (WS loop still connecting or already
+ * exited after a failed subscribe). Session rebuild is the recovery path.
+ */
+internal fun isBoltzSessionDeadSignalError(details: String): Boolean {
+    return details.contains("Failed to send restart signal", ignoreCase = true)
+}
+
+internal fun isBoltzWsRecoverableErrorMessage(details: String): Boolean {
+    return isBoltzSessionDeadSignalError(details) ||
+        details.contains("Subscription timeout", ignoreCase = true) ||
+        details.contains("Failed to send request to channel", ignoreCase = true) ||
+        details.contains("Not connected", ignoreCase = true)
 }
 
 internal fun looksLikeBoltzRescueMnemonic(value: String): Boolean {

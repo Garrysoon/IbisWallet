@@ -1203,25 +1203,33 @@ class SparkRepository(
     private fun Payment.toSparkPayment(
         storedPaymentRecipients: Map<String, String>,
         storedDepositAddresses: Map<String, String>,
-    ): SparkPayment =
-        method.toString().let { methodDetails ->
-        SparkPayment(
+    ): SparkPayment {
+        val mapped = SparkPaymentDetailsMapper.map(details)
+        val methodName = method.name
+        val methodDetails = mapped.methodDetails ?: methodName
+        val onchainTxid = mapped.onchainTxid
+        val recipient =
+            mapped.recipient
+                ?: methodDetails.extractSparkRecipient()
+                ?: storedPaymentRecipients[id]
+                ?: onchainTxid?.let { storedDepositAddresses[it] }
+                ?: storedDepositAddresses.firstNotNullOfOrNull { (txid, address) ->
+                    address.takeIf { methodDetails.contains(txid, ignoreCase = true) }
+                }
+        return SparkPayment(
             id = id,
             type = paymentType.name,
             status = status.name,
             amountSats = amount.toLongSafe(),
             feeSats = fees.toLongSafe(),
             timestamp = timestamp.toLong(),
-                method = methodDetails.substringAfterLast(".").substringBefore("("),
-                recipient =
-                    methodDetails.extractSparkRecipient()
-                        ?: storedPaymentRecipients[id]
-                        ?: storedDepositAddresses.firstNotNullOfOrNull { (txid, address) ->
-                            address.takeIf { methodDetails.contains(txid, ignoreCase = true) }
-                        },
-                methodDetails = methodDetails,
+            method = methodName,
+            recipient = recipient,
+            methodDetails = methodDetails,
+            onchainTxid = onchainTxid,
+            onchainVout = mapped.onchainVout,
         )
-        }
+    }
 
     private fun String.extractSparkRecipient(): String? {
         val keys = listOf(
@@ -1349,15 +1357,63 @@ internal object SparkPaymentHistoryPaging {
     fun nextOffset(currentOffset: UInt): UInt = currentOffset + SparkRepository.SPARK_PAYMENT_HISTORY_PAGE_SIZE
 }
 
+internal data class SparkMappedPaymentDetails(
+    val methodDetails: String? = null,
+    val recipient: String? = null,
+    val onchainTxid: String? = null,
+    val onchainVout: UInt? = null,
+)
+
+/**
+ * Maps breez_sdk_spark [PaymentDetails] into fields we can match and display.
+ * Deposit/Withdraw identity lives in details (txId), not PaymentMethod alone.
+ */
+internal object SparkPaymentDetailsMapper {
+    fun map(details: PaymentDetails?): SparkMappedPaymentDetails =
+        when (details) {
+            is PaymentDetails.Deposit ->
+                SparkMappedPaymentDetails(
+                    methodDetails = "Deposit(txId=${details.txId}, vout=${details.vout})",
+                    onchainTxid = details.txId,
+                    onchainVout = details.vout,
+                )
+            is PaymentDetails.Withdraw ->
+                SparkMappedPaymentDetails(
+                    methodDetails = "Withdraw(txId=${details.txId})",
+                    onchainTxid = details.txId,
+                )
+            is PaymentDetails.Lightning ->
+                SparkMappedPaymentDetails(
+                    methodDetails = details.toString(),
+                    recipient =
+                        details.lnurlPayInfo?.lnAddress?.takeIf { it.isNotBlank() }
+                            ?: details.invoice.takeIf { it.isNotBlank() },
+                )
+            is PaymentDetails.Spark ->
+                SparkMappedPaymentDetails(
+                    methodDetails = details.toString(),
+                    recipient = details.invoiceDetails?.invoice?.takeIf { it.isNotBlank() },
+                )
+            is PaymentDetails.Token ->
+                SparkMappedPaymentDetails(methodDetails = details.toString())
+            null -> SparkMappedPaymentDetails()
+        }
+}
+
 internal object SparkDepositClaimMatcher {
     fun matches(
         deposit: SparkUnclaimedDeposit,
         payment: SparkPayment,
-    ): Boolean =
-        payment.type.equals("RECEIVE", ignoreCase = true) &&
-            isSettled(payment.status) &&
-            payment.amountSats == deposit.amountSats &&
-            payment.referencesTxid(deposit.txid)
+    ): Boolean {
+        if (!payment.type.equals("RECEIVE", ignoreCase = true)) return false
+        if (!isSettled(payment.status)) return false
+        if (!payment.referencesTxid(deposit.txid)) return false
+        // Structured on-chain txid is authoritative; amount equality remains a fallback
+        // for legacy cached payments that only buried the txid in methodDetails.
+        val exactOnchain =
+            payment.onchainTxid?.equals(deposit.txid, ignoreCase = true) == true
+        return exactOnchain || payment.amountSats == deposit.amountSats
+    }
 
     private fun isSettled(status: String): Boolean {
         val normalized = status.trim().lowercase(Locale.US)
@@ -1370,6 +1426,7 @@ internal object SparkDepositClaimMatcher {
 
     private fun SparkPayment.referencesTxid(txid: String): Boolean {
         val normalizedTxid = txid.lowercase(Locale.US)
+        if (onchainTxid?.lowercase(Locale.US) == normalizedTxid) return true
         return listOf(id, method, methodDetails, recipient.orEmpty())
             .any { value -> value.lowercase(Locale.US).contains(normalizedTxid) }
     }
