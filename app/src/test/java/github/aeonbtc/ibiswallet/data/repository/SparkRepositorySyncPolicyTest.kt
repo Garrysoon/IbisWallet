@@ -52,34 +52,67 @@ class SparkRepositorySyncPolicyTest : FunSpec({
     }
 
     test("claimed deposit matcher accepts settled receive payment with same txid and amount") {
+        val txid = "a".repeat(64)
         SparkDepositClaimMatcher.matches(
-            deposit = sparkDeposit(txid = "a".repeat(64), amountSats = 165_787L),
+            deposit = sparkDeposit(txid = txid, amountSats = 165_787L),
             payment = sparkReceivePayment(
                 status = "COMPLETE",
                 amountSats = 165_787L,
-                methodDetails = "BitcoinDeposit(txid=${"a".repeat(64)})",
+                methodDetails = "Deposit(txId=$txid, vout=0)",
+                onchainTxid = txid,
+                onchainVout = 0u,
             ),
         ) shouldBe true
     }
 
-    test("claimed deposit matcher rejects pending payment") {
+    test("claimed deposit matcher accepts SDK Deposit details without amount match when onchainTxid matches") {
+        val txid = "e".repeat(64)
         SparkDepositClaimMatcher.matches(
-            deposit = sparkDeposit(txid = "b".repeat(64), amountSats = 165_787L),
+            deposit = sparkDeposit(txid = txid, amountSats = 165_787L),
             payment = sparkReceivePayment(
-                status = "PENDING",
+                status = "COMPLETED",
+                amountSats = 165_780L,
+                method = "DEPOSIT",
+                methodDetails = "Deposit(txId=$txid, vout=1)",
+                onchainTxid = txid,
+                onchainVout = 1u,
+            ),
+        ) shouldBe true
+    }
+
+    test("claimed deposit matcher rejects bare DEPOSIT method without txid") {
+        SparkDepositClaimMatcher.matches(
+            deposit = sparkDeposit(txid = "f".repeat(64), amountSats = 165_787L),
+            payment = sparkReceivePayment(
+                status = "COMPLETE",
                 amountSats = 165_787L,
-                methodDetails = "BitcoinDeposit(txid=${"b".repeat(64)})",
+                method = "DEPOSIT",
+                methodDetails = "DEPOSIT",
             ),
         ) shouldBe false
     }
 
-    test("claimed deposit matcher rejects amount mismatch") {
+    test("claimed deposit matcher rejects pending payment") {
+        val txid = "b".repeat(64)
         SparkDepositClaimMatcher.matches(
-            deposit = sparkDeposit(txid = "c".repeat(64), amountSats = 165_787L),
+            deposit = sparkDeposit(txid = txid, amountSats = 165_787L),
+            payment = sparkReceivePayment(
+                status = "PENDING",
+                amountSats = 165_787L,
+                methodDetails = "Deposit(txId=$txid, vout=0)",
+                onchainTxid = txid,
+            ),
+        ) shouldBe false
+    }
+
+    test("claimed deposit matcher rejects amount mismatch for legacy methodDetails-only payments") {
+        val txid = "c".repeat(64)
+        SparkDepositClaimMatcher.matches(
+            deposit = sparkDeposit(txid = txid, amountSats = 165_787L),
             payment = sparkReceivePayment(
                 status = "COMPLETE",
                 amountSats = 165_788L,
-                methodDetails = "BitcoinDeposit(txid=${"c".repeat(64)})",
+                methodDetails = "BitcoinDeposit(txid=$txid)",
             ),
         ) shouldBe false
     }
@@ -90,7 +123,10 @@ class SparkRepositorySyncPolicyTest : FunSpec({
             sparkReceivePayment(
                 status = "COMPLETE",
                 amountSats = 165_787L,
-                methodDetails = "BitcoinDeposit(txid=$txid)",
+                method = "DEPOSIT",
+                methodDetails = "Deposit(txId=$txid, vout=0)",
+                onchainTxid = txid,
+                onchainVout = 0u,
             ),
         )
 
@@ -100,6 +136,18 @@ class SparkRepositorySyncPolicyTest : FunSpec({
                 payment = payment,
             )
         } shouldBe true
+    }
+
+    test("claimed deposit matcher accepts legacy BitcoinDeposit methodDetails string") {
+        val txid = "aa".repeat(32)
+        SparkDepositClaimMatcher.matches(
+            deposit = sparkDeposit(txid = txid, amountSats = 100L),
+            payment = sparkReceivePayment(
+                status = "COMPLETE",
+                amountSats = 100L,
+                methodDetails = "BitcoinDeposit(txid=$txid)",
+            ),
+        ) shouldBe true
     }
 
     test("reconnect debouncer coalesces rapid schedule requests") {
@@ -150,6 +198,9 @@ private fun sparkReceivePayment(
     status: String,
     amountSats: Long,
     methodDetails: String,
+    method: String = "Bitcoin",
+    onchainTxid: String? = null,
+    onchainVout: UInt? = null,
 ): SparkPayment =
     SparkPayment(
         id = "payment-id",
@@ -158,6 +209,8 @@ private fun sparkReceivePayment(
         amountSats = amountSats,
         feeSats = 0L,
         timestamp = 0L,
-        method = "Bitcoin",
+        method = method,
         methodDetails = methodDetails,
+        onchainTxid = onchainTxid,
+        onchainVout = onchainVout,
     )
