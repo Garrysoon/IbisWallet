@@ -212,17 +212,16 @@
     <string name="ln_node_not_connected_hint">Configura LND, CLN o NWC para este monedero.</string>
     <string name="ln_node_setup_connection">Configurar nodo</string>
     <string name="liquid_not_connected">No conectado</string>
-    <string name="liquid_not_connected_hint">Conéctate a un servidor Liquid Electrum para sincronizar y enviar.</string>
+    <string name="liquid_not_connected_hint">Conéctate a un servidor Liquid Electrum para sincronizar tu monedero y enviar transacciones.</string>
     <string name="liquid_status_connecting">Conectandoâ¦</string>
     <string name="liquid_connecting_hint">Conectando a Liquid Electrumâ¦</string>
     <string name="liquid_connect_server">Conectar</string>
-    <string name="liquid_setup_server">Abrir Liquid Electrum</string>
-    <string name="electrum_not_connected">Electrum sin conexión</string>
+    <string name="electrum_not_connected">Sin conexión</string>
     <string name="electrum_not_connected_hint">Conéctate a un servidor Electrum para sincronizar tu monedero y enviar transacciones.</string>
     <string name="electrum_status_connecting">Conectando…</string>
     <string name="electrum_connecting_hint">Conectando a Electrum…</string>
     <string name="electrum_connect_server">Conectar</string>
-    <string name="electrum_setup_server">Ajustes del servidor</string>
+    <string name="electrum_configure_server">Configurar</string>
     <string name="electrum_work_offline">Trabajar sin conexión</string>
     <string name="privacy_mode_hint_title">Modo de privacidad activado</string>
     <string name="privacy_mode_hint_message">Los saldos están ocultos. Mantén pulsado el icono de privacidad para desactivarlo.</string>
@@ -419,6 +418,7 @@
     <string name="loc_f08db23b" formatted="false">Sincronizar</string>
     <string name="loc_2bb3e26c" formatted="false">Codigo fuente</string>
     <string name="loc_98b3744d" formatted="false">Solicita funciones y reporta errores en GitHub</string>
+    <string name="loc_7a3f1c9e" formatted="false">Donar</string>
     <string name="loc_a0ce08ad" formatted="false">Recibir</string>
     <string name="loc_47fbfb16" formatted="false">Cambio</string>
     <string name="loc_d975cc26" formatted="false">Usada</string>
@@ -582,6 +582,7 @@
     <string name="loc_c5f55bb2" formatted="false">Costo adicional</string>
     <string name="loc_9081b0e6" formatted="false">Consolidará todos los UTXO de la billetera</string>
     <string name="loc_534e1eb2" formatted="false">Fondos insuficientes</string>
+    <string name="liquid_error_connection_lost" formatted="false">Conexión perdida. Inténtalo de nuevo.</string>
     <string name="loc_ee7df965" formatted="false">Dirección de destino personalizada</string>
     <string name="loc_a18fd453" formatted="false">Dirección de Bitcoin</string>
     <string name="loc_30261319" formatted="false">Los fondos se redirigirán a esta dirección de Bitcoin.</string>
@@ -775,6 +776,8 @@
     <string name="pending_lightning_retry_refund" formatted="false">Reintentar reembolso</string>
     <string name="pending_lightning_invoice_last_claim_never" formatted="false">Nunca</string>
     <string name="pending_lightning_invoice_claiming" formatted="false">Reclamando...</string>
+    <string name="lightning_invoice_expires_in_format">Caduca en %1$s</string>
+    <string name="lightning_invoice_expired" formatted="false">Caducada</string>
     <string name="loc_5c96cb11" formatted="false">Direcciones</string>
     <string name="loc_8bc041b3" formatted="false">Todos UTXO</string>
     <string name="loc_c5f4423b" formatted="false">Crear factura</string>

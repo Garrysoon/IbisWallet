@@ -246,17 +246,16 @@
     <string name="ln_node_not_connected_hint">Настройте LND, CLN или NWC для этого кошелька.</string>
     <string name="ln_node_setup_connection">Настроить ноду</string>
     <string name="liquid_not_connected">Не подключено</string>
-    <string name="liquid_not_connected_hint">Подключитесь к серверу Liquid Electrum для синхронизации и отправки.</string>
+    <string name="liquid_not_connected_hint">Подключитесь к серверу Liquid Electrum, чтобы синхронизировать кошелёк и отправлять транзакции.</string>
     <string name="liquid_status_connecting">Подключение…</string>
     <string name="liquid_connecting_hint">Подключение к Liquid Electrum…</string>
     <string name="liquid_connect_server">Подключиться</string>
-    <string name="liquid_setup_server">Открыть Liquid Electrum</string>
-    <string name="electrum_not_connected">Electrum офлайн</string>
+    <string name="electrum_not_connected">Нет подключения</string>
     <string name="electrum_not_connected_hint">Подключитесь к серверу Electrum, чтобы синхронизировать кошелёк и отправлять транзакции.</string>
     <string name="electrum_status_connecting">Подключение…</string>
     <string name="electrum_connecting_hint">Подключение к Electrum…</string>
     <string name="electrum_connect_server">Подключиться</string>
-    <string name="electrum_setup_server">Настройки сервера</string>
+    <string name="electrum_configure_server">Настроить</string>
     <string name="electrum_work_offline">Работать офлайн</string>
     <string name="privacy_mode_hint_title">Режим приватности включен</string>
     <string name="privacy_mode_hint_message">Балансы скрыты. Нажмите и удерживайте значок приватности, чтобы отключить.</string>
@@ -399,6 +398,7 @@
     <string name="loc_53204016" formatted="false">Адрес депозита Liquid</string>
     <string name="loc_53ae02a5" formatted="false">Новый</string>
     <string name="loc_534e1eb2" formatted="false">Недостаточно средств</string>
+    <string name="liquid_error_connection_lost" formatted="false">Соединение потеряно. Попробуйте ещё раз.</string>
     <string name="loc_56459d9d" formatted="false">Создать PSBT</string>
     <string name="loc_58267a45" formatted="false">Источник</string>
     <string name="loc_59b2cdc5" formatted="false">Сканировать QR-код</string>
@@ -873,6 +873,8 @@
     <string name="pending_lightning_retry_refund" formatted="false">Повторить возврат</string>
     <string name="pending_lightning_invoice_last_claim_never" formatted="false">Никогда</string>
     <string name="pending_lightning_invoice_claiming" formatted="false">Получение...</string>
+    <string name="lightning_invoice_expires_in_format">Истекает через %1$s</string>
+    <string name="lightning_invoice_expired" formatted="false">Истёк</string>
     <string name="loc_ed3bf7b5" formatted="false">Адреса</string>
     <string name="loc_aefc2317" formatted="false">UTXO</string>
     <string name="loc_7378b4ca" formatted="false">Настройте PIN или биометрию для открытия заблокированных кошельков</string>
@@ -931,6 +933,7 @@
     <string name="loc_27bd3430" formatted="false">Заблокировать</string>
     <string name="loc_2bb3e26c" formatted="false">Исходный код</string>
     <string name="loc_98b3744d" formatted="false">Запрашивайте функции и сообщайте об ошибках на GitHub</string>
+    <string name="loc_7a3f1c9e" formatted="false">Пожертвовать</string>
     <string name="loc_47fbfb16" formatted="false">Сдача</string>
     <string name="loc_d975cc26" formatted="false">Использован</string>
     <string name="loc_c87ab105" formatted="false">QR-код адреса</string>

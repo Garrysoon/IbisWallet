@@ -213,17 +213,16 @@
     <string name="ln_node_not_connected_hint">Configure LND, CLN ou NWC para esta carteira.</string>
     <string name="ln_node_setup_connection">Configurar nó</string>
     <string name="liquid_not_connected">Não conectado</string>
-    <string name="liquid_not_connected_hint">Conecte-se a um servidor Liquid Electrum para sincronizar e enviar.</string>
+    <string name="liquid_not_connected_hint">Conecte-se a um servidor Liquid Electrum para sincronizar a carteira e enviar transações.</string>
     <string name="liquid_status_connecting">Conectando…</string>
     <string name="liquid_connecting_hint">Conectando ao Liquid Electrum…</string>
     <string name="liquid_connect_server">Conectar</string>
-    <string name="liquid_setup_server">Abrir Liquid Electrum</string>
-    <string name="electrum_not_connected">Electrum offline</string>
+    <string name="electrum_not_connected">Não conectado</string>
     <string name="electrum_not_connected_hint">Conecte-se a um servidor Electrum para sincronizar a carteira e enviar transações.</string>
     <string name="electrum_status_connecting">Conectando…</string>
     <string name="electrum_connecting_hint">Conectando ao Electrum…</string>
     <string name="electrum_connect_server">Conectar</string>
-    <string name="electrum_setup_server">Configurações do servidor</string>
+    <string name="electrum_configure_server">Configurar</string>
     <string name="electrum_work_offline">Trabalhar offline</string>
     <string name="privacy_mode_hint_title">Modo de privacidade ativado</string>
     <string name="privacy_mode_hint_message">Os saldos estão ocultos. Toque e segure o ícone de privacidade para desativar.</string>
@@ -419,6 +418,7 @@
     <string name="loc_f08db23b" formatted="false">Sincronizar</string>
     <string name="loc_2bb3e26c" formatted="false">Código fonte</string>
     <string name="loc_98b3744d" formatted="false">Solicite recursos e relate bugs no GitHub</string>
+    <string name="loc_7a3f1c9e" formatted="false">Doar</string>
     <string name="loc_a0ce08ad" formatted="false">Receber</string>
     <string name="loc_47fbfb16" formatted="false">Mudar</string>
     <string name="loc_d975cc26" formatted="false">Usado</string>
@@ -582,6 +582,7 @@
     <string name="loc_c5f55bb2" formatted="false">Custo adicional</string>
     <string name="loc_9081b0e6" formatted="false">Consolidará todos os UTXOs na carteira</string>
     <string name="loc_534e1eb2" formatted="false">Fundos insuficientes</string>
+    <string name="liquid_error_connection_lost" formatted="false">Conexão perdida. Tente novamente.</string>
     <string name="loc_ee7df965" formatted="false">Endereço de destino personalizado</string>
     <string name="loc_a18fd453" formatted="false">Endereço Bitcoin</string>
     <string name="loc_30261319" formatted="false">Os fundos serão redirecionados para este endereço Bitcoin.</string>
@@ -775,6 +776,8 @@
     <string name="pending_lightning_retry_refund" formatted="false">Tentar reembolso novamente</string>
     <string name="pending_lightning_invoice_last_claim_never" formatted="false">Nunca</string>
     <string name="pending_lightning_invoice_claiming" formatted="false">Reivindicando...</string>
+    <string name="lightning_invoice_expires_in_format">Expira em %1$s</string>
+    <string name="lightning_invoice_expired" formatted="false">Expirada</string>
     <string name="loc_5c96cb11" formatted="false">Instruções</string>
     <string name="loc_8bc041b3" formatted="false">Todos os UTXOs</string>
     <string name="loc_c5f4423b" formatted="false">Criar fatura</string>
