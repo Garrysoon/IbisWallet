@@ -46,6 +46,7 @@ fun ScrollableDialogSurface(
     shape: Shape = RoundedCornerShape(12.dp),
     contentPadding: PaddingValues = PaddingValues(16.dp),
     bottomSpacing: Dp = 24.dp,
+    maxWidth: Dp = 560.dp,
     actions: (@Composable ColumnScope.() -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit,
 ) {
@@ -62,7 +63,7 @@ fun ScrollableDialogSurface(
                     modifier =
                         Modifier
                             .fillMaxWidth()
-                            .widthIn(max = 560.dp)
+                            .widthIn(max = maxWidth)
                             .padding(16.dp)
                             .heightIn(max = 720.dp)
                             .then(modifier),
@@ -162,6 +163,7 @@ fun IbisConfirmDialog(
     onDismissAction: (() -> Unit)? = onDismissRequest,
     confirmEnabled: Boolean = true,
     confirmColor: Color = BitcoinOrange,
+    maxWidth: Dp = 560.dp,
     icon: (@Composable () -> Unit)? = null,
     body: (@Composable ColumnScope.() -> Unit)? = null,
 ) {
@@ -177,6 +179,7 @@ fun IbisConfirmDialog(
         properties = properties,
         containerColor = containerColor,
         shape = shape,
+        maxWidth = maxWidth,
         actions = {
             Row(
                 modifier = Modifier.fillMaxWidth(),

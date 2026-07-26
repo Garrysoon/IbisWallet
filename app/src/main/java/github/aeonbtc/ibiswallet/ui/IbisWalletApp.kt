@@ -9,11 +9,14 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.BorderStroke
@@ -44,6 +47,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Settings
@@ -936,6 +941,8 @@ fun IbisWalletApp(
     }
 
     appUpdatePrompt?.let { prompt ->
+        var changelogExpanded by remember(prompt.latestVersionName) { mutableStateOf(false) }
+        val releaseNotes = prompt.releaseNotes.trim()
         IbisConfirmDialog(
             onDismissRequest = { viewModel.dismissAppUpdatePrompt() },
             title = stringResource(R.string.update_popup_title),
@@ -943,12 +950,71 @@ fun IbisWalletApp(
             confirmText = stringResource(R.string.update_popup_view),
             dismissText = stringResource(R.string.update_popup_close),
             onDismissAction = { viewModel.dismissAppUpdatePrompt() },
+            properties = DialogProperties(usePlatformDefaultWidth = false),
+            maxWidth = 720.dp,
             onConfirm = {
                 viewModel.dismissAppUpdatePrompt()
                 runCatching {
                     context.startActivity(Intent(Intent.ACTION_VIEW, prompt.releaseUrl.toUri()))
                 }
             },
+            body =
+                if (releaseNotes.isNotEmpty()) {
+                    {
+                        HorizontalDivider(color = BorderColor)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(
+                            modifier =
+                                Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable { changelogExpanded = !changelogExpanded }
+                                    .padding(vertical = 4.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                text = stringResource(R.string.update_popup_changelog),
+                                style = MaterialTheme.typography.titleMedium,
+                                color = MaterialTheme.colorScheme.onBackground,
+                            )
+                            Icon(
+                                imageVector =
+                                    if (changelogExpanded) {
+                                        Icons.Default.KeyboardArrowUp
+                                    } else {
+                                        Icons.Default.KeyboardArrowDown
+                                    },
+                                contentDescription =
+                                    stringResource(
+                                        if (changelogExpanded) {
+                                            R.string.update_popup_changelog_collapse
+                                        } else {
+                                            R.string.update_popup_changelog_expand
+                                        },
+                                    ),
+                                tint = TextSecondary,
+                            )
+                        }
+                        AnimatedVisibility(
+                            visible = changelogExpanded,
+                            enter = expandVertically() + fadeIn(),
+                            exit = shrinkVertically() + fadeOut(),
+                        ) {
+                            Text(
+                                text = releaseNotes,
+                                modifier =
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .padding(top = 8.dp),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = TextSecondary,
+                            )
+                        }
+                    }
+                } else {
+                    null
+                },
         )
     }
 
