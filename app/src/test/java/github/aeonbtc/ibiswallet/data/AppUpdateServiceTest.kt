@@ -29,6 +29,27 @@ class AppUpdateServiceTest : FunSpec({
 
         latest.versionName shouldBe "v4.1.1-beta"
         latest.htmlUrl shouldBe "https://github.com/aeonBTC/IbisWallet/releases/tag/411beta"
+        latest.releaseNotes shouldBe ""
+    }
+
+    test("parses release notes body from github release") {
+        val latest =
+            AppUpdateService.parseLatestRelease(
+                """
+                [
+                  {
+                    "tag_name": "v4.2.0",
+                    "html_url": "https://github.com/aeonBTC/IbisWallet/releases/tag/420",
+                    "draft": false,
+                    "prerelease": false,
+                    "body": "## What's Changed\n- Fix Tor reconnect\r\n- Add update changelog"
+                  }
+                ]
+                """.trimIndent(),
+            ).shouldNotBeNull()
+
+        latest.versionName shouldBe "v4.2.0"
+        latest.releaseNotes shouldBe "## What's Changed\n- Fix Tor reconnect\n- Add update changelog"
     }
 
     test("picks the newest stable release and ignores prereleases") {
