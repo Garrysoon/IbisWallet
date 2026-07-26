@@ -12,6 +12,9 @@
     <string name="update_popup_message">A Carteira Ibis %1$s está disponível.</string>
     <string name="update_popup_view">Ver</string>
     <string name="update_popup_close">Fechar</string>
+    <string name="update_popup_changelog">Changelog</string>
+    <string name="update_popup_changelog_expand">Expandir changelog</string>
+    <string name="update_popup_changelog_collapse">Recolher changelog</string>
     <string name="app_update_opt_in_title">Verifique se há atualizações de aplicativos no GitHub?</string>
     <string name="app_update_opt_in_message">Esta opção pode ser ativada ou desativada em Sobre.</string>
     <string name="app_update_opt_in_enable">Ativar</string>

@@ -11,6 +11,9 @@
     <string name="update_popup_message">Ibis Wallet %1$s is available.</string>
     <string name="update_popup_view">View</string>
     <string name="update_popup_close">Close</string>
+    <string name="update_popup_changelog">Changelog</string>
+    <string name="update_popup_changelog_expand">Expand changelog</string>
+    <string name="update_popup_changelog_collapse">Collapse changelog</string>
     <string name="app_update_opt_in_title">Check GitHub for app updates?</string>
     <string name="app_update_opt_in_message">This option can be toggled on the About screen.</string>
     <string name="app_update_opt_in_enable">Enable</string>

@@ -12,6 +12,9 @@
     <string name="update_popup_message">Доступна Ibis Wallet %1$s.</string>
     <string name="update_popup_view">Открыть</string>
     <string name="update_popup_close">Закрыть</string>
+    <string name="update_popup_changelog">Changelog</string>
+    <string name="update_popup_changelog_expand">Развернуть changelog</string>
+    <string name="update_popup_changelog_collapse">Свернуть changelog</string>
     <string name="app_update_opt_in_title">Проверять обновления приложения через GitHub?</string>
     <string name="app_update_opt_in_message">Эту опцию можно переключать на экране «О приложении».</string>
     <string name="app_update_opt_in_enable">Включить</string>
