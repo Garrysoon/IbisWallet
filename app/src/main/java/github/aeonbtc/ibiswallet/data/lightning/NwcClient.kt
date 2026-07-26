@@ -41,9 +41,7 @@ import javax.crypto.spec.SecretKeySpec
  * Nostr Wallet Connect (NIP-47) backend.
  * Communicates over WebSocket relays; supports Tor SOCKS for wss relays.
  */
-class NwcClient(
-    private val torSocksPort: Int = 9050,
-) : LightningNodeBackend {
+class NwcClient : LightningNodeBackend {
     private var parsed: ParsedNwcUri? = null
     private var clientSecretKey: ECKey? = null
     private var clientPubkeyHex: String? = null
@@ -602,7 +600,12 @@ class NwcClient(
                 .connectTimeout(if (useTor) 90 else 45, TimeUnit.SECONDS)
                 .writeTimeout(if (useTor) 90 else 45, TimeUnit.SECONDS)
         if (useTor) {
-            builder.proxy(Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", torSocksPort)))
+            builder.proxy(
+                Proxy(
+                    Proxy.Type.SOCKS,
+                    InetSocketAddress("127.0.0.1", github.aeonbtc.ibiswallet.tor.TorManager.socksPort()),
+                ),
+            )
             // Force hostname resolution through SOCKS so Tor handles .onion / remote DNS.
             builder.dns { hostname ->
                 listOf(InetAddress.getByAddress(hostname, byteArrayOf(0, 0, 0, 0)))

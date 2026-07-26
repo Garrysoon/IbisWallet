@@ -25,16 +25,11 @@ class FeeEstimationService {
         private const val PRECISE_ENDPOINT = "/api/v1/fees/precise"
         private const val RECOMMENDED_ENDPOINT = "/api/v1/fees/recommended"
         private const val TOR_PROXY_HOST = "127.0.0.1"
-        private const val TOR_PROXY_PORT = 9050
         private const val TIMEOUT_SECONDS = 30L
         private const val TOR_TIMEOUT_SECONDS = 30L
 
         private val clearnetClient: OkHttpClient by lazy {
             buildClient(useTorProxy = false)
-        }
-
-        private val torClient: OkHttpClient by lazy {
-            buildClient(useTorProxy = true)
         }
 
         private fun buildClient(useTorProxy: Boolean): OkHttpClient {
@@ -48,7 +43,10 @@ class FeeEstimationService {
                 val proxy =
                     Proxy(
                         Proxy.Type.SOCKS,
-                        InetSocketAddress(TOR_PROXY_HOST, TOR_PROXY_PORT),
+                        InetSocketAddress(
+                            TOR_PROXY_HOST,
+                            github.aeonbtc.ibiswallet.tor.TorManager.socksPort(),
+                        ),
                     )
                 builder.proxy(proxy)
                 // Prevent local DNS resolution — send hostname through SOCKS5 proxy
@@ -60,6 +58,9 @@ class FeeEstimationService {
 
             return builder.build()
         }
+
+        private fun client(useTorProxy: Boolean): OkHttpClient =
+            if (useTorProxy) buildClient(useTorProxy = true) else clearnetClient
     }
 
     /**
@@ -78,7 +79,7 @@ class FeeEstimationService {
     ): Result<FeeEstimates> =
         withContext(Dispatchers.IO) {
             try {
-                val client = if (useTorProxy) torClient else clearnetClient
+                val client = client(useTorProxy)
 
                 if (usePrecise) {
                     val preciseResult = tryFetchFromEndpoint(client, baseUrl, PRECISE_ENDPOINT)

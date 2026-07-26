@@ -31,7 +31,7 @@ import kotlin.concurrent.thread
 class BoltzTorRelay(
     val mode: Mode = Mode.TOR,
     private val torSocksHost: String = "127.0.0.1",
-    private val torSocksPort: Int = 9050,
+    private val torSocksPortProvider: () -> Int = { TorManager.socksPort() },
     // Test seams: allow pointing the clearnet upstream at a local fake without TLS.
     private val clearnetHostOverride: String = BOLTZ_CLEARNET_HOST,
     private val clearnetPortOverride: Int = BOLTZ_CLEARNET_PORT,
@@ -137,7 +137,12 @@ class BoltzTorRelay(
     private fun openUpstream(): Socket {
         return when (mode) {
             Mode.TOR -> {
-                Socket(Proxy(Proxy.Type.SOCKS, InetSocketAddress(torSocksHost, torSocksPort))).also {
+                Socket(
+                    Proxy(
+                        Proxy.Type.SOCKS,
+                        InetSocketAddress(torSocksHost, torSocksPortProvider()),
+                    ),
+                ).also {
                     it.soTimeout = READ_TIMEOUT_MS
                     it.connect(
                         InetSocketAddress.createUnresolved(BOLTZ_ONION_HOST, BOLTZ_ONION_PORT),

@@ -828,7 +828,10 @@ class WalletRepository(context: Context) {
                     val proxy =
                         java.net.Proxy(
                             java.net.Proxy.Type.SOCKS,
-                            java.net.InetSocketAddress("127.0.0.1", 9050),
+                            java.net.InetSocketAddress(
+                                "127.0.0.1",
+                                github.aeonbtc.ibiswallet.tor.TorManager.socksPort(),
+                            ),
                         )
                     java.net.Socket(proxy).also {
                         it.soTimeout = 30_000

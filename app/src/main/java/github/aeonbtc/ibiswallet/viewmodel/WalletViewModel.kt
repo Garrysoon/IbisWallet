@@ -4919,6 +4919,7 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
                                     AppUpdateStatus.UpdateAvailable(
                                         latestVersionName = release.versionName,
                                         releaseUrl = release.htmlUrl,
+                                        releaseNotes = release.releaseNotes,
                                     )
                             }
                         },
@@ -5489,6 +5490,7 @@ sealed class AppUpdateStatus {
     data class UpdateAvailable(
         val latestVersionName: String,
         val releaseUrl: String,
+        val releaseNotes: String = "",
     ) : AppUpdateStatus()
 }
 

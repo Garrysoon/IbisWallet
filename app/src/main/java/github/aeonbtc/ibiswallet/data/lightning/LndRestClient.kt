@@ -43,9 +43,7 @@ import kotlin.math.roundToLong
  * Auth: macaroon + optional TLS. UI label: LND.
  * REST maps 1:1 to lightning.proto methods and works cleanly over Tor SOCKS5.
  */
-class LndRestClient(
-    private val torSocksPort: Int = 9050,
-) : LightningNodeBackend {
+class LndRestClient : LightningNodeBackend {
     private var client: OkHttpClient? = null
     private var baseUrl: String = ""
     private var macaroonHex: String = ""
@@ -1484,7 +1482,7 @@ class LndRestClient(
                 .retryOnConnectionFailure(!probeTimeouts)
 
         if (viaTor) {
-            applyTorProxy(builder, torSocksPort)
+            applyTorProxy(builder, github.aeonbtc.ibiswallet.tor.TorManager.socksPort())
             // HTTP/1.1 only — HTTP/2 multiplexing over Tor SOCKS flakes badly.
             // Small keep-alive pool so parallel sync RPCs can reuse circuits instead of
             // opening a brand-new dial for every getinfo/payments/tx call.

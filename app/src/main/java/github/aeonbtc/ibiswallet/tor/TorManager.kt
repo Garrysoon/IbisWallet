@@ -24,6 +24,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.torproject.jni.TorService
 import java.lang.ref.WeakReference
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Manages the Tor service lifecycle and state.
@@ -34,14 +35,24 @@ import java.lang.ref.WeakReference
 class TorManager private constructor(context: Context) {
     companion object {
         private const val TAG = "TorManager"
-        private const val SOCKS_PORT = 9050
-        private const val SOCKS_PROBE_RETRIES = 4
+        private const val DEFAULT_SOCKS_PORT = 9050
+        private const val SOCKS_PROBE_RETRIES = 8
         private const val SOCKS_PROBE_TIMEOUT_MS = 500
         private const val SOCKS_PROBE_INTERVAL_MS = 250L
+        private const val CONTROL_POLL_INTERVAL_MS = 500L
         private const val TOR_STOP_SETTLE_MS = 2_000L
+        private const val STUCK_START_RESET_MS = 90_000L
 
         @Volatile
         private var instance: TorManager? = null
+
+        /**
+         * Last known local Tor SOCKS port. Prefer 9050; falls back to whatever
+         * [TorService.getSocksPort] reports when 9050 was unavailable / auto.
+         */
+        private val socksPortRef = AtomicInteger(DEFAULT_SOCKS_PORT)
+
+        fun socksPort(): Int = socksPortRef.get().coerceAtLeast(1)
 
         fun getInstance(context: Context): TorManager {
             return instance ?: synchronized(this) {
@@ -59,7 +70,9 @@ class TorManager private constructor(context: Context) {
     private var isBound = false
     private var isReceiverRegistered = false
     private var stopTransitionJob: Job? = null
+    private var stuckStartWatchdogJob: Job? = null
     private var restartAfterStopRequested = false
+    private var startGeneration = 0
 
     private val serviceConnection =
         object : ServiceConnection {
@@ -68,13 +81,21 @@ class TorManager private constructor(context: Context) {
                 service: IBinder?,
             ) {
                 if (BuildConfig.DEBUG) Log.d(TAG, "Tor service connected")
-                torService = (service as TorService.LocalBinder).service
-                _torState.value =
-                    _torState.value.copy(
-                        status = TorStatus.CONNECTING,
-                        statusMessage = "Bootstrapping...",
-                    )
-                // Status updates will come through the broadcast receiver
+                val bound = (service as TorService.LocalBinder).service
+                torService = bound
+                captureSocksPort(bound)
+                // Service may already be fully up (reconnect / retained process).
+                // Prefer control-port readiness: SOCKS alone can listen before circuits exist.
+                if (isNetworkReadyBlocking(bound)) {
+                    markConnected("Connected")
+                } else if (_torState.value.status != TorStatus.CONNECTED) {
+                    _torState.value =
+                        _torState.value.copy(
+                            status = TorStatus.CONNECTING,
+                            statusMessage = "Bootstrapping...",
+                        )
+                }
+                // Status updates will come through the broadcast receiver / awaitReady probes
             }
 
             override fun onServiceDisconnected(name: ComponentName?) {
@@ -97,6 +118,19 @@ class TorManager private constructor(context: Context) {
                 context: Context?,
                 intent: Intent?,
             ) {
+                if (intent?.action == TorService.ACTION_ERROR) {
+                    val detail =
+                        intent.getStringExtra(Intent.EXTRA_TEXT)?.take(100)
+                            ?: "Tor error"
+                    if (BuildConfig.DEBUG) Log.e(TAG, "Tor error broadcast: $detail")
+                    _torState.value =
+                        TorState(
+                            status = TorStatus.ERROR,
+                            statusMessage = detail,
+                        )
+                    return
+                }
+
                 val status = intent?.getStringExtra(TorService.EXTRA_STATUS) ?: return
                 if (BuildConfig.DEBUG) Log.d(TAG, "Tor status update: $status")
 
@@ -128,6 +162,11 @@ class TorManager private constructor(context: Context) {
                         status = torStatus,
                         statusMessage = displayMessage,
                     )
+
+                if (torStatus == TorStatus.CONNECTED) {
+                    captureSocksPort(torService)
+                    cancelStuckStartWatchdog()
+                }
             }
         }
 
@@ -139,12 +178,20 @@ class TorManager private constructor(context: Context) {
     @Synchronized
     fun start() {
         val appContext = appContextRef.get() ?: return
-        if (_torState.value.status == TorStatus.CONNECTED ||
-            _torState.value.status == TorStatus.CONNECTING ||
+        if (_torState.value.status == TorStatus.CONNECTED) {
+            if (BuildConfig.DEBUG) Log.d(TAG, "Tor is already connected")
+            return
+        }
+        if (_torState.value.status == TorStatus.CONNECTING ||
             _torState.value.status == TorStatus.STARTING
         ) {
-            if (BuildConfig.DEBUG) Log.d(TAG, "Tor is already running or starting")
-            return
+            if (isBound && isReceiverRegistered) {
+                if (BuildConfig.DEBUG) Log.d(TAG, "Tor is already running or starting")
+                return
+            }
+            // Recover from a half-started lifecycle (receiver unbound, service retained, etc.)
+            if (BuildConfig.DEBUG) Log.w(TAG, "Tor start state stuck without binding; resetting")
+            forceResetLocked(appContext)
         }
         if (_torState.value.status == TorStatus.STOPPING) {
             if (BuildConfig.DEBUG) Log.d(TAG, "Tor is stopping; queueing restart")
@@ -155,6 +202,8 @@ class TorManager private constructor(context: Context) {
         stopTransitionJob?.cancel()
         stopTransitionJob = null
         restartAfterStopRequested = false
+        startGeneration += 1
+        val generation = startGeneration
 
         if (BuildConfig.DEBUG) Log.d(TAG, "Starting Tor service")
         _torState.value =
@@ -163,20 +212,30 @@ class TorManager private constructor(context: Context) {
                 statusMessage = "Starting Tor...",
             )
 
-        // Register status receiver
-        val filter = IntentFilter(TorService.ACTION_STATUS)
-        ContextCompat.registerReceiver(
-            appContext,
-            statusReceiver,
-            filter,
-            ContextCompat.RECEIVER_NOT_EXPORTED,
-        )
-        isReceiverRegistered = true
+        // Register status + error receivers
+        if (!isReceiverRegistered) {
+            val filter =
+                IntentFilter().apply {
+                    addAction(TorService.ACTION_STATUS)
+                    addAction(TorService.ACTION_ERROR)
+                }
+            ContextCompat.registerReceiver(
+                appContext,
+                statusReceiver,
+                filter,
+                ContextCompat.RECEIVER_NOT_EXPORTED,
+            )
+            isReceiverRegistered = true
+        }
 
         // Bind to Tor service
-        val intent = Intent(appContext, TorService::class.java)
-        appContext.bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
-        isBound = true
+        if (!isBound) {
+            val intent = Intent(appContext, TorService::class.java)
+            appContext.bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
+            isBound = true
+        }
+
+        armStuckStartWatchdog(generation)
     }
 
     /**
@@ -190,6 +249,9 @@ class TorManager private constructor(context: Context) {
             return
         }
         if (BuildConfig.DEBUG) Log.d(TAG, "Stopping Tor service")
+
+        cancelStuckStartWatchdog()
+        startGeneration += 1
 
         _torState.value =
             _torState.value.copy(
@@ -257,47 +319,267 @@ class TorManager private constructor(context: Context) {
      */
     suspend fun awaitReady(timeoutMs: Long = 60_000): Boolean {
         // Already bootstrapped — just verify the SOCKS proxy.
-        if (isReady()) return probeSocksProxy()
+        if (isReady()) {
+            val ok = probeSocksProxy()
+            if (ok) return true
+            // Reported ready but proxy gone (killed process); force a restart path.
+            if (BuildConfig.DEBUG) Log.w(TAG, "Tor marked connected but SOCKS unreachable; restarting")
+            stop()
+            start()
+        }
 
-        val result = withTimeoutOrNull(timeoutMs) {
-            _torState.first { state ->
-                state.status == TorStatus.CONNECTED || state.status == TorStatus.ERROR
+        val deadline = System.nanoTime() + timeoutMs * 1_000_000L
+        while (System.nanoTime() < deadline) {
+            when (_torState.value.status) {
+                TorStatus.CONNECTED -> {
+                    val ready = probeSocksProxy()
+                    if (ready) return true
+                    if (BuildConfig.DEBUG) {
+                        Log.w(TAG, "Tor connected status but SOCKS not reachable on ${socksPort()}")
+                    }
+                    return false
+                }
+                TorStatus.ERROR -> return false
+                TorStatus.STARTING, TorStatus.CONNECTING -> {
+                    // tor-android 0.4.9.6 may never broadcast STATUS_ON (listens CIRC,
+                    // expects STATUS_CLIENT). Recover via control port + SOCKS.
+                    if (isNetworkReady()) {
+                        markConnected("Connected")
+                        return true
+                    }
+                    // Advance status text from control bootstrap progress when available.
+                    updateBootstrapMessageFromControl()
+                    val remainingMs = ((deadline - System.nanoTime()) / 1_000_000L).coerceAtLeast(0L)
+                    if (remainingMs == 0L) break
+                    val waitMs = minOf(CONTROL_POLL_INTERVAL_MS, remainingMs)
+                    val baseline = _torState.value
+                    withTimeoutOrNull(waitMs) {
+                        _torState.first { it != baseline }
+                    }
+                }
+                TorStatus.DISCONNECTED, TorStatus.STOPPING -> {
+                    val remainingMs = ((deadline - System.nanoTime()) / 1_000_000L).coerceAtLeast(0L)
+                    if (remainingMs == 0L) break
+                    val baseline = _torState.value
+                    withTimeoutOrNull(remainingMs) {
+                        _torState.first { it != baseline }
+                    }
+                }
             }
         }
 
-        if (result == null || result.status != TorStatus.CONNECTED) return false
-
-        // SOCKS proxy may take a moment to start listening after the
-        // control port reports "Bootstrapped 100%". Probe with retries.
-        return probeSocksProxy()
+        // Timed out while stuck in bootstrap — clear sticky STARTING/CONNECTING so the
+        // next start() is not a no-op ("hangs forever on Bootstrapping").
+        val stuck =
+            _torState.value.status == TorStatus.STARTING ||
+                _torState.value.status == TorStatus.CONNECTING
+        if (stuck) {
+            if (BuildConfig.DEBUG) Log.w(TAG, "Tor bootstrap timed out; resetting")
+            stop()
+        }
+        return false
     }
 
     /**
      * Try to open + immediately close a TCP connection to the local SOCKS
-     * proxy. Retries up to 4 times with 250 ms between attempts (≤ 1 s).
-     * Runs on [Dispatchers.IO] to avoid blocking the main thread.
+     * proxy. Retries with short gaps. Runs on [Dispatchers.IO].
      */
-    private suspend fun probeSocksProxy(): Boolean = withContext(Dispatchers.IO) {
-        repeat(SOCKS_PROBE_RETRIES) { attempt ->
-            try {
-                java.net.Socket().use { socket ->
-                    socket.connect(
-                        java.net.InetSocketAddress("127.0.0.1", SOCKS_PORT),
-                        SOCKS_PROBE_TIMEOUT_MS,
-                    )
+    private suspend fun probeSocksProxy(maxAttempts: Int = SOCKS_PROBE_RETRIES): Boolean =
+        withContext(Dispatchers.IO) {
+            repeat(maxAttempts) { attempt ->
+                if (probeSocksPortBlocking(socksPort())) {
+                    return@withContext true
                 }
-                return@withContext true
-            } catch (_: Exception) {
-                if (BuildConfig.DEBUG) {
-                    Log.d(TAG, "SOCKS probe attempt ${attempt + 1}/$SOCKS_PROBE_RETRIES failed")
+                if (BuildConfig.DEBUG && maxAttempts > 1) {
+                    Log.d(TAG, "SOCKS probe attempt ${attempt + 1}/$maxAttempts failed (port ${socksPort()})")
                 }
-                if (attempt < SOCKS_PROBE_RETRIES - 1) {
+                if (attempt < maxAttempts - 1) {
                     Thread.sleep(SOCKS_PROBE_INTERVAL_MS)
                 }
             }
+            if (BuildConfig.DEBUG && maxAttempts > 1) {
+                Log.w(TAG, "SOCKS proxy not reachable after $maxAttempts probes")
+            }
+            false
         }
-        if (BuildConfig.DEBUG) Log.w(TAG, "SOCKS proxy not reachable after $SOCKS_PROBE_RETRIES probes")
-        false
+
+    private fun probeSocksPortBlocking(port: Int): Boolean {
+        if (port <= 0) return false
+        return try {
+            java.net.Socket().use { socket ->
+                socket.connect(
+                    java.net.InetSocketAddress("127.0.0.1", port),
+                    SOCKS_PROBE_TIMEOUT_MS,
+                )
+            }
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private suspend fun isNetworkReady(): Boolean =
+        withContext(Dispatchers.IO) {
+            isNetworkReadyBlocking(torService)
+        }
+
+    /**
+     * True when SOCKS accepts connections AND Tor reports a finished bootstrap
+     * (or an established circuit). SOCKS alone is not enough — it listens early.
+     *
+     * Needed because tor-android 0.4.9.6 can leave [TorService.STATUS_ON] forever
+     * unbroadcast when control-event wiring mismatches the daemon event stream.
+     */
+    private fun isNetworkReadyBlocking(service: TorService?): Boolean {
+        if (service == null) return false
+        captureSocksPort(service)
+        val socksOk =
+            probeSocksPortBlocking(socksPort()) ||
+                (service.socksPort > 0 && probeSocksPortBlocking(service.socksPort))
+        if (!socksOk) return false
+
+        val control = runCatching { service.torControlConnection }.getOrNull() ?: return false
+        return try {
+            val circuit = control.getInfo("status/circuit-established")?.trim()
+            if (circuit == "1") return true
+
+            val bootstrap = control.getInfo("status/bootstrap-phase").orEmpty()
+            bootstrapContainsDone(bootstrap)
+        } catch (e: Exception) {
+            if (BuildConfig.DEBUG) Log.d(TAG, "Control readiness probe failed: ${e.message}")
+            false
+        }
+    }
+
+    private fun bootstrapContainsDone(bootstrap: String): Boolean {
+        if (bootstrap.isBlank()) return false
+        // Typical: "NOTICE BOOTSTRAP PROGRESS=100 TAG=done SUMMARY=\"Done\""
+        if (bootstrap.contains("PROGRESS=100", ignoreCase = true)) return true
+        if (bootstrap.contains("TAG=done", ignoreCase = true)) return true
+        if (bootstrap.contains("Bootstrapped 100%", ignoreCase = true)) return true
+        return false
+    }
+
+    private fun updateBootstrapMessageFromControl() {
+        val service = torService ?: return
+        val control = runCatching { service.torControlConnection }.getOrNull() ?: return
+        val bootstrap =
+            runCatching { control.getInfo("status/bootstrap-phase") }
+                .getOrNull()
+                ?.trim()
+                .orEmpty()
+        if (bootstrap.isBlank()) return
+
+        val progress =
+            Regex("""PROGRESS=(\d+)""", RegexOption.IGNORE_CASE)
+                .find(bootstrap)
+                ?.groupValues
+                ?.getOrNull(1)
+        val summary =
+            Regex("""SUMMARY="([^"]*)"""", RegexOption.IGNORE_CASE)
+                .find(bootstrap)
+                ?.groupValues
+                ?.getOrNull(1)
+                ?.take(60)
+
+        val message =
+            when {
+                progress != null && summary != null -> "Bootstrapped $progress% — $summary"
+                progress != null -> "Bootstrapped $progress%"
+                else -> bootstrap.take(100)
+            }
+
+        val current = _torState.value
+        if (current.status == TorStatus.STARTING || current.status == TorStatus.CONNECTING) {
+            if (current.statusMessage != message) {
+                _torState.value =
+                    current.copy(
+                        status = TorStatus.CONNECTING,
+                        statusMessage = message,
+                    )
+            }
+        }
+    }
+
+    private fun markConnected(message: String) {
+        captureSocksPort(torService)
+        cancelStuckStartWatchdog()
+        if (_torState.value.status != TorStatus.CONNECTED ||
+            _torState.value.statusMessage != message
+        ) {
+            _torState.value =
+                TorState(
+                    status = TorStatus.CONNECTED,
+                    statusMessage = message,
+                )
+        }
+    }
+
+    private fun captureSocksPort(service: TorService?) {
+        if (service == null) return
+        try {
+            val port = service.socksPort
+            if (port > 0) {
+                socksPortRef.set(port)
+                if (BuildConfig.DEBUG && port != DEFAULT_SOCKS_PORT) {
+                    Log.d(TAG, "Tor SOCKS listening on non-default port $port")
+                }
+            }
+        } catch (e: Exception) {
+            if (BuildConfig.DEBUG) Log.e(TAG, "Unable to read Tor SOCKS port", e)
+        }
+    }
+
+    private fun armStuckStartWatchdog(generation: Int) {
+        stuckStartWatchdogJob?.cancel()
+        stuckStartWatchdogJob =
+            managerScope.launch {
+                delay(STUCK_START_RESET_MS)
+                synchronized(this@TorManager) {
+                    if (generation != startGeneration) return@synchronized
+                    val status = _torState.value.status
+                    if (status == TorStatus.STARTING || status == TorStatus.CONNECTING) {
+                        if (BuildConfig.DEBUG) {
+                            Log.w(TAG, "Tor still $status after ${STUCK_START_RESET_MS}ms; forcing stop")
+                        }
+                        // stop() increments generation and clears binding.
+                        stop()
+                    }
+                }
+            }
+    }
+
+    private fun cancelStuckStartWatchdog() {
+        stuckStartWatchdogJob?.cancel()
+        stuckStartWatchdogJob = null
+    }
+
+    /** Drop binding/receiver without the STOPPING settle delay (internal recovery). */
+    private fun forceResetLocked(appContext: Context) {
+        cancelStuckStartWatchdog()
+        try {
+            if (isBound) {
+                appContext.unbindService(serviceConnection)
+            }
+        } catch (_: Exception) {
+        }
+        isBound = false
+        try {
+            if (isReceiverRegistered) {
+                appContext.unregisterReceiver(statusReceiver)
+            }
+        } catch (_: Exception) {
+        }
+        isReceiverRegistered = false
+        torService = null
+        stopTransitionJob?.cancel()
+        stopTransitionJob = null
+        restartAfterStopRequested = false
+        _torState.value =
+            TorState(
+                status = TorStatus.DISCONNECTED,
+                statusMessage = "Reset",
+            )
     }
 
     /**

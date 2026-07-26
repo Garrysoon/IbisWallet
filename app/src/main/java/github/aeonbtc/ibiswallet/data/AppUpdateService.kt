@@ -50,6 +50,7 @@ class AppUpdateService(
         private const val GITHUB_RELEASES_API_URL = "https://api.github.com/repos/aeonBTC/IbisWallet/releases"
         private const val USER_AGENT = "IbisWallet-UpdateCheck"
         private const val TIMEOUT_SECONDS = 15L
+        private const val MAX_RELEASE_NOTES_CHARS = 8_000
 
         /**
          * The release URL is opened in a browser with no further checks — only
@@ -64,6 +65,21 @@ class AppUpdateService(
                 trimmed
             } else {
                 DEFAULT_RELEASES_PAGE_URL
+            }
+        }
+
+        private fun sanitizeReleaseNotes(raw: String): String {
+            val normalized =
+                raw
+                    .replace("\r\n", "\n")
+                    .replace('\r', '\n')
+                    .replace("\u0000", "")
+                    .trim()
+            if (normalized.isEmpty()) return ""
+            return if (normalized.length <= MAX_RELEASE_NOTES_CHARS) {
+                normalized
+            } else {
+                normalized.take(MAX_RELEASE_NOTES_CHARS).trimEnd() + "…"
             }
         }
 
@@ -84,11 +100,13 @@ class AppUpdateService(
                     if (release.optBoolean("prerelease") || !version.isStableOrBeta) continue
 
                     val htmlUrl = sanitizeReleaseUrl(release.optString("html_url"))
+                    val releaseNotes = sanitizeReleaseNotes(release.optString("body"))
                     add(
                         AppReleaseInfo(
                             versionName = tagName,
                             version = version,
                             htmlUrl = htmlUrl,
+                            releaseNotes = releaseNotes,
                         ),
                     )
                 }
@@ -121,4 +139,5 @@ data class AppReleaseInfo(
     val versionName: String,
     val version: AppVersion,
     val htmlUrl: String,
+    val releaseNotes: String = "",
 )

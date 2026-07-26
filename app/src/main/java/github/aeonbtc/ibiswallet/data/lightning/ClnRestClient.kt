@@ -42,9 +42,7 @@ import java.util.concurrent.TimeUnit
  * Default UI/port is clnrest on 3010 with TLS off until the user enables it;
  * supports Tor SOCKS and optional TLS cert pin.
  */
-class ClnRestClient(
-    private val torSocksPort: Int = 9050,
-) : LightningNodeBackend {
+class ClnRestClient : LightningNodeBackend {
     private var client: OkHttpClient? = null
     private var baseUrl: String = ""
     private var rune: String = ""
@@ -1359,7 +1357,7 @@ class ClnRestClient(
                 .retryOnConnectionFailure(!probeTimeouts)
 
         if (viaTor) {
-            applyTorProxy(builder, torSocksPort)
+            applyTorProxy(builder, github.aeonbtc.ibiswallet.tor.TorManager.socksPort())
             builder.protocols(listOf(Protocol.HTTP_1_1))
             // Small pool so parallel payment/on-chain RPCs reuse Tor circuits.
             builder.connectionPool(ConnectionPool(2, 45, TimeUnit.SECONDS))

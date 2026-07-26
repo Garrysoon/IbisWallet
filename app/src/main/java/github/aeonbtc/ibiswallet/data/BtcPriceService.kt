@@ -52,7 +52,6 @@ class BtcPriceService {
             DateTimeFormatter.ofPattern("MM/dd/yyyy", Locale.US)
         private const val TOR_TIMEOUT_SECONDS = 30L
         private const val TOR_PROXY_HOST = "127.0.0.1"
-        private const val TOR_PROXY_PORT = 9050
 
         private val mempoolFiatOptions =
             listOf(
@@ -179,18 +178,25 @@ class BtcPriceService {
             .readTimeout(TIMEOUT_SECONDS, TimeUnit.SECONDS)
             .build()
 
-    private val torClient by lazy {
+    private fun torClient(): OkHttpClient =
         OkHttpClient.Builder()
             .connectTimeout(TOR_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             .readTimeout(TOR_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             .writeTimeout(TOR_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-            .proxy(Proxy(Proxy.Type.SOCKS, InetSocketAddress(TOR_PROXY_HOST, TOR_PROXY_PORT)))
+            .proxy(
+                Proxy(
+                    Proxy.Type.SOCKS,
+                    InetSocketAddress(
+                        TOR_PROXY_HOST,
+                        github.aeonbtc.ibiswallet.tor.TorManager.socksPort(),
+                    ),
+                ),
+            )
             .dns { hostname ->
                 // Send hostname through SOCKS5 proxy for Tor resolution, avoiding DNS leaks
                 listOf(InetAddress.getByAddress(hostname, byteArrayOf(0, 0, 0, 0)))
             }
             .build()
-    }
 
     /**
      * Fetch BTC/USD price from mempool.space
@@ -251,7 +257,7 @@ class BtcPriceService {
                         .header("Accept", "application/json")
                         .build()
 
-                val response = torClient.newCall(request).execute()
+                val response = torClient().newCall(request).execute()
 
                 response.use {
                     if (!it.isSuccessful) {
@@ -296,7 +302,7 @@ class BtcPriceService {
         fetchHistoricalSeries(
             url = MEMPOOL_ONION_HISTORICAL_PRICE_URL,
             currencyCode = currencyCode,
-            client = torClient,
+            client = torClient(),
             logLabel = "Mempool onion historical price",
         )
 

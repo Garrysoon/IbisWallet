@@ -61,7 +61,6 @@ data class BoltzFetchedBolt12Invoice(
 class BoltzApiClient(
     private val baseHttpClient: OkHttpClient,
     private val useTor: () -> Boolean,
-    private val torSocksPort: Int = 9050,
 ) : BoltzSwapUpdatesSource {
     companion object {
         private const val MAINNET_URL = "https://api.boltz.exchange"
@@ -93,7 +92,12 @@ class BoltzApiClient(
     private fun httpClient(): OkHttpClient {
         return if (useTor()) {
             baseHttpClient.newBuilder()
-                .proxy(Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", torSocksPort)))
+                .proxy(
+                    Proxy(
+                        Proxy.Type.SOCKS,
+                        InetSocketAddress("127.0.0.1", github.aeonbtc.ibiswallet.tor.TorManager.socksPort()),
+                    ),
+                )
                 .build()
         } else {
             baseHttpClient
@@ -111,7 +115,12 @@ class BoltzApiClient(
             .pingInterval(30, TimeUnit.SECONDS)
             .readTimeout(0, TimeUnit.SECONDS)
         if (useTor()) {
-            builder.proxy(Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", torSocksPort)))
+            builder.proxy(
+                Proxy(
+                    Proxy.Type.SOCKS,
+                    InetSocketAddress("127.0.0.1", github.aeonbtc.ibiswallet.tor.TorManager.socksPort()),
+                ),
+            )
         }
         return builder.build()
     }

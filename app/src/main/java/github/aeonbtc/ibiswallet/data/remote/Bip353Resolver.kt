@@ -29,7 +29,6 @@ data class Bip353Resolution(
 class Bip353Resolver(
     private val baseHttpClient: OkHttpClient,
     private val useTor: () -> Boolean,
-    private val torSocksPort: Int = 9050,
 ) {
     companion object {
         private const val DOH_URL = "https://dns.google/resolve"
@@ -146,7 +145,12 @@ class Bip353Resolver(
             .callTimeout(timeoutSeconds + 5L, TimeUnit.SECONDS)
 
         if (useTor()) {
-            builder.proxy(Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", torSocksPort)))
+            builder.proxy(
+                Proxy(
+                    Proxy.Type.SOCKS,
+                    InetSocketAddress("127.0.0.1", github.aeonbtc.ibiswallet.tor.TorManager.socksPort()),
+                ),
+            )
             builder.dns { hostname ->
                 listOf(InetAddress.getByAddress(hostname, byteArrayOf(0, 0, 0, 0)))
             }

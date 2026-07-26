@@ -46,7 +46,6 @@ import kotlin.coroutines.resumeWithException
 class SideSwapApiClient(
     private val httpClient: OkHttpClient,
     private val useTor: () -> Boolean = { false },
-    private val torSocksPort: Int = 9050,
 ) {
     private var webSocket: WebSocket? = null
     private val requestId = AtomicInteger(1)
@@ -65,7 +64,12 @@ class SideSwapApiClient(
         val builder = httpClient.newBuilder()
             .pingInterval(30, TimeUnit.SECONDS)
         if (useTor()) {
-            builder.proxy(Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", torSocksPort)))
+            builder.proxy(
+                Proxy(
+                    Proxy.Type.SOCKS,
+                    InetSocketAddress("127.0.0.1", github.aeonbtc.ibiswallet.tor.TorManager.socksPort()),
+                ),
+            )
             // Force hostname resolution through SOCKS5 so Tor handles DNS remotely.
             builder.dns { hostname ->
                 listOf(InetAddress.getByAddress(hostname, byteArrayOf(0, 0, 0, 0)))

@@ -34,7 +34,6 @@ data class LnurlPayInvoice(
 class LnurlPayResolver(
     private val baseHttpClient: OkHttpClient,
     private val useTor: () -> Boolean,
-    private val torSocksPort: Int = 9050,
 ) {
     companion object {
         private const val CONNECT_TIMEOUT_SECONDS = 15L
@@ -159,7 +158,12 @@ class LnurlPayResolver(
             .followSslRedirects(false)
 
         if (useTor()) {
-            builder.proxy(Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", torSocksPort)))
+            builder.proxy(
+                Proxy(
+                    Proxy.Type.SOCKS,
+                    InetSocketAddress("127.0.0.1", github.aeonbtc.ibiswallet.tor.TorManager.socksPort()),
+                ),
+            )
             builder.dns { hostname ->
                 listOf(InetAddress.getByAddress(hostname, byteArrayOf(0, 0, 0, 0)))
             }

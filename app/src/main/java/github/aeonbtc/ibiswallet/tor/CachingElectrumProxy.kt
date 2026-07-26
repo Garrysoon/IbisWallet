@@ -85,7 +85,7 @@ class CachingElectrumProxy(
     private val useSsl: Boolean = false,
     private val useTorProxy: Boolean = false,
     private val torSocksHost: String = "127.0.0.1",
-    private val torSocksPort: Int = 9050,
+    private val torSocksPortProvider: () -> Int = { TorManager.socksPort() },
     private val connectionTimeoutMs: Int = 60000,
     private val soTimeoutMs: Int = 60000,
     private val sslTrustManager: TofuTrustManager? = null,
@@ -1916,7 +1916,11 @@ class CachingElectrumProxy(
             try {
                 rawSocket =
                     if (useTorProxy) {
-                        val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress(torSocksHost, torSocksPort))
+                        val proxy =
+                            Proxy(
+                                Proxy.Type.SOCKS,
+                                InetSocketAddress(torSocksHost, torSocksPortProvider()),
+                            )
                         Socket(proxy).also {
                             it.soTimeout = readTimeoutMs
                             it.connect(
